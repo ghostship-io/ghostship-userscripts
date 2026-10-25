@@ -1,1 +1,1 @@
-Durable queue core (state machine, IndexedDB store, dispatch boundary, cross-tab lease). Logic only: the above-composer UI and the live adapter build on `index.js`; every send and stop goes through `DispatchBoundary`, and `DryRunDispatcher` is the no-side-effect adapter.
+Queue: `queue.js`/`store.js` (durable state machine, IndexedDB, cross-tab lease), `dispatch.js` (single send/stop boundary and the dry-run adapter), `controller.js`/`view.js` (panel above the composer). The page always uses `DryRunDispatcher` until a live adapter exists; tests never touch ChatGPT.

@@ -6,7 +6,7 @@ import { createScrollManager } from "./scroll-manager.js";
 import { buildPromptIndex } from "./prompt-index.js";
 import { assertBackend, createNoopBackend } from "./virtualization.js";
 
-export function createRuntime({ win, adapter, backend = createNoopBackend(), config = loadConfig(win.localStorage) }) {
+export function createRuntime({ win, adapter, backend = createNoopBackend(), queueUi, config = loadConfig(win.localStorage) }) {
   const diagnostics = createDiagnostics(win.console);
   const runtime = { config, diagnostics, mode: "off", promptIndex: [], dispose() {} };
   if (!config.enabled) return runtime;
@@ -24,6 +24,15 @@ export function createRuntime({ win, adapter, backend = createNoopBackend(), con
   const scroll = createScrollManager({ scroller: adapter.scroller(win.document), diagnostics });
   assertBackend(backend);
 
+  // Independent of virtualization: a failure here removes only the queue panel.
+  let queue = { dispose() {} };
+  try {
+    queue = queueUi?.({ win, adapter, config, diagnostics }) ?? queue;
+  } catch (error) {
+    diagnostics.count("queue.mount.failed");
+    diagnostics.warnOnce("queue", `queue UI disabled (${error instanceof Error ? error.message : error})`);
+  }
+
   // Fail open: drop every hook and leave native ChatGPT behaviour in place.
   let stop = () => {};
   const failOpen = (reason) => {
@@ -31,7 +40,7 @@ export function createRuntime({ win, adapter, backend = createNoopBackend(), con
     backend.unmount();
     observers.disposeAll();
     scroll.dispose();
-    Object.assign(runtime, { mode: "safe", scroll: undefined, observers: undefined, dispose() {} });
+    Object.assign(runtime, { mode: "safe", scroll: undefined, observers: undefined, dispose: () => queue.dispose() });
     diagnostics.count("virtualization.fallback");
     diagnostics.warnOnce("virtualization", `virtualization disabled (${reason}); running in safe mode`);
   };
@@ -52,7 +61,9 @@ export function createRuntime({ win, adapter, backend = createNoopBackend(), con
     mode: "active",
     scroll,
     observers,
+    queue,
     dispose() {
+      queue.dispose();
       stop();
       observers.disposeAll();
       backend.unmount();

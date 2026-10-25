@@ -10,6 +10,9 @@ export const chatgptAdapter = {
   role: (turn) => (turn.matches(ROLE) ? turn : turn.querySelector(ROLE))?.getAttribute("data-message-author-role") || null,
   userMessage: (turn) => turn.querySelector(USER),
   turnId: (turn, index) => turn.getAttribute("data-testid") ?? `turn-${index}`,
+  /** The element the queue panel is inserted directly before: the composer form, else the input itself. */
+  composer: (doc) => doc.querySelector(COMPOSER)?.closest("form") ?? doc.querySelector(COMPOSER),
+  conversationId: (win) => win.location.pathname.match(/^\/c\/([\w-]+)/)?.[1] ?? "new",
   scroller: (doc) => doc.querySelector("[data-scroll-root]") ?? doc.scrollingElement ?? doc.documentElement,
   selfCheck(doc) {
     const missing = [];
