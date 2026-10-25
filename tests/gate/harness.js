@@ -72,7 +72,8 @@ export const bundleSource = () => readFileSync(BUNDLE_PATH, "utf8");
 /**
  * DryRunDispatcher that also records protocol violations as they happen: a
  * submit while the conversation is not idle (the queue must wait, or stop first
- * and only send once the stop took effect).
+ * and only send once the stop took effect) and a second send of the same text
+ * without a user decision in between.
  */
 export class GuardedDispatcher extends DryRunDispatcher {
   violations = [];
@@ -80,8 +81,15 @@ export class GuardedDispatcher extends DryRunDispatcher {
     if (this.state !== "idle") this.violations.push(`submit:${request.itemId} while ${this.state}`);
     return super.submit(request);
   }
-  submits(itemId) {
-    return this.log.filter((e) => e.type === "submit" && (itemId === undefined || e.request.itemId === itemId)).length;
+  async steer(request) {
+    if (this.state !== "generating") this.violations.push(`steer:${request.itemId} while ${this.state}`);
+    return super.steer(request);
+  }
+  submits() {
+    return this.log.filter((e) => e.type === "submit" || e.type === "steer").length;
+  }
+  sentTexts() {
+    return this.log.filter((e) => e.type === "submit" || e.type === "steer").map((e) => e.request.text);
   }
   stops() {
     return this.log.filter((e) => e.type === "stop").length;

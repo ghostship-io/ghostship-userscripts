@@ -1,5 +1,5 @@
-// The live dispatcher against a fake ChatGPT page built from DOM fixtures. Nothing here
-// touches the network or the real site: "Send" and "Stop" are buttons on a jsdom page.
+// The live dispatcher against a fake ChatGPT page built from DOM fixtures. Nothing here touches the network or the real
+// site: "Send" and "Stop" are buttons on a jsdom page.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { chatgptAdapter } from "../src/chatgpt/adapter.js";
@@ -7,254 +7,269 @@ import { createLiveDispatcher } from "../src/chatgpt/queue/live-dispatcher.js";
 import { selectDispatcher } from "../src/chatgpt/queue/select.js";
 import { DryRunDispatcher } from "../src/chatgpt/queue/dispatch.js";
 import { DEFAULTS } from "../src/core/config.js";
-import { CONV, World, until } from "./queue-helpers.js";
-import { loadFixture } from "./helpers.js";
+import { World } from "./queue-helpers.js";
+import { TARGET, fakePage } from "./fake-page.js";
 
-/** A page that behaves like ChatGPT's composer: Send enables on input, a send starts streaming, Stop ends it. */
-async function fakePage({ editable = "textarea", acknowledges = true, stopWorks = true } = {}) {
-  const dom = await loadFixture();
-  const { window } = dom;
-  const doc = window.document;
-  const old = doc.querySelector("#prompt-textarea");
-  const form = doc.createElement("form");
-  form.id = "composer";
-  let input;
-  if (editable === "textarea") {
-    input = old;
-  } else {
-    input = doc.createElement("div");
-    input.id = "prompt-textarea";
-    input.setAttribute("contenteditable", "true");
-    old.remove();
-    // jsdom has no execCommand; emulate what ProseMirror does with insertText / delete.
-    doc.execCommand = (command, _ui, value) => {
-      input.textContent = command === "insertText" ? value : "";
-      input.dispatchEvent(new window.Event("input", { bubbles: true }));
-      return true;
-    };
-  }
-  form.append(input);
-  doc.querySelector("main").append(form);
-
-  const page = { window, doc, input, form, log: [], streaming: false, send: null, stop: null };
-  const text = () => (editable === "textarea" ? input.value : input.textContent);
-  const clear = () => (editable === "textarea" ? (input.value = "") : (input.textContent = ""));
-  page.type = (value) => {
-    if (editable === "textarea") input.value = value;
-    else input.textContent = value;
-    input.dispatchEvent(new window.Event("input", { bubbles: true }));
-  };
-  const syncSend = () => page.send && (page.send.disabled = text().trim() === "");
-  const addTurn = (role, content) => {
-    const turn = doc.createElement("article");
-    turn.setAttribute("data-testid", `conversation-turn-${100 + doc.querySelectorAll("article").length}`);
-    turn.innerHTML = `<div data-message-author-role="${role}"></div>`;
-    turn.firstChild.textContent = content;
-    doc.querySelector("[data-scroll-root]").append(turn);
-  };
-  page.startStreaming = () => {
-    page.streaming = true;
-    page.send?.remove();
-    page.send = null;
-    page.stop = doc.createElement("button");
-    page.stop.type = "button";
-    page.stop.setAttribute("data-testid", "stop-button");
-    page.stop.addEventListener("click", () => {
-      page.log.push("stop");
-      if (stopWorks) page.finishStreaming();
-    });
-    form.append(page.stop);
-  };
-  page.finishStreaming = () => {
-    page.streaming = false;
-    page.stop?.remove();
-    page.stop = null;
-    page.mountSend();
-    addTurn("assistant", "reply");
-  };
-  page.mountSend = () => {
-    page.send = doc.createElement("button");
-    page.send.type = "button";
-    page.send.setAttribute("data-testid", "send-button");
-    page.send.addEventListener("click", () => {
-      if (page.send.disabled) return;
-      page.log.push(`send:${text().trim()}`);
-      if (!acknowledges) return;
-      addTurn("user", text().trim());
-      clear();
-      page.startStreaming();
-    });
-    form.append(page.send);
-    syncSend();
-  };
-  input.addEventListener("input", syncSend);
-  page.mountSend();
-  page.sends = () => page.log.filter((e) => e.startsWith("send:"));
-  page.dispatcher = (opts = {}) =>
-    createLiveDispatcher({ win: window, adapter: chatgptAdapter, pollMs: 1, buttonWaitMs: 40, ackMs: 40, stopWaitMs: 40, ...opts });
-  page.text = text;
-  return page;
+/** A dispatcher with short real waits and a hand-driven clock for the "long wait" rules. */
+function dispatcherFor(page, opts = {}) {
+  const clock = { t: 1_000_000 };
+  const dispatcher = createLiveDispatcher({
+    win: page.window,
+    adapter: chatgptAdapter,
+    pollMs: 1,
+    settleMs: 500,
+    sendWaitMs: 40,
+    steerWaitMs: 15,
+    ackMs: 40,
+    stopWaitMs: 40,
+    composerLostMs: 10_000,
+    now: () => clock.t,
+    ...opts,
+  });
+  return Object.assign(dispatcher, { clock });
 }
 
-const request = (itemId, text, extra = {}) => ({ itemId, attemptId: `${itemId}-a`, conversationId: CONV, text, attachments: [], ...extra });
+const request = (itemId, text, extra = {}) => ({ itemId, ...TARGET, text, attachments: [], ...extra });
+
+async function engineOn(page, opts) {
+  const w = new World();
+  const dispatcher = dispatcherFor(page, opts);
+  const tab = await w.tab("A", {}, dispatcher);
+  return { w, dispatcher, engine: tab.engine, store: tab.store };
+}
+
+test("Stop is showing and no Send exists for 60+ seconds: the queue waits, with zero attempts and zero clicks; one send once it settles", async () => {
+  // Defect: the shipped dispatcher exhausted its retries with `Send button was not found` while Stop was visible.
+  const page = await fakePage();
+  page.send.remove();
+  page.send = null;
+  page.startStreaming();
+  const { engine, dispatcher, w } = await engineOn(page);
+  await engine.append(TARGET, { text: "first" });
+  await engine.append(TARGET, { text: "second" });
+  const before = JSON.stringify((await engine.view(TARGET)).pending);
+
+  for (let second = 0; second < 90; second++) {
+    dispatcher.clock.t += 1_000;
+    w.clock.advance(1_000);
+    const outcome = await engine.step(TARGET);
+    assert.deepEqual(outcome, { kind: "waiting", reason: "generating" });
+  }
+  assert.deepEqual(page.log, [], "no click of any kind");
+  assert.equal(JSON.stringify((await engine.view(TARGET)).pending), before, "the prompt is untouched: no attempt counted, no error recorded");
+  assert.equal((await engine.view(TARGET)).inflight, null);
+
+  page.finishStreaming();
+  assert.deepEqual(await engine.step(TARGET), { kind: "waiting", reason: "settling" }, "a short settle before staging");
+  dispatcher.clock.t += 1_000;
+  assert.equal((await engine.step(TARGET)).kind, "sent");
+  assert.deepEqual(page.sends(), ["send:first\n\nsecond"]);
+  assert.equal(page.text(), "", "the composer is left empty");
+  page.finishStreaming();
+  dispatcher.clock.t += 1_000;
+  assert.equal((await engine.step(TARGET)).kind, "idle");
+  assert.equal(page.sends().length, 1);
+});
+
+test("a missing data-testid is not read as idle: a labelled Stop, or a reply still marked streaming, both mean generating", async () => {
+  // Defect: treating the absence of one selector as "response finished" and sending into a running response.
+  const labelled = await fakePage();
+  labelled.startStreaming();
+  labelled.stop.removeAttribute("data-testid");
+  labelled.stop.setAttribute("aria-label", "Stop streaming");
+  assert.equal(chatgptAdapter.generating(labelled.doc), true);
+  assert.deepEqual(await dispatcherFor(labelled).readiness(TARGET), { state: "waiting", reason: "generating" });
+
+  const marked = await fakePage();
+  marked.doc.querySelector("[data-scroll-root]").insertAdjacentHTML("beforeend", `<article data-testid="conversation-turn-9"><div data-message-author-role="assistant" class="result-streaming">…</div></article>`);
+  assert.equal(chatgptAdapter.generating(marked.doc), true);
+  assert.equal((await dispatcherFor(marked).readiness(TARGET)).reason, "generating");
+  assert.deepEqual(marked.log, []);
+
+  const idle = await fakePage();
+  assert.equal(chatgptAdapter.generating(idle.doc), false);
+});
 
 for (const editable of ["textarea", "contenteditable"]) {
-  test(`live send (${editable}): the queue fills the composer, clicks Send once, and records the item as sent`, async () => {
-    // Defect: a live queue that never reaches the page, or sends twice.
-    const page = await fakePage({ editable });
-    const w = new World();
-    const { engine } = await w.tab("A", {}, page.dispatcher());
-    const a = await engine.enqueue(CONV, { text: "first message" });
-    const b = await engine.enqueue(CONV, { text: "second message" });
-
-    assert.deepEqual(await engine.step(CONV), { kind: "sent", itemId: a.id });
-    assert.deepEqual(page.sends(), ["send:first message"]);
-    assert.equal(page.text(), "", "the composer is left empty");
+  test(`live send (${editable}): the whole merged text, blank lines intact, is staged, Send is clicked once, the prompt is gone`, async () => {
+    // Defect: a live queue that never reaches the page, flattens the blank lines, or sends twice.
+    const page = await fakePage({ editable, sendOnlyWithText: true });
+    const { engine, dispatcher } = await engineOn(page);
+    for (const part of ["A", "B\nsecond line", "C"]) await engine.append(TARGET, { text: part });
+    dispatcher.clock.t += 5_000;
+    assert.equal((await engine.step(TARGET)).kind, "sent");
+    assert.deepEqual(page.sends(), ["send:A\n\nB\nsecond line\n\nC"]);
+    assert.equal(page.text(), "");
     assert.equal(page.doc.querySelectorAll('[data-message-author-role="user"]').length, 3);
-
-    // The reply is streaming: the queue waits and never presses Stop on its own.
-    for (let i = 0; i < 3; i++) assert.deepEqual(await engine.step(CONV), { kind: "waiting", reason: "generating" });
-    assert.deepEqual(page.log, ["send:first message"]);
-
-    page.finishStreaming();
-    assert.deepEqual(await engine.step(CONV), { kind: "sent", itemId: b.id });
-    assert.deepEqual(page.sends(), ["send:first message", "send:second message"]);
-    assert.deepEqual((await engine.list(CONV)).items.map((i) => i.status), ["sent", "sent"]);
+    assert.equal((await engine.view(TARGET)).pending, null);
   });
 }
 
-test("interrupt then send: Stop is clicked first, the stream really ends, and only the next item is sent", async () => {
-  // Defect: sending before the stop took effect, or sending more than the next item.
-  const page = await fakePage();
-  page.type("");
-  page.startStreaming();
-  const w = new World();
-  const { engine } = await w.tab("A", {}, page.dispatcher());
-  const a = await engine.enqueue(CONV, { text: "urgent" });
-  await engine.enqueue(CONV, { text: "later" });
-
-  assert.deepEqual(await engine.interruptAndSendNext(CONV), { kind: "sent", itemId: a.id });
-  assert.deepEqual(page.log, ["stop", "send:urgent"]);
-  assert.equal((await engine.list(CONV)).items[1].status, "pending");
+test("Send never becomes enabled after the response settled: the staged text is taken back, nothing is clicked, and the prompt is held (not retried)", async () => {
+  // Defect: leaving the user's composer filled, or looping on a missing Send button.
+  const page = await fakePage({ sendMissing: true });
+  const { engine, dispatcher } = await engineOn(page);
+  await engine.append(TARGET, { text: "x" });
+  dispatcher.clock.t += 5_000;
+  const outcome = await engine.step(TARGET);
+  assert.equal(outcome.kind, "rejected");
+  assert.equal(outcome.error.code, "send-unavailable");
+  assert.equal(page.text(), "", "the text it placed is taken back out");
+  assert.deepEqual(page.log, []);
+  for (let i = 0; i < 4; i++) assert.equal((await engine.step(TARGET)).kind, "halted");
+  const view = await engine.view(TARGET);
+  assert.equal(view.pending.text, "x");
+  assert.equal(view.pending.status, "blocked");
+  assert.deepEqual(page.log, []);
 });
 
-test("interrupt when Stop has no effect: nothing is sent and the item stays pending with an error", async () => {
+test("a user draft in the composer is never overwritten: the queue waits for it to clear", async () => {
+  // Defect: clobbering what the user is typing.
+  const page = await fakePage();
+  page.type("my own half-written thought");
+  const { engine, dispatcher } = await engineOn(page);
+  await engine.append(TARGET, { text: "queued" });
+  dispatcher.clock.t += 5_000;
+  for (let i = 0; i < 3; i++) assert.deepEqual(await engine.step(TARGET), { kind: "waiting", reason: "composer-has-draft" });
+  assert.equal(page.text(), "my own half-written thought");
+  assert.deepEqual(page.log, []);
+});
+
+test("the prompt belongs to its conversation and account: on any other page nothing is typed or clicked", async () => {
+  // Defect: A's text being typed into whichever conversation is visible when the response ends.
+  const page = await fakePage({ profile: "Some Person" });
+  const account = chatgptAdapter.accountId(page.doc);
+  assert.match(account, /^acct-[0-9a-f]{16}$/);
+  assert.ok(!account.includes("Some"), "the label is hashed, never kept");
+  const { engine, dispatcher } = await engineOn(page);
+  const elsewhere = { accountId: account, conversationId: "another-conversation" };
+  await engine.append(elsewhere, { text: "not for this page" });
+  dispatcher.clock.t += 5_000;
+  assert.deepEqual(await engine.step(elsewhere), { kind: "waiting", reason: "other-conversation" });
+
+  const otherAccount = { accountId: "acct-0000000000000000", conversationId: "fixture" };
+  await engine.append(otherAccount, { text: "wrong account" });
+  assert.deepEqual(await engine.step(otherAccount), { kind: "waiting", reason: "other-conversation" });
+  assert.equal(page.text(), "");
+  assert.deepEqual(page.log, []);
+});
+
+test("navigating away while the text is staged: it is taken back out and nothing is clicked", async () => {
+  // Defect: the click landing in a different conversation than the one the prompt was queued for.
+  const page = await fakePage({ sendOnlyWithText: true });
+  const dispatcher = dispatcherFor(page, { sendWaitMs: 200 });
+  page.input.addEventListener("input", () => {
+    page.send?.disabled !== undefined && page.window.history.pushState({}, "", "/c/somewhere-else");
+  });
+  dispatcher.clock.t += 5_000;
+  const result = await dispatcher.submit(request("s1", "queued text"));
+  assert.deepEqual(result, { kind: "wait", reason: "other-conversation" });
+  assert.equal(page.text(), "");
+  assert.deepEqual(page.log, []);
+});
+
+test("Steer with a native steer control present clicks only that control, once, and never Stop", async () => {
+  // Defect: stopping a response when ChatGPT offered to steer it.
+  const page = await fakePage({ steer: true });
+  page.startStreaming();
+  const { engine } = await engineOn(page);
+  await engine.append(TARGET, { text: "A" });
+  await engine.append(TARGET, { text: "B" });
+  assert.equal((await engine.steer(TARGET)).kind, "sent");
+  assert.deepEqual(page.log, ["steer:A\n\nB"]);
+  assert.equal(page.streaming, true, "the running response was not interrupted");
+});
+
+test("Steer with no native steer control: the staged text is withdrawn, Stop is clicked, and the whole text is sent once after the stop", async () => {
+  // Defect: guessing at a steer path, leaving text in the composer, or sending before the stop took effect.
+  const page = await fakePage();
+  page.startStreaming();
+  const { engine, dispatcher } = await engineOn(page);
+  await engine.append(TARGET, { text: "A" });
+  await engine.append(TARGET, { text: "B" });
+  dispatcher.clock.t += 5_000;
+  assert.equal((await engine.steer(TARGET)).kind, "sent");
+  assert.deepEqual(page.log, ["stop", "send:A\n\nB"]);
+});
+
+test("Interrupt when Stop has no effect: nothing is sent and the prompt stays pending with an error", async () => {
   // Defect: pressing Send into a response that is still running.
   const page = await fakePage({ stopWorks: false });
   page.startStreaming();
-  const w = new World();
-  const { engine } = await w.tab("A", {}, page.dispatcher());
-  await engine.enqueue(CONV, { text: "urgent" });
-  const outcome = await engine.interruptAndSendNext(CONV);
+  const { engine } = await engineOn(page);
+  await engine.append(TARGET, { text: "urgent" });
+  const outcome = await engine.steer(TARGET, { native: false });
   assert.equal(outcome.kind, "interrupt-failed");
   assert.equal(outcome.error.code, "stop-unconfirmed");
   assert.deepEqual(page.log, ["stop"]);
-  assert.equal((await engine.list(CONV)).items[0].status, "pending");
+  assert.equal((await engine.view(TARGET)).pending.status, "pending");
 });
 
-test("fails closed: no composer, no Send button, a user draft, or attachments all send nothing", async () => {
-  // Defect: sending (or overwriting the user's draft) when the page is not in the expected shape.
-  const missingComposer = await fakePage();
-  const dispatcher = missingComposer.dispatcher();
-  missingComposer.input.remove();
-  assert.equal(await dispatcher.readState(), "unknown");
-  assert.deepEqual(await dispatcher.submit(request("i1", "x")), {
-    kind: "rejected", code: "composer-missing", message: "The ChatGPT composer was not found; nothing was sent.", retryable: true,
-  });
-  assert.deepEqual(missingComposer.log, []);
-
-  const noSend = await fakePage();
-  noSend.send.remove();
-  const rejected = await noSend.dispatcher().submit(request("i2", "x"));
-  assert.equal(rejected.code, "send-button-missing");
-  assert.equal(noSend.text(), "", "the text it placed is taken back out");
-  assert.deepEqual(noSend.log, []);
-
-  const draft = await fakePage();
-  draft.type("my own half-written thought");
-  const refused = await draft.dispatcher().submit(request("i3", "queued"));
-  assert.equal(refused.code, "composer-not-empty");
-  assert.equal(draft.text(), "my own half-written thought", "the draft is untouched");
-  assert.deepEqual(draft.log, []);
-
-  const streaming = await fakePage();
-  streaming.startStreaming();
-  assert.equal((await streaming.dispatcher().submit(request("i5", "x"))).code, "busy");
-  assert.deepEqual(streaming.log, []);
-
-  const attach = await fakePage();
-  const withFile = await attach.dispatcher().submit(request("i4", "x", { attachments: [{ name: "f.png", size: 1, type: "image/png", restorable: true }] }));
-  assert.equal(withFile.code, "attachments-unsupported");
-  assert.equal(withFile.retryable, false);
-  assert.deepEqual(attach.log, []);
-});
-
-test("through the queue, a missing composer waits rather than sends, and a vanished Send button retries within bounds", async () => {
-  // Defect: the engine pressing on when the composer or Send button is gone (no endless loop either).
-  const gone = await fakePage();
-  const w = new World();
-  const { engine } = await w.tab("A", { retryBackoffMs: [1000] }, gone.dispatcher());
-  await engine.enqueue(CONV, { text: "x" });
-  gone.input.remove();
-  assert.deepEqual(await engine.step(CONV), { kind: "waiting", reason: "unknown-state" });
-
-  const noSend = await fakePage();
-  const w2 = new World();
-  const t2 = await w2.tab("A", { maxAttempts: 2, retryBackoffMs: [1000] }, noSend.dispatcher());
-  const b = await t2.engine.enqueue(CONV, { text: "x" });
-  noSend.send.remove();
-  assert.equal((await t2.engine.step(CONV)).kind, "retry-scheduled");
-  w2.clock.advance(1000);
-  assert.deepEqual(await t2.engine.step(CONV), { kind: "failed", itemId: b.id });
-  assert.deepEqual(noSend.log, []);
-});
-
-test("a click ChatGPT never acknowledges goes to manual review and is never clicked again", async () => {
+test("a click ChatGPT never acknowledges goes to review and is never clicked again", async () => {
   // Defect: blind retry of a message that may have been delivered.
   const page = await fakePage({ acknowledges: false });
-  const w = new World();
-  const { engine } = await w.tab("A", {}, page.dispatcher());
-  const a = await engine.enqueue(CONV, { text: "maybe sent" });
-  assert.deepEqual(await engine.step(CONV), { kind: "manual-review", itemId: a.id });
+  const { engine, dispatcher, w } = await engineOn(page);
+  await engine.append(TARGET, { text: "maybe sent" });
+  dispatcher.clock.t += 5_000;
+  assert.equal((await engine.step(TARGET)).kind, "manual-review");
   for (let i = 0; i < 3; i++) {
     w.clock.advance(60_000);
-    assert.equal((await engine.step(CONV)).kind, "halted");
+    dispatcher.clock.t += 60_000;
+    assert.equal((await engine.step(TARGET)).kind, "halted");
   }
   assert.deepEqual(page.sends(), ["send:maybe sent"]);
 });
 
-test("the dispatcher itself refuses to click twice for one item", async () => {
-  // Defect: a re-entrant or repeated submit of the same item doubling the message.
+test("the dispatcher itself refuses to click twice for one snapshot", async () => {
+  // Defect: a re-entrant or repeated submit of the same snapshot doubling the message.
   const page = await fakePage();
-  const dispatcher = page.dispatcher();
+  const dispatcher = dispatcherFor(page);
+  dispatcher.clock.t += 5_000;
   assert.equal((await dispatcher.submit(request("same", "once"))).kind, "accepted");
   page.finishStreaming();
+  dispatcher.clock.t += 5_000;
   assert.equal((await dispatcher.submit(request("same", "once"))).kind, "uncertain");
   assert.equal(page.sends().length, 1);
 });
 
-test("reload while another tab holds the lease: no duplicate send, and after expiry the item is quarantined, not resent", async () => {
-  // Defect: a reloaded page re-sending the item the previous page was in the middle of sending.
-  const oldPage = await fakePage({ acknowledges: false });
-  const w = new World();
-  const first = await w.tab("before-reload", {}, oldPage.dispatcher({ ackMs: 10_000 }));
-  const a = await first.engine.enqueue(CONV, { text: "in flight" });
-  const sending = first.engine.step(CONV);
-  await until(() => oldPage.sends().length === 1);
+test("fails closed: attachments are refused, a lost composer is waited for and then held, a busy page is waited on", async () => {
+  // Defect: sending (or overwriting a draft) when the page is not in the expected shape.
+  const attach = await fakePage();
+  const withFile = await dispatcherFor(attach).submit(request("f", "x", { attachments: [{ name: "f.png", size: 1, type: "image/png", restorable: true }] }));
+  assert.equal(withFile.code, "attachments-unsupported");
+  assert.deepEqual(attach.log, []);
 
-  const newPage = await fakePage();
-  const second = await w.tab("after-reload", {}, newPage.dispatcher());
-  assert.equal((await second.engine.step(CONV)).kind, "not-leader");
-  assert.equal((await second.engine.step(CONV)).kind, "not-leader");
-  assert.deepEqual(newPage.log, [], "the reloaded page sent nothing while the lease was held");
+  const lost = await fakePage();
+  const dispatcher = dispatcherFor(lost);
+  lost.input.remove();
+  assert.equal(await dispatcher.readState(), "unknown");
+  assert.deepEqual(await dispatcher.readiness(TARGET), { state: "waiting", reason: "composer-missing" });
+  dispatcher.clock.t += 20_000;
+  const held = await dispatcher.readiness(TARGET);
+  assert.equal(held.state, "blocked");
+  assert.equal(held.code, "composer-lost");
+  assert.deepEqual(lost.log, []);
 
-  w.clock.advance(20_000); // the old page never comes back; its lease expires
-  assert.deepEqual(await second.engine.step(CONV), { kind: "halted", itemId: a.id, status: "manual-review" });
-  assert.deepEqual(newPage.log, []);
-  oldPage.type(""); // the old page finally shows a sign of life; its late result must not trigger any new click
-  await sending;
-  assert.deepEqual(newPage.log, []);
-  assert.equal(oldPage.sends().length, 1);
+  const busy = await fakePage();
+  busy.startStreaming();
+  assert.deepEqual(await dispatcherFor(busy).submit(request("b", "x")), { kind: "wait", reason: "generating" });
+  assert.deepEqual(busy.log, []);
+});
+
+test("through the queue a lost composer is waited for first, then held once: no retry storm", async () => {
+  // Defect: retrying a vanished composer forever.
+  const page = await fakePage();
+  const { engine, dispatcher } = await engineOn(page);
+  await engine.append(TARGET, { text: "x" });
+  page.input.remove();
+  for (let i = 0; i < 5; i++) {
+    dispatcher.clock.t += 1_000;
+    assert.deepEqual(await engine.step(TARGET), { kind: "waiting", reason: "composer-missing" });
+  }
+  dispatcher.clock.t += 20_000;
+  assert.deepEqual(await engine.step(TARGET), { kind: "halted", itemId: (await engine.view(TARGET)).pending.id, status: "blocked" });
+  assert.equal((await engine.view(TARGET)).pending.lastError.code, "composer-lost");
+  assert.deepEqual(page.log, []);
 });
 
 test("the published default is live; dry run is an explicit opt-in", async () => {

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GhostShip ChatGPT
 // @namespace    https://github.com/ghostship-io/ghostship-userscripts
-// @version      0.7.0
+// @version      0.8.0
 // @description  Fast, queue-aware ChatGPT interface for the owner browser.
 // @match        https://chatgpt.com/*
 // @grant        none
@@ -749,6 +749,11 @@
   var COMPOSER = '#prompt-textarea, [data-chatgpt-composer] [contenteditable="true"], form [contenteditable="true"][role="textbox"]';
   var SEND = 'button[data-testid="send-button"]';
   var STOP = 'button[data-testid="stop-button"]';
+  var STOP_FALLBACK = 'button[aria-label^="Stop" i]';
+  var STREAMING = ".result-streaming, [data-is-streaming='true']";
+  var STEER = 'button[data-testid="steer-button"], button[aria-label^="Steer" i]';
+  var PROFILE = '[data-testid="accounts-profile-button"], [data-testid="profile-button"]';
+  var ATTACHMENT = '[data-testid*="attachment" i], [data-testid*="file-thumbnail" i]';
   var SCROLLER = "[data-scroll-root], [data-app-action-timeline-scroll]";
   var HEADER = "#page-header";
   var ASSISTANT = '[data-message-author-role="assistant"], [data-conversation-role="assistant"]';
@@ -781,7 +786,41 @@
     // Queue transport (live dispatcher): the editable composer input and its Send/Stop buttons.
     composerInput: (doc) => scope(doc).querySelector(COMPOSER),
     sendButton: (doc) => scope(doc).querySelector(SEND),
-    stopButton: (doc) => scope(doc).querySelector(STOP),
+    // Inside the composer form only: the queue card has its own Steer button, which must never be mistaken for it.
+    steerButton: (doc) => scope(doc).querySelector(COMPOSER)?.closest("form")?.querySelector(STEER) ?? null,
+    stopButton(doc) {
+      const page = scope(doc);
+      return page.querySelector(STOP) ?? page.querySelector(COMPOSER)?.closest("form")?.querySelector(STOP_FALLBACK) ?? null;
+    },
+    /** A response is being produced: a Stop control is shown or the reply is still streaming. */
+    generating(doc) {
+      return this.stopButton(doc) !== null || scope(doc).querySelector(STREAMING) !== null;
+    },
+    /** Opaque, stable per signed-in profile ("unknown" when the page does not say); no label is kept. */
+    accountId(doc) {
+      const label = scope(doc).querySelector(PROFILE)?.textContent?.trim();
+      if (!label) return "unknown";
+      let h1 = 3735928559;
+      let h2 = 1103547991;
+      for (let i = 0; i < label.length; i++) {
+        const c = label.charCodeAt(i);
+        h1 = Math.imul(h1 ^ c, 2654435761);
+        h2 = Math.imul(h2 ^ c, 1597334677);
+      }
+      h1 = Math.imul(h1 ^ h1 >>> 16, 2246822507) ^ Math.imul(h2 ^ h2 >>> 13, 3266489909);
+      h2 = Math.imul(h2 ^ h2 >>> 16, 2246822507) ^ Math.imul(h1 ^ h1 >>> 13, 3266489909);
+      return `acct-${(h2 >>> 0).toString(16).padStart(8, "0")}${(h1 >>> 0).toString(16).padStart(8, "0")}`;
+    },
+    /** Files on the message being composed; the queue cannot restore them, so it flags them. */
+    composerAttachments(doc) {
+      const form = scope(doc).querySelector(COMPOSER)?.closest("form");
+      return [...form?.querySelectorAll(ATTACHMENT) ?? []].map((node) => ({
+        name: node.getAttribute("aria-label")?.slice(0, 80) || "attachment",
+        size: 0,
+        type: "",
+        restorable: false
+      }));
+    },
     userTurnCount: (doc) => scope(doc).querySelectorAll(USER).length,
     userMessage: (turn) => turn.querySelector(USER),
     turnId: (turn, index) => turn.getAttribute("data-turn-key") ?? turn.getAttribute("data-testid") ?? `turn-${index}`,
@@ -909,32 +948,46 @@
     #opts;
     constructor(adapter, opts) {
       this.#adapter = adapter;
-      this.#opts = { submitTimeoutMs: 1e4, stopTimeoutMs: 1e4, ...opts };
+      this.#opts = { submitTimeoutMs: 3e4, stopTimeoutMs: 1e4, ...opts };
     }
-    async readState(conversationId) {
+    async readState(target) {
       try {
-        return await this.#adapter.readState(conversationId);
+        return await this.#adapter.readState(target);
       } catch {
         return "unknown";
       }
     }
-    async submit(request2) {
-      this.#opts.onAction?.({ type: "submit", conversationId: request2.conversationId, itemId: request2.itemId });
+    async readiness(target) {
       try {
-        const result = await this.#race(this.#adapter.submit(request2), this.#opts.submitTimeoutMs);
+        return await this.#adapter.readiness(target);
+      } catch {
+        return { state: "waiting", reason: "unknown-state" };
+      }
+    }
+    submit(request2) {
+      return this.#send("submit", request2);
+    }
+    async steer(request2) {
+      if (typeof this.#adapter.steer !== "function") return { kind: "unsupported" };
+      return this.#send("steer", request2);
+    }
+    async #send(type, request2) {
+      this.#opts.onAction?.({ type, conversationId: request2.conversationId, itemId: request2.itemId });
+      try {
+        const result = await this.#race(this.#adapter[type === "steer" ? "steer" : "submit"](request2), this.#opts.submitTimeoutMs);
         if (result === TIMED_OUT) {
-          return { kind: "uncertain", code: "submit-timeout", message: "No submit acknowledgment before the timeout." };
+          return { kind: "uncertain", code: `${type}-timeout`, message: "No acknowledgment before the timeout." };
         }
         return result;
       } catch (error) {
-        return { kind: "uncertain", code: "submit-threw", message: describe(error) };
+        return { kind: "uncertain", code: `${type}-threw`, message: describe(error) };
       }
     }
-    async stop(conversationId) {
-      this.#opts.onAction?.({ type: "stop", conversationId });
+    async stop(target) {
+      this.#opts.onAction?.({ type: "stop", conversationId: target.conversationId });
       let result;
       try {
-        result = await this.#race(this.#adapter.stop({ conversationId }), this.#opts.stopTimeoutMs);
+        result = await this.#race(this.#adapter.stop(target), this.#opts.stopTimeoutMs);
       } catch (error) {
         return { kind: "ambiguous", code: "stop-threw", message: describe(error) };
       }
@@ -942,7 +995,7 @@
         return { kind: "timeout", code: "stop-timeout", message: "No stop acknowledgment before the timeout." };
       }
       if (result.kind !== "confirmed") return result;
-      const state = await this.readState(conversationId);
+      const state = await this.readState(target);
       if (state !== "idle") {
         return {
           kind: "ambiguous",
@@ -976,7 +1029,12 @@
     dryRun = true;
     log = [];
     state;
+    /** False models a settled response whose native Send is not (yet) available. */
+    sendReady = true;
+    /** True models a positively detected native steer path. */
+    steerAvailable = false;
     submitScript = [];
+    steerScript = [];
     stopScript = [];
     /** Set to make `readState` throw (adapter cannot tell). */
     stateError = null;
@@ -992,12 +1050,25 @@
       if (this.stateError) throw this.stateError;
       return this.#stateOverrides.shift() ?? this.state;
     }
+    async readiness() {
+      const state = await this.readState();
+      if (state === "generating") return { state: "waiting", reason: "generating" };
+      if (state !== "idle") return { state: "waiting", reason: "unknown-state" };
+      if (!this.sendReady) return { state: "waiting", reason: "send-unavailable" };
+      return { state: "ready" };
+    }
     async submit(request2) {
       this.log.push({ type: "submit", request: request2 });
       const outcome = this.submitScript.shift() ?? { kind: "accepted" };
       const result = await play(outcome);
       if (result.kind === "accepted") this.state = "generating";
       return result;
+    }
+    async steer(request2) {
+      if (!this.steerAvailable) return { kind: "unsupported" };
+      this.log.push({ type: "steer", request: request2 });
+      const outcome = this.steerScript.shift() ?? { kind: "accepted" };
+      return play(outcome);
     }
     async stop(request2) {
       this.log.push({ type: "stop", request: request2 });
@@ -1011,7 +1082,7 @@
       this.state = "idle";
     }
     actions() {
-      return this.log.map((entry) => entry.type === "submit" ? `submit:${entry.request.itemId}` : "stop");
+      return this.log.map((entry) => entry.type === "stop" ? "stop" : `${entry.type}:${entry.request.itemId}`);
     }
   };
   async function play(outcome) {
@@ -1020,23 +1091,30 @@
     return outcome;
   }
 
-  // src/chatgpt/queue/live-dispatcher.js
-  var norm = (text) => text.replace(/\s+/g, " ").trim();
-  function createLiveDispatcher({ win, adapter, pollMs = 50, buttonWaitMs = 2e3, ackMs = 5e3, stopWaitMs = 5e3 }) {
+  // src/chatgpt/queue/composer.js
+  var BLOCKS2 = /* @__PURE__ */ new Set(["P", "DIV", "LI", "PRE", "H1", "H2", "H3", "H4", "H5", "H6", "BLOCKQUOTE"]);
+  function textOf(node) {
+    let out = "";
+    for (const child of node.childNodes) {
+      if (child.nodeType === 3) out += child.nodeValue;
+      else if (child.nodeName === "BR") out += child.classList?.contains("ProseMirror-trailingBreak") ? "" : "\n";
+      else out += textOf(child);
+    }
+    return out;
+  }
+  function createComposerIO(win) {
     const doc = win.document;
-    const clicked = /* @__PURE__ */ new Set();
-    const waitFor = (probe, ms) => new Promise((resolve) => {
-      const started = Date.now();
-      const poll = () => {
-        const hit = probe();
-        if (hit) return resolve(hit);
-        if (Date.now() - started >= ms) return resolve(null);
-        win.setTimeout(poll, pollMs);
-      };
-      poll();
-    });
     const isField = (el2) => el2.tagName === "TEXTAREA" || el2.tagName === "INPUT";
-    const read = (el2) => norm(isField(el2) ? el2.value : el2.textContent ?? "");
+    function read(el2) {
+      if (isField(el2)) return el2.value;
+      const blocks = [...el2.childNodes].filter((n) => n.nodeType === 1 && BLOCKS2.has(n.nodeName));
+      if (!blocks.length) return textOf(el2);
+      return blocks.map((block) => {
+        const text = textOf(block);
+        return block.childNodes.length === 1 && block.firstChild.nodeName === "BR" ? "" : text;
+      }).join("\n");
+    }
+    const hasText = (el2) => read(el2).trim() !== "";
     function write(el2, text) {
       el2.focus?.();
       if (isField(el2)) {
@@ -1050,53 +1128,165 @@
       range.selectNodeContents(el2);
       selection.removeAllRanges();
       selection.addRange(range);
-      return text === "" ? doc.execCommand("delete") : doc.execCommand("insertText", false, text);
+      if (text === "") return doc.execCommand("delete");
+      const lines = text.split("\n");
+      let ok = doc.execCommand("delete") !== false;
+      lines.forEach((line, index) => {
+        if (index > 0) ok = doc.execCommand("insertParagraph") !== false && ok;
+        if (line !== "") ok = doc.execCommand("insertText", false, line) !== false && ok;
+      });
+      return ok;
     }
-    const reject = (code, message, retryable = true) => ({ kind: "rejected", code, message, retryable });
-    const generating = () => Boolean(adapter.stopButton(doc));
+    return { read, write, hasText };
+  }
+
+  // src/chatgpt/queue/live-dispatcher.js
+  var norm = (text) => text.replace(/\s+/g, " ").trim();
+  function createLiveDispatcher({
+    win,
+    adapter,
+    pollMs = 50,
+    settleMs = 600,
+    sendWaitMs = 8e3,
+    steerWaitMs = 1500,
+    ackMs = 6e3,
+    stopWaitMs = 5e3,
+    composerLostMs = 15e3,
+    now = () => Date.now()
+  }) {
+    const doc = win.document;
+    const io = createComposerIO(win);
+    const clicked = /* @__PURE__ */ new Set();
+    let lastBusy = -Infinity;
+    let composerMissingSince = null;
+    const waitFor = (probe, ms) => new Promise((resolve) => {
+      const started = Date.now();
+      const poll = () => {
+        const hit = probe();
+        if (hit) return resolve(hit);
+        if (Date.now() - started >= ms) return resolve(null);
+        win.setTimeout(poll, pollMs);
+      };
+      poll();
+    });
+    const generating = () => adapter.generating(doc);
+    const onTarget = (target) => adapter.conversationId(win) === target.conversationId && adapter.accountId(doc) === target.accountId;
+    const enabled = (button2) => button2 && !button2.disabled && button2.getAttribute("aria-disabled") !== "true" ? button2 : null;
+    function notReady(target, { allowGenerating = false } = {}) {
+      if (!onTarget(target)) return { state: "waiting", reason: "other-conversation" };
+      const input = adapter.composerInput(doc);
+      if (!input) {
+        composerMissingSince ??= now();
+        if (now() - composerMissingSince >= composerLostMs) {
+          return {
+            state: "blocked",
+            code: "composer-lost",
+            message: "The ChatGPT composer has not been found for a while; nothing was sent.",
+            action: "Reload the page or open the conversation again, then press Retry."
+          };
+        }
+        return { state: "waiting", reason: "composer-missing" };
+      }
+      composerMissingSince = null;
+      if (!allowGenerating) {
+        if (generating()) {
+          lastBusy = now();
+          return { state: "waiting", reason: "generating" };
+        }
+        if (now() - lastBusy < settleMs) return { state: "waiting", reason: "settling" };
+      }
+      if (io.hasText(input)) return { state: "waiting", reason: "composer-has-draft" };
+      return null;
+    }
+    const unstage = (input, text) => {
+      if (norm(io.read(input)) === norm(text)) io.write(input, "");
+    };
+    async function stage(target, text, control, ms, { allowGenerating }) {
+      const input = adapter.composerInput(doc);
+      if (!io.write(input, text) || norm(io.read(input)) !== norm(text)) {
+        unstage(input, text);
+        return { failed: { kind: "rejected", code: "composer-fill-failed", message: "The text could not be placed in the composer; nothing was sent.", action: "Reload the page, then press Retry." } };
+      }
+      const button2 = await waitFor(() => {
+        if (!onTarget(target)) return "left";
+        if (!allowGenerating && generating()) return "busy";
+        return enabled(control());
+      }, ms);
+      if (button2 === "left") {
+        unstage(input, text);
+        return { failed: { kind: "wait", reason: "other-conversation" } };
+      }
+      if (button2 === "busy") {
+        unstage(input, text);
+        return { failed: { kind: "wait", reason: "generating" } };
+      }
+      if (!button2) {
+        unstage(input, text);
+        return { missing: true };
+      }
+      return { input, button: button2 };
+    }
+    async function click(itemId, button2, turnsBefore, target, { steering = false } = {}) {
+      if (!onTarget(target)) {
+        return { kind: "wait", reason: "other-conversation" };
+      }
+      clicked.add(itemId);
+      button2.click();
+      const evidence = await waitFor(() => {
+        const input = adapter.composerInput(doc);
+        return adapter.userTurnCount(doc) > turnsBefore || !steering && generating() || input !== null && io.read(input) === "";
+      }, ackMs);
+      return evidence ? { kind: "accepted" } : { kind: "uncertain", code: "submit-unacknowledged", message: "Send was clicked but ChatGPT showed no sign of accepting it." };
+    }
+    const attachmentsRefused = {
+      kind: "rejected",
+      code: "attachments-unsupported",
+      message: "Messages with attachments cannot be sent by the queue yet; nothing was sent.",
+      action: "Send without the files, or delete the prompt and send it from ChatGPT."
+    };
     return {
       async readState() {
         if (!adapter.composerInput(doc)) return "unknown";
         return generating() ? "generating" : "idle";
       },
-      async submit({ itemId, text, attachments }) {
+      async readiness(target) {
+        return notReady(target) ?? { state: "ready" };
+      },
+      async submit({ itemId, accountId, conversationId, text, attachments }) {
+        const target = { accountId, conversationId };
         if (clicked.has(itemId)) {
           return { kind: "uncertain", code: "already-attempted", message: "This message was already submitted from this page." };
         }
-        if (attachments.length) {
-          return reject("attachments-unsupported", "Messages with attachments cannot be sent by the queue yet.", false);
+        if (attachments.length) return attachmentsRefused;
+        const not = notReady(target);
+        if (not) return not.state === "blocked" ? { kind: "rejected", code: not.code, message: not.message, action: not.action } : { kind: "wait", reason: not.reason };
+        const staged = await stage(target, text, () => adapter.sendButton(doc), sendWaitMs, { allowGenerating: false });
+        if (staged.failed) return staged.failed;
+        if (staged.missing) {
+          return { kind: "rejected", code: "send-unavailable", message: "ChatGPT's Send button did not become available; nothing was sent.", action: "Check the page, then press Retry." };
         }
-        const input = adapter.composerInput(doc);
-        if (!input) return reject("composer-missing", "The ChatGPT composer was not found; nothing was sent.");
-        if (generating()) return reject("busy", "A response is still streaming; nothing was sent.");
-        if (read(input) !== "") return reject("composer-not-empty", "The composer holds a draft; it was left untouched and nothing was sent.");
-        const abandon = (code, message) => {
-          write(input, "");
-          return reject(code, message);
-        };
-        if (!write(input, text) || read(input) !== norm(text)) {
-          return abandon("composer-fill-failed", "The text could not be placed in the composer; nothing was sent.");
+        return click(itemId, staged.button, adapter.userTurnCount(doc), target);
+      },
+      /** The native steer control, only if the page shows one once the text is in; otherwise `unsupported`. */
+      async steer({ itemId, accountId, conversationId, text, attachments }) {
+        const target = { accountId, conversationId };
+        if (clicked.has(itemId)) {
+          return { kind: "uncertain", code: "already-attempted", message: "This message was already submitted from this page." };
         }
-        const send = await waitFor(() => {
-          const button2 = adapter.sendButton(doc);
-          return button2 && !button2.disabled ? button2 : null;
-        }, buttonWaitMs);
-        if (!send) return abandon("send-button-missing", "The Send button was not found or stayed disabled; nothing was sent.");
-        if (generating()) return abandon("busy", "A response started streaming; nothing was sent.");
-        const turnsBefore = adapter.userTurnCount(doc);
-        clicked.add(itemId);
-        send.click();
-        const evidence = await waitFor(
-          () => adapter.userTurnCount(doc) > turnsBefore || generating() || read(input) === "",
-          ackMs
-        );
-        return evidence ? { kind: "accepted" } : { kind: "uncertain", code: "submit-unacknowledged", message: "Send was clicked but ChatGPT showed no sign of accepting it." };
+        if (attachments.length) return attachmentsRefused;
+        if (!generating()) return { kind: "wait", reason: "not-generating" };
+        const not = notReady(target, { allowGenerating: true });
+        if (not) return not.state === "blocked" ? { kind: "rejected", code: not.code, message: not.message, action: not.action } : { kind: "wait", reason: not.reason };
+        const staged = await stage(target, text, () => adapter.steerButton(doc), steerWaitMs, { allowGenerating: true });
+        if (staged.failed) return staged.failed;
+        if (staged.missing) return { kind: "unsupported" };
+        return click(itemId, staged.button, adapter.userTurnCount(doc), target, { steering: true });
       },
       async stop() {
         const button2 = adapter.stopButton(doc);
         if (!button2) return { kind: "failed", code: "stop-button-missing", message: "The Stop control was not found." };
         button2.click();
-        const gone = await waitFor(() => !adapter.stopButton(doc), stopWaitMs);
+        const gone = await waitFor(() => !generating(), stopWaitMs);
         return gone ? { kind: "confirmed" } : { kind: "ambiguous", code: "stop-unconfirmed", message: "Stop was clicked but the response did not end." };
       }
     };
@@ -1124,492 +1314,143 @@
     }
   };
 
-  // src/chatgpt/queue/queue.js
-  var DEFAULT_BACKOFF = [1e3, 5e3];
-  var STOP_ACTIONS = {
-    "stop-timeout": "ChatGPT did not confirm the stop. Check the response, then press Interrupt & Send Next again.",
-    "stop-not-idle": "The response may still be running. Wait for it to finish or stop it manually, then try again.",
-    "state-unknown": "Could not tell whether a response is running. Check ChatGPT, then try again."
-  };
-  var QueueEngine = class {
-    #store;
-    #dispatch;
-    #clock;
-    #tabId;
-    #newId;
-    #leaseTtlMs;
-    #maxAttempts;
-    #backoff;
-    #tails = /* @__PURE__ */ new Map();
-    constructor(opts) {
-      this.#store = opts.store;
-      this.#dispatch = opts.dispatch;
-      this.#clock = opts.clock;
-      this.#tabId = opts.tabId;
-      this.#newId = opts.newId ?? (() => crypto.randomUUID());
-      this.#leaseTtlMs = opts.leaseTtlMs ?? 15e3;
-      this.#maxAttempts = opts.maxAttempts ?? 3;
-      this.#backoff = opts.retryBackoffMs ?? DEFAULT_BACKOFF;
-    }
-    // ---- user-facing queue editing (any tab, no lease needed) ----------------
-    enqueue(conversationId, input) {
-      return this.#store.transact(async (tx) => {
-        const items = await tx.itemsOf(conversationId);
-        const now = this.#clock.now();
-        const attachments = input.attachments ?? [];
-        const item = {
-          id: this.#newId(),
-          conversationId,
-          text: input.text,
-          attachments,
-          // The model the message will use, when the page could tell at queue time.
-          model: input.model ?? null,
-          status: "pending",
-          position: items.length ? items[items.length - 1].position + 1 : 0,
-          version: 1,
-          attempts: 0,
-          notBefore: 0,
-          attemptId: null,
-          leaseToken: null,
-          lastError: null,
-          createdAt: now,
-          updatedAt: now,
-          sentAt: null
-        };
-        applyAttachmentGate(item, now);
-        await tx.putItem(item);
-        return item;
-      });
-    }
-    edit(id, patch) {
-      return this.#mutate(id, (item, now) => {
-        if (item.status === "sending" || item.status === "sent" || item.status === "manual-review") {
-          throw new QueueError("item-locked", `Item ${id} is ${item.status} and cannot be edited.`);
-        }
-        if (patch.text !== void 0) item.text = patch.text;
-        if (patch.attachments !== void 0) item.attachments = patch.attachments;
-        item.version += 1;
-        item.status = "pending";
-        item.attempts = 0;
-        item.notBefore = 0;
-        item.lastError = null;
-        applyAttachmentGate(item, now);
-      });
-    }
-    /** Clears a `blocked` item once the user has reattached its files. */
-    reattach(id, attachments) {
-      return this.edit(id, { attachments });
-    }
-    remove(id) {
-      return this.#store.transact(async (tx) => {
-        const item = await tx.getItem(id);
-        if (!item) throw new QueueError("not-found", `Item ${id} does not exist.`);
-        if (item.status === "sending") throw new QueueError("item-locked", `Item ${id} is being sent.`);
-        await tx.deleteItem(id);
-      });
-    }
-    /** Moves an unsent item to `toIndex` among the unsent items of its conversation. */
-    move(id, toIndex) {
-      return this.#store.transact(async (tx) => {
-        const target = await tx.getItem(id);
-        if (!target) throw new QueueError("not-found", `Item ${id} does not exist.`);
-        const unsent = (await tx.itemsOf(target.conversationId)).filter((i) => i.status !== "sent");
-        if (unsent.some((i) => i.status === "sending")) {
-          throw new QueueError("item-locked", "The queue cannot be reordered while a message is being sent.");
-        }
-        const from = unsent.findIndex((i) => i.id === id);
-        if (!Number.isInteger(toIndex) || toIndex < 0 || toIndex >= unsent.length) {
-          throw new QueueError("invalid-order", `Index ${toIndex} is outside 0..${unsent.length - 1}.`);
-        }
-        const positions = unsent.map((i) => i.position);
-        const [moved] = unsent.splice(from, 1);
-        unsent.splice(toIndex, 0, moved);
-        const now = this.#clock.now();
-        for (const [i, item] of unsent.entries()) {
-          item.position = positions[i];
-          item.version += 1;
-          item.updatedAt = now;
-          await tx.putItem(item);
-        }
-        return unsent;
-      });
-    }
-    pause(conversationId) {
-      return this.#setPaused(conversationId, true);
-    }
-    resume(conversationId) {
-      return this.#setPaused(conversationId, false);
-    }
-    /** The user chose to resend a failed or uncertain item. Resets the retry budget. */
-    retry(id) {
-      return this.#mutate(id, (item) => {
-        if (item.status !== "failed" && item.status !== "manual-review") {
-          throw new QueueError(
-            "invalid-state",
-            `Item ${id} is ${item.status}; only failed or manual-review items can be retried.`
-          );
-        }
-        item.status = "pending";
-        item.attempts = 0;
-        item.notBefore = 0;
-        item.attemptId = null;
-        item.lastError = null;
-      });
-    }
-    /** The user confirmed in ChatGPT that an uncertain or failed item did go out. */
-    markDelivered(id) {
-      return this.#mutate(id, (item, now) => {
-        if (item.status !== "failed" && item.status !== "manual-review") {
-          throw new QueueError("invalid-state", `Item ${id} is ${item.status}; nothing to confirm.`);
-        }
-        item.status = "sent";
-        item.sentAt = now;
-        item.lastError = null;
-      });
-    }
-    /** Removes every message except one being sent (its outcome is still unrecorded). */
-    clear(conversationId) {
-      return this.#store.transact(async (tx) => {
-        const removable = (await tx.itemsOf(conversationId)).filter((i) => i.status !== "sending");
-        for (const item of removable) await tx.deleteItem(item.id);
-        return removable.length;
-      });
-    }
-    list(conversationId) {
-      return this.#store.transact(async (tx) => ({
-        paused: (await tx.getQueue(conversationId))?.paused ?? false,
-        items: await tx.itemsOf(conversationId)
-      }));
-    }
-    // ---- sending (lease holder only) -----------------------------------------
-    /** Sequential drain, one step. Never stops a response; waits for it to finish. */
-    step(conversationId) {
-      return this.#serial(conversationId, async () => {
-        const lease = await this.#acquire(conversationId);
-        if (!lease.ok) return lease.outcome;
-        const view = await this.#view(conversationId);
-        if (view.paused) return { kind: "paused" };
-        const gate = this.#headGate(view.head);
-        if (gate) return gate;
-        const head = view.head;
-        if (head.notBefore > this.#clock.now()) {
-          return { kind: "waiting", reason: "backoff", until: head.notBefore };
-        }
-        const state = await this.#dispatch.readState(conversationId);
-        if (state !== "idle") return { kind: "waiting", reason: state === "generating" ? "generating" : "unknown-state" };
-        return this.#send(head, lease.token);
-      });
-    }
-    /**
-     * Explicit user action. If a response is running, stops it and, only once the
-     * stop is confirmed, submits exactly the next item. Any doubt leaves the item
-     * pending with an actionable error and sends nothing.
-     */
-    interruptAndSendNext(conversationId) {
-      return this.#serial(conversationId, async () => {
-        const lease = await this.#acquire(conversationId);
-        if (!lease.ok) return lease.outcome;
-        let token = lease.token;
-        const view = await this.#view(conversationId);
-        const gate = this.#headGate(view.head);
-        if (gate) return gate;
-        const head = view.head;
-        const state = await this.#dispatch.readState(conversationId);
-        if (state === "unknown") {
-          return this.#interruptFailed(head, "state-unknown", "Could not read the conversation state.");
-        }
-        if (state === "generating") {
-          const stop = await this.#dispatch.stop(conversationId);
-          if (stop.kind !== "confirmed") return this.#interruptFailed(head, stop.code, stop.message);
-          const renewed = await this.#acquire(conversationId);
-          if (!renewed.ok) return renewed.outcome;
-          token = renewed.token;
-          const after = await this.#view(conversationId);
-          const next = after.head;
-          if (!next || next.id !== head.id || next.version !== head.version || next.status !== "pending") {
-            return { kind: "interrupt-aborted", reason: "head-changed" };
-          }
-          return this.#send(next, token);
-        }
-        return this.#send(head, token);
-      });
-    }
-    /** Renews the lease; call periodically while this tab is the active sender. */
-    async heartbeat(conversationId) {
-      return (await this.#acquire(conversationId)).ok;
-    }
-    /**
-     * A new chat has no conversation id until its first send creates one. Once that send happened
-     * (an item of the draft conversation is sending, sent or awaiting review), the rest of the draft
-     * queue belongs to the conversation that send created. Moves every item and the paused flag in
-     * one transaction and returns how many items moved; 0 when no send happened (the queue then stays put).
-     */
-    adoptAfterFirstSend(from, to) {
-      return this.#serial(
-        from,
-        () => this.#store.transact(async (tx) => {
-          const moving = await tx.itemsOf(from);
-          const created = moving.some((i) => i.status === "sending" || i.status === "sent" || i.status === "manual-review");
-          if (!created || from === to) return 0;
-          const existing = await tx.itemsOf(to);
-          const base = existing.length ? existing[existing.length - 1].position + 1 : 0;
-          const first = moving[0].position;
-          for (const item of moving) {
-            await tx.putItem({ ...item, conversationId: to, position: base + (item.position - first), version: item.version + 1, updatedAt: this.#clock.now() });
-          }
-          const draft = await tx.getQueue(from);
-          if (draft?.paused) {
-            await tx.putQueue({ conversationId: to, paused: true });
-            await tx.putQueue({ conversationId: from, paused: false });
-          }
-          return moving.length;
-        })
-      );
-    }
-    release(conversationId) {
-      return this.#store.transact(async (tx) => {
-        const lease = await tx.getLease(conversationId);
-        if (lease?.holder === this.#tabId) await tx.deleteLease(conversationId);
-      });
-    }
-    // ---- internals -----------------------------------------------------------
-    #serial(conversationId, fn) {
-      const run = (this.#tails.get(conversationId) ?? Promise.resolve()).then(fn, fn);
-      this.#tails.set(
-        conversationId,
-        run.catch(() => void 0)
-      );
-      return run;
-    }
-    async #mutate(id, fn) {
-      return this.#store.transact(async (tx) => {
-        const item = await tx.getItem(id);
-        if (!item) throw new QueueError("not-found", `Item ${id} does not exist.`);
-        const now = this.#clock.now();
-        fn(item, now);
-        item.updatedAt = now;
-        await tx.putItem(item);
-        return item;
-      });
-    }
-    #setPaused(conversationId, paused) {
-      return this.#store.transact(async (tx) => {
-        await tx.putQueue({ conversationId, paused });
-      });
-    }
-    async #view(conversationId) {
-      const { paused, items } = await this.list(conversationId);
-      return { paused, head: items.find((i) => i.status !== "sent") };
-    }
-    #headGate(head) {
-      if (!head) return { kind: "idle" };
-      if (head.status === "sending") return { kind: "busy", itemId: head.id };
-      if (head.status !== "pending") return { kind: "halted", itemId: head.id, status: head.status };
-      return null;
-    }
-    /**
-     * Acquires or renews this tab's lease. A fresh acquisition (first, or after
-     * expiry) gets a new fencing token and, in the same transaction, turns any
-     * item still `sending` under an older token into manual-review: its sender is
-     * gone and we cannot know whether it was delivered.
-     */
-    async #acquire(conversationId) {
-      return this.#store.transact(async (tx) => {
-        const now = this.#clock.now();
-        const current = await tx.getLease(conversationId);
-        if (current && current.expiresAt > now && current.holder !== this.#tabId) {
-          return { ok: false, outcome: { kind: "not-leader", holder: current.holder, expiresAt: current.expiresAt } };
-        }
-        const keep = current !== void 0 && current.holder === this.#tabId && current.expiresAt > now;
-        const token = keep ? current.token : (current?.token ?? 0) + 1;
-        await tx.putLease({ conversationId, holder: this.#tabId, token, expiresAt: now + this.#leaseTtlMs });
-        if (!keep) {
-          for (const item of await tx.itemsOf(conversationId)) {
-            if (item.status === "sending" && item.leaseToken !== token) {
-              item.status = "manual-review";
-              item.lastError = orphanError(now);
-              item.updatedAt = now;
-              await tx.putItem(item);
-            }
-          }
-        }
-        return { ok: true, token };
-      });
-    }
-    async #checkLease(tx, conversationId, token) {
-      const lease = await tx.getLease(conversationId);
-      const now = this.#clock.now();
-      if (!lease || lease.holder !== this.#tabId || lease.token !== token || lease.expiresAt <= now) {
-        throw new QueueError("lease-lost", "Another tab holds the sender lease.");
-      }
-      return lease;
-    }
-    /** Claim -> submit -> record. The claim is the only place an item becomes `sending`. */
-    async #send(head, token) {
-      const attemptId = this.#newId();
-      const claimed = await this.#store.transact(async (tx) => {
-        const lease = await this.#checkLease(tx, head.conversationId, token);
-        const fresh = await tx.getItem(head.id);
-        const first = (await tx.itemsOf(head.conversationId)).find((i) => i.status !== "sent");
-        if (!fresh || first?.id !== fresh.id || fresh.status !== "pending" || fresh.version !== head.version) {
-          return null;
-        }
-        const now = this.#clock.now();
-        fresh.status = "sending";
-        fresh.attempts += 1;
-        fresh.attemptId = attemptId;
-        fresh.leaseToken = token;
-        fresh.lastError = null;
-        fresh.updatedAt = now;
-        await tx.putItem(fresh);
-        await tx.putLease({ ...lease, expiresAt: now + this.#leaseTtlMs });
-        return fresh;
-      }).catch((error) => {
-        if (error instanceof QueueError && error.code === "lease-lost") return "lease-lost";
-        throw error;
-      });
-      if (claimed === "lease-lost") return this.#notLeader(head.conversationId);
-      if (!claimed) return { kind: "busy", itemId: head.id };
-      const result = await this.#dispatch.submit({
-        itemId: claimed.id,
-        attemptId,
-        conversationId: claimed.conversationId,
-        text: claimed.text,
-        attachments: claimed.attachments
-      });
-      return this.#record(claimed.id, attemptId, result);
-    }
-    async #notLeader(conversationId) {
-      const lease = await this.#store.transact((tx) => tx.getLease(conversationId));
-      return { kind: "not-leader", holder: lease?.holder ?? "unknown", expiresAt: lease?.expiresAt ?? 0 };
-    }
-    /** Records a submit result; compare-and-set on `attemptId` so stale results are dropped. */
-    #record(id, attemptId, result) {
-      return this.#store.transact(async (tx) => {
-        const item = await tx.getItem(id);
-        if (!item || item.attemptId !== attemptId || item.status !== "sending" && item.status !== "manual-review") {
-          return { kind: "busy", itemId: id };
-        }
-        const now = this.#clock.now();
-        item.updatedAt = now;
-        let outcome;
-        if (result.kind === "accepted") {
-          item.status = "sent";
-          item.sentAt = now;
-          item.lastError = null;
-          outcome = { kind: "sent", itemId: id };
-        } else if (result.kind === "uncertain") {
-          item.status = "manual-review";
-          item.lastError = {
-            code: result.code,
-            message: result.message,
-            action: "Check the conversation in ChatGPT. Mark the message delivered if it is there, or retry it if it is not.",
-            at: now
-          };
-          outcome = { kind: "manual-review", itemId: id };
-        } else if (result.retryable && item.attempts < this.#maxAttempts) {
-          item.status = "pending";
-          item.notBefore = now + this.#backoff[Math.min(item.attempts, this.#backoff.length) - 1];
-          item.lastError = {
-            code: result.code,
-            message: result.message,
-            action: `Will retry automatically (attempt ${item.attempts} of ${this.#maxAttempts}).`,
-            at: now
-          };
-          outcome = { kind: "retry-scheduled", itemId: id, notBefore: item.notBefore };
-        } else {
-          item.status = "failed";
-          item.lastError = {
-            code: result.code,
-            message: result.message,
-            action: "The message was not sent. Edit or retry it, or remove it from the queue.",
-            at: now
-          };
-          outcome = { kind: "failed", itemId: id };
-        }
-        await tx.putItem(item);
-        return outcome;
-      });
-    }
-    async #interruptFailed(head, code, message) {
-      const error = {
-        code,
-        message,
-        action: STOP_ACTIONS[code] ?? "The response was not confirmed stopped. Nothing was sent; check ChatGPT and try again.",
-        at: this.#clock.now()
-      };
-      await this.#store.transact(async (tx) => {
-        const item = await tx.getItem(head.id);
-        if (item && item.status === "pending") {
-          item.lastError = error;
-          await tx.putItem(item);
-        }
-      });
-      return { kind: "interrupt-failed", itemId: head.id, error };
-    }
-  };
-  function applyAttachmentGate(item, now) {
-    const lost = item.attachments.filter((a) => !a.restorable);
-    if (lost.length === 0) return;
-    item.status = "blocked";
-    item.lastError = {
-      code: "attachments-not-restorable",
-      message: `Cannot restore ${lost.map((a) => a.name).join(", ")}.`,
-      action: "Reattach the files, then the message can be sent.",
-      at: now
-    };
-  }
-  function orphanError(now) {
-    return {
-      code: "orphaned-send",
-      message: "The tab that was sending this message stopped before reporting the result.",
-      action: "Check the conversation in ChatGPT. Mark the message delivered if it is there, or retry it if it is not.",
-      at: now
-    };
-  }
-
   // src/chatgpt/queue/store.js
   var DB_NAME = "ghostship-chatgpt-queue";
-  var DB_VERSION = 1;
+  var DB_VERSION = 2;
+  var LEGACY_ACCOUNT = "unknown";
+  var keyOf = (target) => `${target.accountId}:${target.conversationId}`;
   function request(req) {
     return new Promise((resolve, reject) => {
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error);
     });
   }
+  function migrateLegacy(items, legacyQueues, now) {
+    const byConversation = /* @__PURE__ */ new Map();
+    for (const item of [...items].sort((a, b) => a.position - b.position)) {
+      if (!byConversation.has(item.conversationId)) byConversation.set(item.conversationId, []);
+      byConversation.get(item.conversationId).push(item);
+    }
+    const paused = new Map(legacyQueues.map((q) => [q.conversationId, q.paused === true]));
+    const out = { pending: [], inflight: [], state: [] };
+    for (const [conversationId, rows] of byConversation) {
+      const key = keyOf({ accountId: LEGACY_ACCOUNT, conversationId });
+      const merge = [];
+      let uncertain = null;
+      let needsDecision = null;
+      for (const row of rows) {
+        if (row.status === "sent") continue;
+        if (row.status === "sending" || row.status === "manual-review") {
+          if (!uncertain) {
+            uncertain = row;
+            continue;
+          }
+          needsDecision = "legacy-uncertain";
+        } else if (row.status === "failed") {
+          needsDecision = "legacy-failed";
+        } else if (row.status === "blocked") {
+          needsDecision = row.lastError?.code ?? "attachments-not-restorable";
+        }
+        merge.push(row);
+      }
+      if (uncertain) {
+        out.inflight.push({
+          key,
+          accountId: LEGACY_ACCOUNT,
+          conversationId,
+          id: uncertain.id,
+          sourceId: uncertain.id,
+          text: uncertain.text,
+          attachments: uncertain.attachments ?? [],
+          status: "manual-review",
+          attempts: Math.max(1, uncertain.attempts ?? 1),
+          leaseToken: null,
+          claimedAt: uncertain.updatedAt ?? now,
+          lastError: {
+            code: "legacy-uncertain",
+            message: "This message was in flight when the queue was upgraded, so its delivery is unknown.",
+            action: "Check the conversation in ChatGPT. Mark it delivered if it is there, or restore it to the queue if it is not.",
+            at: now
+          }
+        });
+      }
+      if (merge.length) {
+        const attachments = merge.flatMap((row) => row.attachments ?? []);
+        const lost = attachments.filter((a) => !a.restorable);
+        const code = lost.length ? "attachments-not-restorable" : needsDecision;
+        out.pending.push({
+          key,
+          id: merge[0].id,
+          accountId: LEGACY_ACCOUNT,
+          conversationId,
+          text: merge.map((row) => row.text).join("\n\n"),
+          attachments,
+          status: code ? "blocked" : "pending",
+          version: Math.max(...merge.map((row) => row.version ?? 1)) + 1,
+          createdAt: merge[0].createdAt ?? now,
+          updatedAt: now,
+          lastError: code ? legacyError(code, lost, now) : null,
+          ops: []
+        });
+      }
+      if (paused.get(conversationId) && (merge.length || uncertain)) out.state.push({ key, paused: true, editBy: null, editUntil: 0 });
+    }
+    return out;
+  }
+  function legacyError(code, lost, now) {
+    if (code === "attachments-not-restorable") {
+      return { code, message: `Cannot restore ${lost.map((a) => a.name).join(", ")}.`, action: "Reattach the files, then retry.", at: now };
+    }
+    return {
+      code,
+      message: "Some of these messages needed a decision before the queue was upgraded (a failed, blocked or uncertain send).",
+      action: "Read the combined text, edit it if needed, then press Retry.",
+      at: now
+    };
+  }
   var Tx = class {
     #tx;
     constructor(tx) {
       this.#tx = tx;
     }
-    getItem(id) {
-      return request(this.#tx.objectStore("items").get(id));
+    getPending(key) {
+      return request(this.#tx.objectStore("pending").get(key));
     }
-    putItem(item) {
-      return request(this.#tx.objectStore("items").put(item));
+    putPending(record) {
+      return request(this.#tx.objectStore("pending").put(record));
     }
-    deleteItem(id) {
-      return request(this.#tx.objectStore("items").delete(id));
+    deletePending(key) {
+      return request(this.#tx.objectStore("pending").delete(key));
     }
-    /** Items of one conversation ordered by position. */
-    async itemsOf(conversationId) {
-      const items = await request(this.#tx.objectStore("items").index("conversationId").getAll(conversationId));
-      return items.sort((a, b) => a.position - b.position);
+    getInflight(key) {
+      return request(this.#tx.objectStore("inflight").get(key));
     }
-    getQueue(conversationId) {
-      return request(this.#tx.objectStore("queues").get(conversationId));
+    putInflight(record) {
+      return request(this.#tx.objectStore("inflight").put(record));
     }
-    putQueue(state) {
-      return request(this.#tx.objectStore("queues").put(state));
+    deleteInflight(key) {
+      return request(this.#tx.objectStore("inflight").delete(key));
     }
-    getLease(conversationId) {
-      return request(this.#tx.objectStore("leases").get(conversationId));
+    async getState(key) {
+      return await request(this.#tx.objectStore("state").get(key)) ?? { key, paused: false, editBy: null, editUntil: 0 };
+    }
+    putState(state) {
+      return request(this.#tx.objectStore("state").put(state));
+    }
+    getLease(key) {
+      return request(this.#tx.objectStore("locks").get(key));
     }
     putLease(lease) {
-      return request(this.#tx.objectStore("leases").put(lease));
+      return request(this.#tx.objectStore("locks").put(lease));
     }
-    deleteLease(conversationId) {
-      return request(this.#tx.objectStore("leases").delete(conversationId));
+    deleteLease(key) {
+      return request(this.#tx.objectStore("locks").delete(key));
+    }
+    pendingOf(conversationId) {
+      return request(this.#tx.objectStore("pending").index("conversationId").getAll(conversationId));
+    }
+    inflightOf(conversationId) {
+      return request(this.#tx.objectStore("inflight").index("conversationId").getAll(conversationId));
     }
   };
   var QueueStore = class _QueueStore {
@@ -1617,23 +1458,44 @@
     constructor(db) {
       this.#db = db;
     }
-    static async open(factory = globalThis.indexedDB, name = DB_NAME) {
+    static async open(factory = globalThis.indexedDB, name = DB_NAME, now = () => Date.now()) {
       const open = factory.open(name, DB_VERSION);
-      open.onupgradeneeded = () => {
-        const db = open.result;
-        const items = db.createObjectStore("items", { keyPath: "id" });
-        items.createIndex("conversationId", "conversationId");
-        db.createObjectStore("queues", { keyPath: "conversationId" });
-        db.createObjectStore("leases", { keyPath: "conversationId" });
+      open.onupgradeneeded = (event) => {
+        const db2 = open.result;
+        const tx = open.transaction;
+        const pending = db2.createObjectStore("pending", { keyPath: "key" });
+        pending.createIndex("conversationId", "conversationId");
+        const inflight = db2.createObjectStore("inflight", { keyPath: "key" });
+        inflight.createIndex("conversationId", "conversationId");
+        db2.createObjectStore("state", { keyPath: "key" });
+        db2.createObjectStore("locks", { keyPath: "key" });
+        if (event.oldVersion < 1) return;
+        const rows = tx.objectStore("items").getAll();
+        const queues = tx.objectStore("queues").getAll();
+        queues.onsuccess = () => {
+          const migrated = migrateLegacy(rows.result, queues.result, now());
+          for (const record of migrated.pending) tx.objectStore("pending").put(record);
+          for (const record of migrated.inflight) tx.objectStore("inflight").put(record);
+          for (const record of migrated.state) tx.objectStore("state").put(record);
+          db2.deleteObjectStore("queues");
+          db2.deleteObjectStore("leases");
+        };
       };
-      return new _QueueStore(await request(open));
+      const db = await request(open);
+      db.onversionchange = () => db.close();
+      return new _QueueStore(db);
     }
     close() {
       this.#db.close();
     }
+    /** The untouched version 1 rows: the recovery copy of everything the migration folded. */
+    async legacyItems() {
+      if (!this.#db.objectStoreNames.contains("items")) return [];
+      return request(this.#db.transaction("items").objectStore("items").getAll());
+    }
     transact(fn) {
       return new Promise((resolve, reject) => {
-        const tx = this.#db.transaction(["items", "queues", "leases"], "readwrite");
+        const tx = this.#db.transaction(["pending", "inflight", "state", "locks"], "readwrite");
         let result;
         let failure;
         let failed = false;
@@ -1655,79 +1517,580 @@
         );
       });
     }
+    /** A read-only view of one transaction; used by the per-tick snapshot so a waiting queue writes nothing. */
+    read(fn) {
+      return new Promise((resolve, reject) => {
+        const tx = this.#db.transaction(["pending", "inflight", "state", "locks"], "readonly");
+        let result;
+        tx.oncomplete = () => resolve(result);
+        tx.onabort = () => reject(tx.error);
+        fn(new Tx(tx)).then(
+          (value) => {
+            result = value;
+          },
+          (error) => {
+            try {
+              tx.abort();
+            } catch {
+            }
+            reject(error);
+          }
+        );
+      });
+    }
   };
+
+  // src/chatgpt/queue/text.js
+  var SEPARATOR = "\n\n";
+  function normalizeContribution(text) {
+    const unified = String(text ?? "").replace(/\r\n?/g, "\n");
+    if (unified.trim() === "") return "";
+    return unified.replace(/^(?:[ \t]*\n)+/, "").replace(/\s+$/, "");
+  }
+  function joinContributions(...parts) {
+    return parts.filter((part) => part !== "" && part != null).join(SEPARATOR);
+  }
+
+  // src/chatgpt/queue/queue.js
+  var STOP_ACTIONS = {
+    "stop-timeout": "ChatGPT did not confirm the stop. Check the response, then press Interrupt & Send Next again.",
+    "stop-not-idle": "The response may still be running. Wait for it to finish or stop it manually, then try again.",
+    "state-unknown": "Could not tell whether a response is running. Check ChatGPT, then try again."
+  };
+  var OPS_KEPT = 16;
+  var QueueEngine = class {
+    #store;
+    #dispatch;
+    #clock;
+    #tabId;
+    #newId;
+    #leaseTtlMs;
+    #editTtlMs;
+    #tails = /* @__PURE__ */ new Map();
+    constructor(opts) {
+      this.#store = opts.store;
+      this.#dispatch = opts.dispatch;
+      this.#clock = opts.clock;
+      this.#tabId = opts.tabId;
+      this.#newId = opts.newId ?? (() => crypto.randomUUID());
+      this.#leaseTtlMs = opts.leaseTtlMs ?? 45e3;
+      this.#editTtlMs = opts.editTtlMs ?? 3e4;
+    }
+    // ---- reading -------------------------------------------------------------
+    /** Read-only: a waiting queue costs no write. */
+    view(target) {
+      const key = keyOf(target);
+      return this.#store.read(async (tx) => this.#viewOf(await tx.getPending(key), await tx.getInflight(key), await tx.getState(key)));
+    }
+    #viewOf(pending, inflight, state) {
+      const editing = state.editBy !== null && state.editUntil > this.#clock.now();
+      return { pending: pending ?? null, inflight: inflight ?? null, paused: state.paused === true, editing, editBy: editing ? state.editBy : null };
+    }
+    // ---- user-facing editing (any tab, no lease needed) -----------------------
+    /**
+     * Adds one contribution to the conversation's single pending prompt (creating it if there is none),
+     * separated from the existing text by exactly one blank line. `opId` makes a repeated delivery of
+     * the same keystroke or form event a no-op.
+     */
+    append(target, input) {
+      const key = keyOf(target);
+      const text = normalizeContribution(input.text);
+      return this.#store.transact(async (tx) => {
+        if (text === "") return { kind: "ignored" };
+        const now = this.#clock.now();
+        const existing = await tx.getPending(key);
+        if (existing && input.opId && existing.ops.includes(input.opId)) return { kind: "duplicate", record: existing };
+        const ops = (existing?.ops ?? []).concat(input.opId ? [input.opId] : []).slice(-OPS_KEPT);
+        const record = existing ? { ...existing, text: joinContributions(existing.text, text), attachments: existing.attachments.concat(input.attachments ?? []), version: existing.version + 1, updatedAt: now, ops } : {
+          key,
+          id: this.#newId(),
+          accountId: target.accountId,
+          conversationId: target.conversationId,
+          text,
+          attachments: input.attachments ?? [],
+          status: "pending",
+          version: 1,
+          createdAt: now,
+          updatedAt: now,
+          lastError: null,
+          ops
+        };
+        applyAttachmentGate(record, now);
+        await tx.putPending(record);
+        return { kind: "appended", record, created: !existing };
+      });
+    }
+    /** Claims the edit session for this tab: automatic dispatch stands aside while it is open. */
+    beginEdit(target) {
+      const key = keyOf(target);
+      return this.#store.transact(async (tx) => {
+        const pending = await tx.getPending(key);
+        if (!pending) return { kind: "none" };
+        const state = await tx.getState(key);
+        const now = this.#clock.now();
+        if (state.editBy && state.editBy !== this.#tabId && state.editUntil > now) return { kind: "busy", by: state.editBy };
+        await tx.putState({ ...state, editBy: this.#tabId, editUntil: now + this.#editTtlMs });
+        return { kind: "ok", record: pending };
+      });
+    }
+    /** Keeps this tab's edit session alive; false when it was lost (the prompt was deleted or sent). */
+    renewEdit(target) {
+      const key = keyOf(target);
+      return this.#store.transact(async (tx) => {
+        const state = await tx.getState(key);
+        if (state.editBy !== this.#tabId || !await tx.getPending(key)) return false;
+        await tx.putState({ ...state, editUntil: this.#clock.now() + this.#editTtlMs });
+        return true;
+      });
+    }
+    endEdit(target) {
+      const key = keyOf(target);
+      return this.#store.transact(async (tx) => {
+        const state = await tx.getState(key);
+        if (state.editBy === this.#tabId) await tx.putState({ ...state, editBy: null, editUntil: 0 });
+      });
+    }
+    /**
+     * Replaces the whole pending text, keeping its identity. If other tabs appended while this edit was
+     * open and the original text is intact, their additions are kept after the edited text (`rebased`);
+     * any other divergence is a `conflict` and nothing is written.
+     */
+    saveEdit(target, edit) {
+      const key = keyOf(target);
+      const text = normalizeContribution(edit.text);
+      return this.#store.transact(async (tx) => {
+        const pending = await tx.getPending(key);
+        const state = await tx.getState(key);
+        const release = () => state.editBy === this.#tabId ? tx.putState({ ...state, editBy: null, editUntil: 0 }) : void 0;
+        if (!pending) {
+          await release();
+          return { kind: "gone" };
+        }
+        if (text === "") return { kind: "empty" };
+        let next;
+        let kind = "saved";
+        if (pending.version === edit.baseVersion) {
+          next = text;
+        } else if (pending.text.startsWith(edit.baseText)) {
+          next = text + pending.text.slice(edit.baseText.length);
+          kind = "rebased";
+        } else {
+          return { kind: "conflict", record: pending };
+        }
+        const now = this.#clock.now();
+        const record = { ...pending, text: next, version: pending.version + 1, updatedAt: now };
+        if (record.status === "blocked" && record.lastError?.code !== "attachments-not-restorable") {
+          record.status = "pending";
+          record.lastError = null;
+        }
+        applyAttachmentGate(record, now);
+        await tx.putPending(record);
+        await release();
+        return { kind, record };
+      });
+    }
+    /** Deletes the whole pending prompt. An in-flight snapshot is not touched. */
+    remove(target) {
+      const key = keyOf(target);
+      return this.#store.transact(async (tx) => {
+        const pending = await tx.getPending(key);
+        if (!pending) return { kind: "none" };
+        await tx.deletePending(key);
+        const state = await tx.getState(key);
+        if (state.editBy) await tx.putState({ ...state, editBy: null, editUntil: 0 });
+        return { kind: "removed", record: pending };
+      });
+    }
+    pause(target) {
+      return this.#setPaused(target, true);
+    }
+    resume(target) {
+      return this.#setPaused(target, false);
+    }
+    /** Lifts a hold the user has looked at; `dropAttachments` is the explicit consent to send without unrestorable files. */
+    unblock(target, { dropAttachments = false } = {}) {
+      const key = keyOf(target);
+      return this.#store.transact(async (tx) => {
+        const pending = await tx.getPending(key);
+        if (!pending || pending.status !== "blocked") return { kind: "none" };
+        const record = { ...pending, version: pending.version + 1, updatedAt: this.#clock.now() };
+        if (dropAttachments) record.attachments = record.attachments.filter((a) => a.restorable);
+        record.status = "pending";
+        record.lastError = null;
+        applyAttachmentGate(record, record.updatedAt);
+        await tx.putPending(record);
+        return { kind: "unblocked", record };
+      });
+    }
+    /** The user saw in ChatGPT that an uncertain send did go out. */
+    markDelivered(target) {
+      const key = keyOf(target);
+      return this.#store.transact(async (tx) => {
+        const inflight = await tx.getInflight(key);
+        if (!inflight || inflight.status !== "manual-review") throw new QueueError("invalid-state", "There is no uncertain send to confirm.");
+        await tx.deleteInflight(key);
+        return { kind: "delivered" };
+      });
+    }
+    /** The user saw that an uncertain send did not go out: its text returns to the front of the pending prompt. */
+    restoreInflight(target) {
+      const key = keyOf(target);
+      return this.#store.transact(async (tx) => {
+        const inflight = await tx.getInflight(key);
+        if (!inflight || inflight.status !== "manual-review") throw new QueueError("invalid-state", "There is no uncertain send to restore.");
+        await tx.deleteInflight(key);
+        const record = await this.#restore(tx, inflight, null);
+        return { kind: "restored", record };
+      });
+    }
+    /**
+     * Versions before 2 stored queues without an account. The first account to open such a conversation
+     * takes the legacy record over, once; nothing is copied, so no message can exist twice.
+     */
+    adoptLegacy(target) {
+      if (target.accountId === LEGACY_ACCOUNT) return Promise.resolve(0);
+      const key = keyOf(target);
+      const legacy = keyOf({ accountId: LEGACY_ACCOUNT, conversationId: target.conversationId });
+      return this.#store.transact(async (tx) => {
+        if (await tx.getPending(key) || await tx.getInflight(key)) return 0;
+        const [pending, inflight, state] = [await tx.getPending(legacy), await tx.getInflight(legacy), await tx.getState(legacy)];
+        if (!pending && !inflight) return 0;
+        if (pending) {
+          await tx.deletePending(legacy);
+          await tx.putPending({ ...pending, key, accountId: target.accountId });
+        }
+        if (inflight) {
+          await tx.deleteInflight(legacy);
+          await tx.putInflight({ ...inflight, key, accountId: target.accountId });
+        }
+        if (state.paused) {
+          await tx.putState({ ...state, key });
+          await tx.putState({ ...state, paused: false, editBy: null, editUntil: 0 });
+        }
+        return 1;
+      });
+    }
+    // ---- sending (lease holder only) -----------------------------------------
+    /**
+     * Automatic dispatch, one step. Never stops a response and never retries: while the response is
+     * running, settling, or Send is unavailable it answers `waiting` and changes nothing.
+     */
+    step(target) {
+      return this.#serial(keyOf(target), async () => {
+        if (target.conversationId === "new") return { kind: "waiting", reason: "unresolved-conversation" };
+        let view = await this.view(target);
+        if (view.inflight?.status === "sending") {
+          const lease2 = await this.#acquire(target);
+          if (!lease2.ok) return lease2.outcome;
+          view = await this.view(target);
+        }
+        const gate = this.#gate(view, false);
+        if (gate) return gate;
+        const ready = await this.#dispatch.readiness(target);
+        if (ready.state === "waiting") return { kind: "waiting", reason: ready.reason };
+        if (ready.state === "blocked") return this.#hold(target, view.pending, ready);
+        const lease = await this.#acquire(target);
+        if (!lease.ok) return lease.outcome;
+        const claimed = await this.#claim(target, lease.token, false);
+        if (claimed.kind !== "claimed") return claimed;
+        return this.#deliver(target, claimed.snapshot, "submit");
+      });
+    }
+    /**
+     * Explicit user action on the whole pending prompt. With `native` and a positively detected native
+     * steer path it uses that; otherwise, if a response is running, it stops it and only once the stop
+     * is confirmed submits the text once. Any doubt leaves the prompt pending with an actionable error.
+     */
+    steer(target, { native = true } = {}) {
+      return this.#serial(keyOf(target), async () => {
+        if (target.conversationId === "new") return { kind: "waiting", reason: "unresolved-conversation" };
+        const view = await this.view(target);
+        const gate = this.#gate(view, true);
+        if (gate) return gate;
+        const state = await this.#dispatch.readState(target);
+        if (state === "unknown") return this.#interruptFailed(target, "state-unknown", "Could not read the conversation state.");
+        let lease = await this.#acquire(target);
+        if (!lease.ok) return lease.outcome;
+        if (state === "generating") {
+          if (native) {
+            const claimed2 = await this.#claim(target, lease.token, true);
+            if (claimed2.kind !== "claimed") return claimed2;
+            const outcome = await this.#deliver(target, claimed2.snapshot, "steer");
+            if (outcome.kind !== "unsupported") return outcome;
+          }
+          const stop = await this.#dispatch.stop(target);
+          if (stop.kind !== "confirmed") return this.#interruptFailed(target, stop.code, stop.message);
+          lease = await this.#acquire(target);
+          if (!lease.ok) return lease.outcome;
+        }
+        const claimed = await this.#claim(target, lease.token, true);
+        if (claimed.kind === "gone") return { kind: "interrupt-aborted", reason: "pending-changed" };
+        if (claimed.kind !== "claimed") return claimed;
+        return this.#deliver(target, claimed.snapshot, "submit");
+      });
+    }
+    /** Renews the lease; call periodically while this tab is the active sender. */
+    async heartbeat(target) {
+      return (await this.#acquire(target)).ok;
+    }
+    release(target) {
+      const key = keyOf(target);
+      return this.#store.transact(async (tx) => {
+        const lease = await tx.getLease(key);
+        if (lease?.holder === this.#tabId) await tx.deleteLease(key);
+      });
+    }
+    // ---- internals -----------------------------------------------------------
+    #serial(key, fn) {
+      const run = (this.#tails.get(key) ?? Promise.resolve()).then(fn, fn);
+      this.#tails.set(
+        key,
+        run.catch(() => void 0)
+      );
+      return run;
+    }
+    #setPaused(target, paused) {
+      const key = keyOf(target);
+      return this.#store.transact(async (tx) => {
+        await tx.putState({ ...await tx.getState(key), paused });
+      });
+    }
+    /** Why nothing may be sent now, or null. `explicit` is a user action: pause does not stop it. */
+    #gate(view, explicit) {
+      const { pending, inflight } = view;
+      if (inflight?.status === "manual-review") return { kind: "halted", itemId: inflight.id, status: "manual-review" };
+      if (inflight) return { kind: "busy", itemId: inflight.id };
+      if (!pending) return { kind: "idle" };
+      if (pending.status !== "pending") return { kind: "halted", itemId: pending.id, status: pending.status };
+      if (view.editing) return explicit ? { kind: "editing" } : { kind: "waiting", reason: "editing" };
+      if (view.paused && !explicit) return { kind: "paused" };
+      return null;
+    }
+    /** The dispatcher found the page unusable for a reason only the user can fix: hold the prompt, once. */
+    async #hold(target, pending, blocked) {
+      const key = keyOf(target);
+      await this.#store.transact(async (tx) => {
+        const record = await tx.getPending(key);
+        if (!record || record.id !== pending.id || record.status !== "pending") return;
+        await tx.putPending({ ...record, status: "blocked", lastError: errorOf(blocked, this.#clock.now()), updatedAt: this.#clock.now() });
+      });
+      return { kind: "halted", itemId: pending.id, status: "blocked" };
+    }
+    /**
+     * Acquires or renews this tab's lease. A fresh acquisition (first, or after
+     * expiry) gets a new fencing token and, in the same transaction, turns any
+     * snapshot still `sending` under an older token into manual-review: its
+     * sender is gone and we cannot know whether it was delivered.
+     */
+    #acquire(target) {
+      const key = keyOf(target);
+      return this.#store.transact(async (tx) => {
+        const now = this.#clock.now();
+        const current = await tx.getLease(key);
+        if (current && current.expiresAt > now && current.holder !== this.#tabId) {
+          return { ok: false, outcome: { kind: "not-leader", holder: current.holder, expiresAt: current.expiresAt } };
+        }
+        const keep = current !== void 0 && current.holder === this.#tabId && current.expiresAt > now;
+        const token = keep ? current.token : (current?.token ?? 0) + 1;
+        await tx.putLease({ key, holder: this.#tabId, token, expiresAt: now + this.#leaseTtlMs });
+        if (!keep) {
+          const inflight = await tx.getInflight(key);
+          if (inflight?.status === "sending" && inflight.leaseToken !== token) {
+            await tx.putInflight({ ...inflight, status: "manual-review", lastError: orphanError(now) });
+          }
+        }
+        return { ok: true, token };
+      });
+    }
+    /**
+     * The only place the pending prompt becomes an in-flight snapshot: one transaction moves the text,
+     * so every append lands either in this snapshot (committed before it) or in the next pending prompt.
+     */
+    async #claim(target, token, explicit) {
+      const key = keyOf(target);
+      return this.#store.transact(async (tx) => {
+        const lease = await tx.getLease(key);
+        const now = this.#clock.now();
+        if (!lease || lease.holder !== this.#tabId || lease.token !== token || lease.expiresAt <= now) {
+          throw new QueueError("lease-lost", "Another tab holds the sender lease.");
+        }
+        const view = this.#viewOf(await tx.getPending(key), await tx.getInflight(key), await tx.getState(key));
+        const gate = this.#gate(view, explicit);
+        if (gate) return gate.kind === "idle" ? { kind: "gone" } : gate;
+        const { pending } = view;
+        const snapshot = {
+          key,
+          id: this.#newId(),
+          sourceId: pending.id,
+          accountId: pending.accountId,
+          conversationId: pending.conversationId,
+          text: pending.text,
+          attachments: pending.attachments,
+          version: pending.version,
+          status: "sending",
+          attempts: 1,
+          leaseToken: token,
+          claimedAt: now,
+          lastError: null
+        };
+        await tx.putInflight(snapshot);
+        await tx.deletePending(key);
+        await tx.putLease({ ...lease, expiresAt: now + this.#leaseTtlMs });
+        return { kind: "claimed", snapshot };
+      }).catch(async (error) => {
+        if (error instanceof QueueError && error.code === "lease-lost") return this.#notLeader(key);
+        throw error;
+      });
+    }
+    async #notLeader(key) {
+      const lease = await this.#store.transact((tx) => tx.getLease(key));
+      return { kind: "not-leader", holder: lease?.holder ?? "unknown", expiresAt: lease?.expiresAt ?? 0 };
+    }
+    async #deliver(target, snapshot, via) {
+      const request2 = {
+        itemId: snapshot.id,
+        sourceId: snapshot.sourceId,
+        accountId: snapshot.accountId,
+        conversationId: snapshot.conversationId,
+        text: snapshot.text,
+        attachments: snapshot.attachments
+      };
+      const result = await this.#dispatch[via](request2);
+      return this.#record(snapshot, result);
+    }
+    /** Records a send result; compare-and-set on the snapshot id so stale results are dropped. */
+    #record(snapshot, result) {
+      return this.#store.transact(async (tx) => {
+        const current = await tx.getInflight(snapshot.key);
+        if (!current || current.id !== snapshot.id || current.status !== "sending" && current.status !== "manual-review") {
+          return { kind: "busy", itemId: snapshot.id };
+        }
+        const now = this.#clock.now();
+        if (result.kind === "accepted") {
+          await tx.deleteInflight(snapshot.key);
+          return { kind: "sent", itemId: snapshot.id };
+        }
+        if (result.kind === "uncertain") {
+          await tx.putInflight({
+            ...current,
+            status: "manual-review",
+            lastError: {
+              code: result.code,
+              message: result.message,
+              action: "Check the conversation in ChatGPT. Mark the message delivered if it is there, or restore it to the queue if it is not.",
+              at: now
+            }
+          });
+          return { kind: "manual-review", itemId: snapshot.id };
+        }
+        await tx.deleteInflight(snapshot.key);
+        if (result.kind === "rejected") {
+          const record = await this.#restore(tx, current, { code: result.code, message: result.message, action: result.action ?? "Fix the problem in ChatGPT, then press Retry.", at: now });
+          return { kind: "rejected", itemId: snapshot.id, error: record.lastError };
+        }
+        await this.#restore(tx, current, null);
+        return result.kind === "unsupported" ? { kind: "unsupported" } : { kind: "waiting", reason: result.reason ?? "not-ready" };
+      });
+    }
+    async #restore(tx, snapshot, error) {
+      const now = this.#clock.now();
+      const later = await tx.getPending(snapshot.key);
+      const record = {
+        key: snapshot.key,
+        id: snapshot.sourceId,
+        accountId: snapshot.accountId,
+        conversationId: snapshot.conversationId,
+        text: joinContributions(snapshot.text, later?.text),
+        attachments: snapshot.attachments.concat(later?.attachments ?? []),
+        status: error ? "blocked" : later?.status ?? "pending",
+        version: Math.max(later?.version ?? 0, snapshot.version ?? 0) + 1,
+        createdAt: later?.createdAt ?? now,
+        updatedAt: now,
+        lastError: error ?? later?.lastError ?? null,
+        ops: later?.ops ?? []
+      };
+      applyAttachmentGate(record, now);
+      await tx.putPending(record);
+      return record;
+    }
+    async #interruptFailed(target, code, message) {
+      const key = keyOf(target);
+      const error = {
+        code,
+        message,
+        action: STOP_ACTIONS[code] ?? "The response was not confirmed stopped. Nothing was sent; check ChatGPT and try again.",
+        at: this.#clock.now()
+      };
+      await this.#store.transact(async (tx) => {
+        const pending = await tx.getPending(key);
+        if (pending?.status === "pending") await tx.putPending({ ...pending, lastError: error });
+      });
+      return { kind: "interrupt-failed", error };
+    }
+  };
+  function errorOf(blocked, at) {
+    return { code: blocked.code, message: blocked.message, action: blocked.action ?? "Fix the problem in ChatGPT, then press Retry.", at };
+  }
+  function applyAttachmentGate(record, now) {
+    const lost = record.attachments.filter((a) => !a.restorable);
+    if (lost.length) {
+      record.status = "blocked";
+      record.lastError = {
+        code: "attachments-not-restorable",
+        message: `Cannot restore ${lost.map((a) => a.name).join(", ")}.`,
+        action: "Send without the files, or delete the prompt and reattach them.",
+        at: now
+      };
+    } else if (record.lastError?.code === "attachments-not-restorable") {
+      record.status = "pending";
+      record.lastError = null;
+    }
+  }
+  function orphanError(now) {
+    return {
+      code: "orphaned-send",
+      message: "The tab that was sending this message stopped before reporting the result.",
+      action: "Check the conversation in ChatGPT. Mark the message delivered if it is there, or restore it to the queue if it is not.",
+      at: now
+    };
+  }
 
   // src/chatgpt/queue/view.js
   var STYLE_ID = "gs-queue-style";
   var CSS = `
 .gs-q{box-sizing:border-box;width:100%;max-width:100%;min-width:0;margin:0 0 8px;padding:6px 8px;border:1px solid rgba(127,127,127,.3);border-radius:16px;background:var(--main-surface-secondary,rgba(127,127,127,.1));color:inherit;font:inherit;font-size:14px;line-height:1.35}
+.gs-q[hidden]{display:none}
 .gs-q *{box-sizing:border-box;min-width:0}
 .gs-q svg{width:1.1em;height:1.1em;flex:none;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 .gs-q button{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:32px;padding:4px 10px;border:1px solid rgba(127,127,127,.45);border-radius:10px;background:transparent;color:inherit;font:inherit;cursor:pointer}
 .gs-q button:hover:not(:disabled){background:rgba(127,127,127,.15)}
 .gs-q button:disabled{opacity:.45;cursor:not-allowed}
-.gs-q button:focus-visible,.gs-q textarea:focus-visible{outline:2px solid #2563eb;outline-offset:1px}
+.gs-q button:focus-visible{outline:2px solid #2563eb;outline-offset:1px}
 .gs-q-head{display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px}
-.gs-q-toggle{border-color:transparent!important;padding:4px 6px!important}
-.gs-q-toggle svg{transition:transform .15s}
-.gs-q-toggle[aria-expanded="false"] svg{transform:rotate(-90deg)}
 .gs-q-title{font-weight:600}
-.gs-q-status{opacity:.7;font-size:12px}
+.gs-q-status{opacity:.75;font-size:12px}
 .gs-q-badge{padding:1px 8px;border:1px solid currentColor;border-radius:999px;font-size:12px;opacity:.8}
 .gs-q-spacer{flex:1 1 0}
-.gs-q-head-actions{display:flex;flex-wrap:wrap;gap:6px}
-.gs-q .gs-q-interrupt{border-color:currentColor;font-weight:600}
-.gs-q .gs-q-armed{border-color:#b91c1c;color:#b91c1c}
-.gs-q-error{margin:6px 0 0;padding:6px 8px;border-radius:8px;border:1px solid #b91c1c;color:#b91c1c;overflow-wrap:anywhere}
-.gs-q-list{list-style:none;margin:6px 0 0;padding:0;display:grid;gap:2px}
-.gs-q-item{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;align-items:center;gap:2px 10px;padding:4px 2px;border-top:1px solid rgba(127,127,127,.18)}
-.gs-q-item.gs-q-dragging{opacity:.5}
-.gs-q-item.gs-q-drop-before{box-shadow:0 -2px 0 #2563eb}
-.gs-q-item.gs-q-drop-after{box-shadow:0 2px 0 #2563eb}
-.gs-q-num{display:inline-flex;align-items:center;justify-content:center;min-width:2em;padding:2px 6px;border:1px solid rgba(127,127,127,.4);border-radius:8px;font-size:13px}
-.gs-q-main{display:flex;gap:12px;align-items:baseline;overflow:hidden}
-.gs-q-name{flex:0 1 45%;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.gs-q-preview{flex:1 1 0;opacity:.65;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.gs-q-state{flex:none;font-size:12px;padding:0 6px;border-radius:6px;background:rgba(127,127,127,.25)}
-.gs-q-model{grid-column:3;padding:1px 8px;border-radius:8px;background:rgba(127,127,127,.2);font-size:12px;white-space:nowrap}
-.gs-q-actions{grid-column:4;display:flex;flex-wrap:wrap;align-items:center;gap:2px;justify-content:flex-end}
-.gs-q .gs-q-icon{border-color:transparent;padding:4px 6px}
-.gs-q .gs-q-handle{touch-action:none;cursor:grab}
-.gs-q-note{grid-column:1/-1;margin:0;font-size:12px;opacity:.8;overflow-wrap:anywhere}
-.gs-q-edit{grid-column:2/-1;display:grid;gap:4px}
-.gs-q-edit .gs-q-actions{justify-content:flex-start}
-.gs-q textarea{width:100%;max-width:100%;resize:vertical;font:inherit;color:inherit;background:transparent;border:1px solid rgba(127,127,127,.5);border-radius:8px;padding:6px 8px}
-.gs-q-add{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;align-items:flex-end}
-.gs-q-add textarea{flex:1 1 12em}
+.gs-q-actions{display:flex;flex-wrap:wrap;gap:6px}
+.gs-q .gs-q-primary{border-color:currentColor;font-weight:600}
+.gs-q-note{margin:6px 0 0;padding:6px 8px;border-radius:8px;border:1px solid rgba(127,127,127,.4);overflow-wrap:anywhere}
+.gs-q-note[role="alert"]{border-color:#b91c1c;color:#b91c1c}
+.gs-q-text{margin:6px 0 0;padding:6px 8px;max-height:9em;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;border-top:1px solid rgba(127,127,127,.18)}
+.gs-q-inflight{margin:6px 0 0;display:flex;flex-wrap:wrap;gap:6px 8px;align-items:center}
 @media (max-width:560px){
-.gs-q-head-actions{flex:1 1 100%}
-.gs-q-head-actions button{flex:1 1 auto}
-.gs-q-item{grid-template-columns:auto minmax(0,1fr) auto}
-.gs-q-main{display:block}
-.gs-q-name,.gs-q-preview{display:block}
-.gs-q-model{grid-column:2/-1;justify-self:start}
-.gs-q-actions{grid-column:1/-1;justify-content:flex-end}
+.gs-q-actions{flex:1 1 100%}
+.gs-q-actions button{flex:1 1 auto}
 .gs-q button{min-height:36px}
 }
 `;
-  var STATUS_LABEL = {
-    pending: "Queued",
-    sending: "Sending",
-    sent: "Sent",
-    failed: "Failed",
-    "manual-review": "Needs review",
-    blocked: "Blocked"
-  };
-  var EDITABLE = /* @__PURE__ */ new Set(["pending", "failed", "blocked"]);
   var ICONS = {
-    chevron: ["M6 9l6 6 6-6"],
     interrupt: ["M5 5l7 7-7 7", "M13 5l7 7-7 7"],
+    steer: ["M5 12h14", "M13 6l6 6-6 6"],
     pause: ["M9 5v14", "M15 5v14"],
     play: ["M7 5l12 7-12 7z"],
     trash: ["M4 7h16", "M9 7V4h6v3", "M6 7l1 13h10l1-13"],
-    grip: ["M9 6h.01", "M15 6h.01", "M9 12h.01", "M15 12h.01", "M9 18h.01", "M15 18h.01"],
     pencil: ["M4 20l4-1 11-11-3-3L5 16z", "M14 7l3 3"],
-    remove: ["M12 21a9 9 0 100-18 9 9 0 000 18z", "M9 9l6 6", "M15 9l-6 6"]
+    queue: ["M12 5v14", "M5 12h14"]
   };
   function icon(doc, name) {
     const ns = "http://www.w3.org/2000/svg";
@@ -1741,219 +2104,142 @@
     }
     return svg;
   }
+  var present = (value) => value !== null && value !== void 0 && value !== false;
   function el(doc, tag, attrs = {}, children = []) {
     const node = doc.createElement(tag);
     for (const [key, value] of Object.entries(attrs)) {
-      if (value === false || value == null) continue;
+      if (!present(value)) continue;
       node.setAttribute(key, value === true ? "" : String(value));
     }
-    for (const child of [].concat(children)) node.append(child);
+    for (const child of [].concat(children)) if (present(child)) node.append(child);
     return node;
   }
-  function button(doc, key, content, onClick, { label, disabled, className, title, pressed, expanded } = {}) {
-    const node = el(
-      doc,
-      "button",
-      { type: "button", "data-gs-key": key, "aria-label": label, disabled, class: className, title, "aria-expanded": expanded == null ? null : String(expanded) },
-      content
-    );
+  function button(doc, key, content, onClick, { label, disabled, className, title } = {}) {
+    const node = el(doc, "button", { type: "button", "data-gs-key": key, "aria-label": label, disabled, class: className, title }, content);
     node.addEventListener("click", onClick);
     return node;
   }
-  function summarize(text) {
-    const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-    return { title: lines[0] ?? "(empty message)", preview: lines.slice(1).join(" ") };
+  var WAITING = {
+    generating: "Waiting for response",
+    settling: "Waiting for response",
+    "send-unavailable": "Waiting for Send",
+    "composer-has-draft": "Waiting for the composer to be empty",
+    "composer-missing": "Waiting for ChatGPT",
+    "unknown-state": "Waiting for ChatGPT",
+    "unresolved-conversation": "Open the conversation to send",
+    editing: "Editing"
+  };
+  function statusOf(model) {
+    if (model.edit) return "Editing";
+    if (model.busy === "interrupting") return "Stopping the response";
+    if (model.busy === "steering") return "Steering";
+    if (model.inflight?.status === "sending") return "Sending";
+    if (model.inflight?.status === "manual-review") return "Needs review";
+    if (!model.pending) return null;
+    if (model.pending.status === "blocked") return "Blocked";
+    if (model.paused) return "Paused";
+    if (model.editingElsewhere) return "Being edited in another tab";
+    return WAITING[model.waiting] ?? "Queued";
   }
-  function interruptBlocker({ items, interrupting }) {
-    if (interrupting) return "Stopping the current response.";
-    const head = items.find((i) => i.status !== "sent");
-    if (!head) return "The queue is empty.";
-    if (head.status === "sending") return "The next message is already being sent.";
-    if (head.status !== "pending") return `Resolve the first message (${STATUS_LABEL[head.status]}) first.`;
+  function actionBlocker(model) {
+    if (model.busy) return "Working on it.";
+    if (model.edit) return "Save or cancel the edit first.";
+    if (!model.pending) return "Nothing is queued.";
+    if (model.inflight) return model.inflight.status === "sending" ? "The previous message is still being sent." : "Resolve the message that needs review first.";
+    if (model.pending.status !== "pending") return "Resolve the hold on the queued prompt first.";
     return null;
   }
-  function dropIndex(rects, y) {
-    let index = 0;
-    for (const rect of rects) {
-      if (y > rect.top + (rect.bottom - rect.top) / 2) index += 1;
-    }
-    return index;
-  }
   function renderPanel(doc, root, model, on) {
-    const unsent = model.items.filter((i) => i.status !== "sent");
-    const sentCount = model.items.length - unsent.length;
-    const blocker = interruptBlocker(model);
-    const clearable = model.items.some((i) => i.status !== "sending");
-    const statusBits = [];
-    if (model.paused) statusBits.push("paused");
-    if (sentCount) statusBits.push(`${sentCount} sent`);
-    const interruptBtn = button(doc, "head:interrupt", [icon(doc, "interrupt"), "Interrupt & Send Next"], () => on.interrupt(), {
-      className: "gs-q-interrupt",
-      disabled: blocker !== null,
-      title: blocker
-    });
-    if (model.interrupting) interruptBtn.setAttribute("aria-busy", "true");
-    const head = el(doc, "div", { class: "gs-q-head" }, [
-      button(doc, "head:toggle", icon(doc, "chevron"), () => on.toggleCollapsed(), {
-        className: "gs-q-toggle",
-        label: model.collapsed ? "Expand queue" : "Collapse queue",
-        expanded: !model.collapsed
-      }),
-      el(doc, "span", { class: "gs-q-title" }, `Queue (${unsent.length})`),
-      el(doc, "span", { class: "gs-q-status", role: "status", "aria-live": "polite" }, statusBits.join(" \xB7 ")),
-      model.dryRun ? el(doc, "span", { class: "gs-q-badge", title: "Dry run: nothing is sent to ChatGPT" }, "Dry run") : null,
-      el(doc, "span", { class: "gs-q-spacer" }),
-      el(doc, "div", { class: "gs-q-head-actions" }, [
-        interruptBtn,
-        button(doc, "head:pause", [icon(doc, model.paused ? "play" : "pause"), model.paused ? "Resume" : "Pause"], () => on.togglePause(), {
-          label: model.paused ? "Resume queue" : "Pause queue"
-        }),
-        button(doc, "head:clear", [icon(doc, "trash"), model.confirmClear ? "Confirm clear" : "Clear"], () => on.clear(), {
-          label: model.confirmClear ? "Confirm clearing the queue" : "Clear queue",
-          disabled: !clearable,
-          className: model.confirmClear ? "gs-q-armed" : null
+    const { pending, inflight } = model;
+    const canQueue = model.generating && !model.edit;
+    const visible = pending || inflight || model.error || model.note || model.edit || canQueue && model.composerHasText;
+    root.hidden = !visible;
+    if (!visible) {
+      root.replaceChildren();
+      return;
+    }
+    const blocker = actionBlocker(model);
+    const status = statusOf(model);
+    const children = [];
+    const actions = [];
+    if (canQueue) {
+      actions.push(
+        button(doc, "head:queue", [icon(doc, "queue"), "Queue"], () => on.queueDraft(), {
+          label: "Add the composer text to the queued prompt",
+          disabled: !model.composerHasText || model.busy
         })
+      );
+    }
+    if (model.edit) {
+      actions.push(
+        button(doc, "head:save", "Save", () => on.saveEdit(), { className: "gs-q-primary", label: "Save the edited prompt" }),
+        button(doc, "head:cancel", "Cancel", () => on.cancelEdit(), { label: "Cancel the edit" }),
+        button(doc, "head:delete", [icon(doc, "trash"), "Delete"], () => on.remove(), { label: "Delete the queued prompt", disabled: model.busy })
+      );
+    } else if (pending) {
+      actions.push(
+        button(doc, "head:edit", [icon(doc, "pencil"), "Edit"], () => on.startEdit(), { label: "Edit the queued prompt", disabled: model.busy || model.editingElsewhere }),
+        button(doc, "head:delete", [icon(doc, "trash"), "Delete"], () => on.remove(), { label: "Delete the queued prompt", disabled: model.busy }),
+        button(doc, "head:steer", [icon(doc, "steer"), "Steer"], () => on.steer(), {
+          label: "Steer: send the queued prompt now",
+          disabled: blocker !== null,
+          title: blocker
+        }),
+        button(doc, "head:interrupt", [icon(doc, "interrupt"), "Interrupt & Send Next"], () => on.interrupt(), {
+          className: "gs-q-primary",
+          disabled: blocker !== null,
+          title: blocker
+        }),
+        button(doc, "head:pause", [icon(doc, model.paused ? "play" : "pause"), model.paused ? "Resume" : "Pause"], () => on.togglePause(), {
+          label: model.paused ? "Resume the queue" : "Pause the queue",
+          disabled: pending.status !== "pending"
+        })
+      );
+    }
+    children.push(
+      el(doc, "div", { class: "gs-q-head" }, [
+        el(doc, "span", { class: "gs-q-title" }, `Queue (${pending ? 1 : 0})`),
+        el(doc, "span", { class: "gs-q-status", role: "status", "aria-live": "polite" }, status),
+        model.dryRun ? el(doc, "span", { class: "gs-q-badge", title: "Dry run: nothing is sent to ChatGPT" }, "Dry run") : null,
+        el(doc, "span", { class: "gs-q-spacer" }),
+        el(doc, "div", { class: "gs-q-actions", role: "group", "aria-label": "Queue actions" }, actions)
       ])
-    ]);
-    const children = [head];
-    const message = model.error ?? (model.note ? { message: model.note, action: "" } : null);
+    );
+    const message = model.error ?? pending?.lastError ?? inflight?.lastError ?? (model.note ? { message: model.note, action: "" } : null);
     if (message) {
-      children.push(el(doc, "p", { class: "gs-q-error", role: model.error ? "alert" : "status" }, `${message.message} ${message.action}`.trim()));
+      const alert = Boolean(model.error ?? pending?.lastError ?? inflight?.lastError);
+      children.push(el(doc, "p", { class: "gs-q-note", role: alert ? "alert" : "status", "data-gs-note": message.code }, `${message.message ?? ""} ${message.action ?? ""}`.trim()));
     }
-    if (!model.collapsed) {
-      const list = el(doc, "ol", { class: "gs-q-list", "aria-label": "Queued messages" });
-      unsent.forEach((item, index) => list.append(renderItem(doc, item, index, unsent.length, model, on)));
-      children.push(list);
-      const input = el(doc, "textarea", {
-        rows: 1,
-        "data-gs-key": "add:input",
-        "aria-label": "Message to queue",
-        placeholder: "Queue a message"
-      });
-      input.value = model.draft ?? "";
-      input.addEventListener("input", () => on.draft(input.value));
-      input.addEventListener("keydown", (event) => {
-        if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
-          event.preventDefault();
-          on.add(input.value);
-        }
-      });
-      children.push(el(doc, "div", { class: "gs-q-add" }, [input, button(doc, "add:submit", "Add to queue", () => on.add(input.value))]));
-    }
-    root.replaceChildren(...children);
-    root.onkeydown = (event) => {
-      if (event.key === "Escape" && model.confirmClear) on.disarmClear();
-    };
-  }
-  function renderItem(doc, item, index, count, model, on) {
-    const li = el(doc, "li", { class: "gs-q-item", "data-id": item.id, "data-status": item.status });
-    const editing = model.edit?.id === item.id;
-    const number = el(doc, "span", { class: "gs-q-num", "aria-label": `Message ${index + 1} of ${count}` }, String(index + 1));
-    if (editing) {
-      const area = el(doc, "textarea", { rows: 3, "data-gs-key": `${item.id}:edit`, "aria-label": "Edit queued message" });
-      area.value = model.edit.text;
-      area.addEventListener("input", () => on.editDraft(area.value));
-      area.addEventListener("keydown", (event) => {
-        if (event.key === "Escape") {
-          event.preventDefault();
-          on.cancelEdit();
-        } else if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
-          event.preventDefault();
-          on.saveEdit(item.id, area.value);
-        }
-      });
-      li.append(
-        number,
-        el(doc, "div", { class: "gs-q-edit" }, [
-          area,
-          el(doc, "div", { class: "gs-q-actions" }, [
-            button(doc, `${item.id}:save`, "Save", () => on.saveEdit(item.id, area.value), { className: "gs-q-interrupt" }),
-            button(doc, `${item.id}:cancel`, "Cancel", () => on.cancelEdit())
-          ])
+    if (inflight?.status === "manual-review") {
+      children.push(
+        el(doc, "div", { class: "gs-q-inflight" }, [
+          button(doc, "inflight:delivered", "Mark delivered", () => on.markDelivered(), { label: "The message did reach ChatGPT" }),
+          button(doc, "inflight:restore", "Restore to queue", () => on.restoreInflight(), { label: "The message did not reach ChatGPT; put it back in the queue" })
         ])
       );
-      return li;
     }
-    const { title, preview } = summarize(item.text);
-    const locked = item.status === "sending";
-    const main = el(doc, "div", { class: "gs-q-main", title: item.text }, [
-      el(doc, "span", { class: "gs-q-name" }, title),
-      preview ? el(doc, "span", { class: "gs-q-preview" }, preview) : null,
-      item.status !== "pending" ? el(doc, "span", { class: "gs-q-state" }, STATUS_LABEL[item.status] ?? item.status) : null
-    ]);
-    li.append(number, main);
-    if (item.model) li.append(el(doc, "span", { class: "gs-q-model", title: "Model for this message" }, item.model));
-    const handle = button(doc, `${item.id}:handle`, icon(doc, "grip"), () => void 0, {
-      className: "gs-q-icon gs-q-handle",
-      label: `Reorder message ${index + 1}: drag, or use the arrow keys`,
-      disabled: locked || count < 2
-    });
-    attachReorder(doc, handle, li, item, index, on);
-    const actions = el(doc, "div", { class: "gs-q-actions", role: "group", "aria-label": `Actions for message ${index + 1}` });
-    actions.append(handle);
-    if (EDITABLE.has(item.status)) {
-      actions.append(button(doc, `${item.id}:edit`, icon(doc, "pencil"), () => on.startEdit(item), { className: "gs-q-icon", label: `Edit message ${index + 1}` }));
+    if (pending) {
+      if (pending.status === "blocked") {
+        const files = pending.lastError?.code === "attachments-not-restorable";
+        children.push(
+          el(doc, "div", { class: "gs-q-inflight" }, [
+            files ? button(doc, "head:drop-files", "Send without files", () => on.unblock(true), { label: "Drop the files that cannot be restored and queue the text" }) : button(doc, "head:retry", "Retry", () => on.unblock(false), { label: "Try sending the queued prompt again" })
+          ])
+        );
+      }
+      children.push(el(doc, "div", { class: "gs-q-text", "data-gs-key": "queued-text", "data-id": pending.id, "data-version": pending.version }, pending.text));
     }
-    if (item.status === "failed" || item.status === "manual-review") {
-      actions.append(button(doc, `${item.id}:retry`, "Retry", () => on.retry(item.id)));
-      actions.append(button(doc, `${item.id}:delivered`, "Mark delivered", () => on.markDelivered(item.id)));
-    }
-    actions.append(
-      button(doc, `${item.id}:remove`, icon(doc, "remove"), () => on.remove(item.id), {
-        className: "gs-q-icon",
-        label: `Remove message ${index + 1}`,
-        disabled: locked
-      })
-    );
-    li.append(actions);
-    li.addEventListener("keydown", (event) => {
-      if (event.key !== "ArrowUp" && event.key !== "ArrowDown" || locked) return;
-      if (!event.altKey && event.target !== handle) return;
-      event.preventDefault();
-      on.move(item.id, index + (event.key === "ArrowUp" ? -1 : 1), `${item.id}:handle`);
-    });
-    if (item.lastError) {
-      li.append(el(doc, "p", { class: "gs-q-note", "data-gs-note": item.lastError.code }, `${item.lastError.message} ${item.lastError.action}`));
-    }
-    return li;
-  }
-  function attachReorder(doc, handle, li, item, index, on) {
-    let drag = null;
-    const rows = () => [...li.parentElement.children];
-    const target = (y) => {
-      const others = rows().filter((row) => row !== li);
-      const index2 = dropIndex(others.map((row) => row.getBoundingClientRect()), y);
-      return { index: index2, row: others[index2] ?? others[others.length - 1], before: index2 < others.length };
-    };
-    const clearMarks = () => rows().forEach((row) => row.classList.remove("gs-q-drop-before", "gs-q-drop-after", "gs-q-dragging"));
-    const finish = (commitY) => {
-      if (!drag) return;
-      const { index: to } = commitY == null ? { index } : target(commitY);
-      drag = null;
-      clearMarks();
-      if (to !== index) on.move(item.id, to, `${item.id}:handle`);
-    };
-    handle.addEventListener("pointerdown", (event) => {
-      if (handle.disabled || event.button != null && event.button !== 0) return;
-      drag = { id: event.pointerId };
-      handle.setPointerCapture?.(event.pointerId);
-      li.classList.add("gs-q-dragging");
-    });
-    handle.addEventListener("pointermove", (event) => {
-      if (!drag) return;
-      rows().forEach((row2) => row2.classList.remove("gs-q-drop-before", "gs-q-drop-after"));
-      const { row, before } = target(event.clientY);
-      row?.classList.add(before ? "gs-q-drop-before" : "gs-q-drop-after");
-    });
-    handle.addEventListener("pointerup", (event) => finish(event.clientY));
-    handle.addEventListener("pointercancel", () => finish(null));
+    root.replaceChildren(...children);
   }
 
   // src/chatgpt/queue/controller.js
   var MESSAGES = {
     "not-leader": "Another tab is sending for this conversation.",
-    "interrupt-aborted": "The first message changed while the response was stopping, so nothing was sent."
+    "interrupt-aborted": "The queued prompt changed while the response was stopping, so nothing was sent.",
+    editing: "Save or cancel the edit first."
   };
+  var CHANNEL = "ghostship-chatgpt-queue";
+  var RELOAD_EVERY = 5;
   function createQueueUi({
     win,
     adapter,
@@ -1963,7 +2249,8 @@
     clock = systemClock,
     tabId = globalThis.crypto.randomUUID(),
     pollMs = 1e3,
-    engineOptions = {}
+    engineOptions = {},
+    BroadcastChannelCtor = win.BroadcastChannel ?? globalThis.BroadcastChannel
   }) {
     const doc = win.document;
     const composer = adapter.composer(doc);
@@ -1972,24 +2259,42 @@
       return { mounted: false, reason: composer ? "no-indexeddb" : "no-composer", dispose() {
       } };
     }
-    let conversationId = adapter.conversationId(win);
+    const io = createComposerIO(win);
+    let lastAccount = null;
+    const targetNow = () => {
+      const read = adapter.accountId(doc);
+      const accountId = read === "unknown" && lastAccount ? lastAccount : read;
+      lastAccount = accountId;
+      return { accountId, conversationId: adapter.conversationId(win) };
+    };
+    let target = targetNow();
     const model = {
-      items: [],
+      pending: null,
+      inflight: null,
       paused: false,
-      interrupting: false,
+      editingElsewhere: false,
+      edit: null,
+      // {target, input, baseVersion, baseText, draft}
+      busy: null,
+      waiting: null,
       error: null,
       note: null,
-      edit: null,
-      draft: "",
-      collapsed: false,
-      confirmClear: false,
+      generating: false,
+      composerHasText: false,
       dryRun: dispatcher.dryRun === true
     };
     let engine = null;
     let store = null;
+    let channel = null;
     let disposed = false;
+    let dispatching = false;
+    let submitting = false;
     let timer = null;
-    let chain = Promise.resolve();
+    let ticks = 0;
+    let reloadSeq = 0;
+    let opSeq = 0;
+    let dispatchChain = Promise.resolve();
+    let actionChain = Promise.resolve();
     if (!doc.getElementById(STYLE_ID)) {
       const style = doc.createElement("style");
       style.id = STYLE_ID;
@@ -1998,23 +2303,28 @@
     }
     const root = doc.createElement("section");
     root.className = "gs-q";
+    root.hidden = true;
     root.setAttribute("data-gs-queue", "");
     root.setAttribute("role", "region");
     root.setAttribute("aria-label", "Message queue");
     composer.before(root);
-    const run = (fn) => {
-      const next = chain.then(fn).catch((error) => {
-        diagnostics?.count("queue.action.failed");
-        model.error = { message: error instanceof Error ? error.message : String(error), action: "" };
-        render();
-      });
-      chain = next;
+    const fail = (error) => {
+      diagnostics?.count("queue.action.failed");
+      model.error = { message: error instanceof Error ? error.message : String(error), action: "" };
+      render();
+    };
+    const chained = (which) => (fn) => {
+      const next = (which === "action" ? actionChain : dispatchChain).then(fn).catch(fail);
+      if (which === "action") actionChain = next;
+      else dispatchChain = next;
       return next;
     };
+    const act = chained("action");
+    const dispatch = chained("dispatch");
     let painted = null;
     function render(focusKey) {
-      const { items, paused, interrupting, error, note, edit, dryRun, collapsed, confirmClear } = model;
-      const signature = JSON.stringify({ items, paused, interrupting, error, note, dryRun, collapsed, confirmClear, editing: edit?.id ?? null });
+      const { pending, inflight, paused, editingElsewhere, edit, busy, waiting, error, note, generating, composerHasText, dryRun } = model;
+      const signature = JSON.stringify({ pending, inflight, paused, editingElsewhere, editing: edit?.baseVersion ?? null, busy, waiting, error, note, generating, composerHasText, dryRun });
       if (signature === painted && !focusKey) return;
       painted = signature;
       const active = doc.activeElement;
@@ -2024,118 +2334,311 @@
       const wanted = root.querySelector(`[data-gs-key="${CSS_ESCAPE(key)}"]`);
       (wanted && !wanted.disabled ? wanted : root.querySelector("button:not(:disabled)"))?.focus({ preventScroll: true });
     }
-    async function reload() {
-      const view = await engine.list(conversationId);
-      model.items = view.items;
-      model.paused = view.paused;
-      if (model.edit && !view.items.some((i) => i.id === model.edit.id && i.status !== "sent")) model.edit = null;
-      render();
-    }
-    const act = (fn, focusKey) => run(async () => {
-      model.error = null;
-      model.confirmClear = false;
-      await fn();
-      await reload();
-      if (focusKey) render(focusKey);
-    });
-    const handlers = {
-      draft: (text) => {
-        model.draft = text;
-      },
-      editDraft: (text) => {
-        if (model.edit) model.edit.text = text;
-      },
-      add: (text) => {
-        if (!text.trim()) return;
-        model.draft = "";
-        const modelName = adapter.currentModel?.(doc) ?? null;
-        return act(() => engine.enqueue(conversationId, { text, model: modelName }), "add:input");
-      },
-      startEdit: (item) => {
-        model.edit = { id: item.id, text: item.text };
-        render(`${item.id}:edit`);
-      },
-      cancelEdit: () => {
-        const id = model.edit?.id;
-        model.edit = null;
-        render(id ? `${id}:edit` : void 0);
-      },
-      saveEdit: (id, text) => act(async () => {
-        model.edit = null;
-        await engine.edit(id, { text });
-      }, `${id}:edit`),
-      move: (id, to, focusKey) => act(() => engine.move(id, to), focusKey),
-      remove: (id) => act(() => engine.remove(id), "add:input"),
-      retry: (id) => act(() => engine.retry(id)),
-      markDelivered: (id) => act(() => engine.markDelivered(id)),
-      toggleCollapsed: () => {
-        model.collapsed = !model.collapsed;
-        model.confirmClear = false;
-        render("head:toggle");
-      },
-      // Clearing discards drafts, so it takes a second press.
-      clear() {
-        if (!model.confirmClear) {
-          model.confirmClear = true;
-          render("head:clear");
-          return;
-        }
-        return act(() => engine.clear(conversationId), "head:clear");
-      },
-      disarmClear: () => {
-        model.confirmClear = false;
-        render("head:clear");
-      },
-      togglePause: () => act(() => model.paused ? engine.resume(conversationId) : engine.pause(conversationId)),
-      interrupt() {
-        model.interrupting = true;
-        model.error = null;
-        model.confirmClear = false;
-        render("head:interrupt");
-        return run(async () => {
-          try {
-            const outcome = await engine.interruptAndSendNext(conversationId);
-            model.error = interruptError(outcome);
-            diagnostics?.count(`queue.interrupt.${outcome.kind}`);
-          } finally {
-            model.interrupting = false;
-          }
-          await reload();
-        });
+    const notify = () => {
+      try {
+        channel?.postMessage({ from: tabId, key: `${target.accountId}:${target.conversationId}` });
+      } catch {
       }
     };
-    function tick() {
-      return run(async () => {
-        if (!engine || model.interrupting) return;
-        const current = adapter.conversationId(win);
-        if (current !== conversationId) {
-          const previous = conversationId;
-          await engine.release(previous).catch(() => void 0);
-          conversationId = current;
-          if (previous === "new" && current !== "new") {
-            const moved = await engine.adoptAfterFirstSend(previous, current).catch(() => 0);
-            if (moved) diagnostics?.count("queue.adopted");
-          }
+    async function reload() {
+      const seq = ++reloadSeq;
+      const asked = target;
+      const view = await engine.view(asked);
+      if (seq !== reloadSeq || asked !== target) return;
+      model.pending = view.pending;
+      model.inflight = view.inflight;
+      model.paused = view.paused;
+      model.editingElsewhere = view.editing && view.editBy !== tabId;
+      if (!view.pending) model.waiting = null;
+      if (!view.pending && !view.inflight && !model.edit) model.error = null;
+      if (model.edit && !view.pending) endEditLocally("gone");
+      render();
+    }
+    function readDom() {
+      model.generating = adapter.generating(doc);
+      const input = adapter.composerInput(doc);
+      model.composerHasText = Boolean(input) && io.hasText(input);
+    }
+    function endEditLocally(why) {
+      const edit = model.edit;
+      if (!edit) return;
+      model.edit = null;
+      const typed = edit.input.isConnected ? io.read(edit.input) : "";
+      io.write(edit.input, why === "gone" ? joinContributions(edit.draft, typed) : edit.draft);
+      if (why === "gone") model.error = { message: "The queued prompt was sent or deleted while you were editing.", action: "Your text is in the composer." };
+    }
+    async function startEdit() {
+      if (model.edit || !engine || !model.pending) return;
+      const t = target;
+      const input = adapter.composerInput(doc);
+      if (!input) return;
+      const begun = await engine.beginEdit(t);
+      if (begun.kind === "busy") {
+        model.note = "Another tab is editing this prompt.";
+        return render();
+      }
+      if (begun.kind !== "ok") return reload();
+      model.error = null;
+      model.note = null;
+      model.edit = { target: t, input, baseVersion: begun.record.version, baseText: begun.record.text, draft: io.read(input) };
+      io.write(input, begun.record.text);
+      input.focus?.();
+      await reload();
+      render("head:save");
+      input.focus?.();
+      notify();
+    }
+    async function saveEdit() {
+      const edit = model.edit;
+      if (!edit || submitting) return;
+      submitting = true;
+      try {
+        const result = await engine.saveEdit(edit.target, { baseVersion: edit.baseVersion, baseText: edit.baseText, text: io.read(edit.input) });
+        if (result.kind === "saved" || result.kind === "rebased") {
           model.edit = null;
+          io.write(edit.input, edit.draft);
+          model.note = result.kind === "rebased" ? "Text added from another tab while you were editing was kept." : null;
+          model.error = null;
+        } else if (result.kind === "conflict") {
+          model.pending = result.record;
+          model.error = {
+            message: "The queued prompt changed in another tab while you were editing.",
+            action: "Your edit is still in the composer. Cancel to discard it and edit the new text."
+          };
+        } else if (result.kind === "empty") {
+          model.note = "An empty prompt is not saved. Use Delete to remove the queued prompt.";
+        } else {
+          endEditLocally("gone");
         }
+        await reload();
+        notify();
+      } finally {
+        submitting = false;
+      }
+    }
+    async function cancelEdit() {
+      const edit = model.edit;
+      if (!edit) return;
+      model.edit = null;
+      io.write(edit.input, edit.draft);
+      model.error = null;
+      model.note = null;
+      await engine.endEdit(edit.target);
+      await reload();
+    }
+    async function appendFromComposer(source) {
+      const t = target;
+      const input = adapter.composerInput(doc);
+      if (!input || submitting) return;
+      const text = io.read(input);
+      if (text.trim() === "") return;
+      submitting = true;
+      try {
+        model.error = null;
+        model.note = null;
+        const result = await engine.append(t, { text, attachments: adapter.composerAttachments?.(doc) ?? [], opId: `${tabId}:${++opSeq}` });
+        diagnostics?.count(`queue.append.${source}`);
+        if (result.kind !== "ignored" && input.isConnected && io.read(input) === text) io.write(input, "");
+        await reload();
+        notify();
+      } finally {
+        submitting = false;
+      }
+    }
+    const submitComposer = (source) => {
+      if (dispatching) {
+        model.note = "Sending the queued prompt; try again in a moment.";
+        return render();
+      }
+      if (!engine) {
+        model.note = "The queue is starting; your text is still in the composer.";
+        return render();
+      }
+      return act(() => model.edit ? saveEdit() : appendFromComposer(source));
+    };
+    const inComposer = (event) => {
+      const input = adapter.composerInput(doc);
+      return input && event.target instanceof win.Node && (input === event.target || input.contains(event.target));
+    };
+    const hijacking = () => dispatching || model.edit !== null || adapter.generating(doc) && target.conversationId !== "new";
+    function onKeydown(event) {
+      if (!inComposer(event)) return;
+      if (event.key === "Escape" && model.edit) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        void act(cancelEdit);
+        return;
+      }
+      if (event.key !== "Enter" || event.shiftKey || event.isComposing || event.keyCode === 229) return;
+      if (!hijacking()) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      void submitComposer("enter");
+    }
+    function onSubmit(event) {
+      const input = adapter.composerInput(doc);
+      if (!input || !event.target?.contains?.(input) || !hijacking()) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      void submitComposer("submit");
+    }
+    function onClick(event) {
+      if (dispatching || !hijacking()) return;
+      const hit = event.target?.closest?.("button");
+      const input = adapter.composerInput(doc);
+      if (!hit || !input || !hit.closest("form")?.contains(input)) return;
+      if (hit !== adapter.sendButton(doc) && hit !== adapter.steerButton(doc)) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      void submitComposer("button");
+    }
+    function onInput(event) {
+      if (!inComposer(event)) return;
+      if (!model.generating && !model.composerHasText && !adapter.generating(doc)) return;
+      const had = model.composerHasText;
+      readDom();
+      if (had !== model.composerHasText) render();
+    }
+    win.addEventListener("keydown", onKeydown, true);
+    win.addEventListener("submit", onSubmit, true);
+    win.addEventListener("click", onClick, true);
+    win.addEventListener("input", onInput, true);
+    const outcomeNote = (outcome) => {
+      if (outcome.kind === "interrupt-failed") return { message: outcome.error.message, action: outcome.error.action };
+      if (outcome.kind === "rejected") return { message: outcome.error.message, action: outcome.error.action };
+      if (outcome.kind === "halted") return { message: `The queued prompt is ${outcome.status}.`, action: "Resolve it first." };
+      if (outcome.kind === "manual-review") return { message: "Send was clicked but ChatGPT showed no sign of accepting it.", action: "Check the conversation, then mark it delivered or restore it." };
+      if (outcome.kind === "waiting" && outcome.reason !== "editing") return { message: `Not sent yet: ${outcome.reason}.`, action: "It will go out when the page is ready." };
+      const message = MESSAGES[outcome.kind] ?? (outcome.kind === "waiting" ? MESSAGES.editing : null);
+      return message ? { message, action: "" } : null;
+    };
+    const explicit = (busy, run) => () => {
+      if (!engine || model.edit) return void 0;
+      const t = target;
+      model.busy = busy;
+      model.error = null;
+      model.note = null;
+      render(busy === "interrupting" ? "head:interrupt" : "head:steer");
+      return dispatch(async () => {
+        try {
+          const outcome = await run(t);
+          const note = outcomeNote(outcome);
+          model.error = note && { ...note, source: "action" };
+          diagnostics?.count(`queue.${busy}.${outcome.kind}`);
+        } finally {
+          model.busy = null;
+          dispatching = false;
+        }
+        await reload();
+        notify();
+      });
+    };
+    const handlers = {
+      queueDraft: () => submitComposer("button"),
+      startEdit: () => act(startEdit),
+      saveEdit: () => act(saveEdit),
+      cancelEdit: () => act(cancelEdit),
+      remove: () => act(async () => {
+        const t = target;
+        model.error = null;
+        if (model.edit) {
+          const edit = model.edit;
+          model.edit = null;
+          io.write(edit.input, edit.draft);
+        }
+        await engine.remove(t);
+        await reload();
+        notify();
+      }),
+      togglePause: () => act(async () => {
+        await (model.paused ? engine.resume(target) : engine.pause(target));
+        await reload();
+        notify();
+      }),
+      unblock: (dropAttachments) => act(async () => {
+        await engine.unblock(target, { dropAttachments });
+        await reload();
+        notify();
+      }),
+      markDelivered: () => act(async () => {
+        await engine.markDelivered(target);
+        await reload();
+        notify();
+      }),
+      restoreInflight: () => act(async () => {
+        await engine.restoreInflight(target);
+        await reload();
+        notify();
+      }),
+      steer: explicit("steering", (t) => engine.steer(t, { native: true })),
+      interrupt: explicit("interrupting", (t) => engine.steer(t, { native: false }))
+    };
+    async function followNavigation() {
+      const now = targetNow();
+      if (now.accountId === target.accountId && now.conversationId === target.conversationId) return false;
+      const previous = target;
+      if (model.edit) endEditLocally("cancel");
+      await engine.release(previous).catch(() => void 0);
+      target = now;
+      Object.assign(model, { pending: null, inflight: null, paused: false, editingElsewhere: false, waiting: null, error: null, note: null });
+      await engine.adoptLegacy(now).catch(() => 0);
+      ticks = RELOAD_EVERY;
+      return true;
+    }
+    function tick() {
+      return dispatch(async () => {
+        if (!engine || model.busy) return;
+        await followNavigation();
+        readDom();
         const home = adapter.composer(doc);
         if (home && (!root.isConnected || root.nextElementSibling !== home)) home.before(root);
-        const outcome = await engine.step(conversationId);
-        model.note = MESSAGES[outcome.kind] ?? null;
-        await reload();
+        if (model.edit && !await engine.renewEdit(model.edit.target)) endEditLocally("gone");
+        if (model.pending || model.inflight) {
+          let outcome;
+          try {
+            outcome = await engine.step(target);
+          } finally {
+            dispatching = false;
+          }
+          model.waiting = outcome.kind === "waiting" ? outcome.reason : null;
+          if (outcome.kind === "not-leader") model.note = MESSAGES["not-leader"];
+          else if (model.note === MESSAGES["not-leader"]) model.note = null;
+          if (outcome.kind === "sent") notify();
+          if (outcome.kind === "rejected" || outcome.kind === "manual-review") model.error = { ...outcomeNote(outcome), source: "auto" };
+          else if (model.error?.source === "auto") model.error = null;
+          await reload();
+        } else if (++ticks >= RELOAD_EVERY) {
+          ticks = 0;
+          await reload();
+        } else {
+          render();
+        }
       });
     }
-    const ready = QueueStore.open(indexedDB).then(async (opened) => {
+    const ready = QueueStore.open(indexedDB, void 0, () => clock.now()).then(async (opened) => {
       if (disposed) return opened.close();
       store = opened;
       engine = new QueueEngine({
         store,
-        dispatch: new DispatchBoundary(dispatcher, { clock }),
+        dispatch: new DispatchBoundary(dispatcher, { clock, onAction: () => dispatching = true }),
         clock,
         tabId,
         ...engineOptions
       });
-      await run(reload);
+      try {
+        channel = BroadcastChannelCtor ? new BroadcastChannelCtor(CHANNEL) : null;
+        channel?.unref?.();
+        if (channel) {
+          channel.onmessage = (event) => {
+            if (event.data?.from !== tabId && event.data?.key === `${target.accountId}:${target.conversationId}`) void act(reload);
+          };
+        }
+      } catch {
+        channel = null;
+      }
+      await engine.adoptLegacy(target).catch(() => 0);
+      readDom();
+      await act(reload);
       if (pollMs > 0) timer = win.setInterval(tick, pollMs);
     });
     ready.catch(() => {
@@ -2144,33 +2647,28 @@
       render();
     });
     render();
-    const onPageHide = () => engine?.release(conversationId).catch(() => void 0);
+    const onPageHide = () => engine?.release(target).catch(() => void 0);
     win.addEventListener("pagehide", onPageHide);
     return {
       mounted: true,
       root,
       ready,
       tick,
-      /** Resolves when every queued UI action has finished. */
-      settled: () => chain,
+      /** Resolves when every queued UI action and dispatch pass has finished. */
+      settled: () => Promise.all([actionChain, dispatchChain]).then(() => void 0),
       dispose() {
         disposed = true;
         if (timer) win.clearInterval(timer);
-        win.removeEventListener("pagehide", onPageHide);
+        for (const [name, fn] of [["keydown", onKeydown], ["submit", onSubmit], ["click", onClick], ["input", onInput], ["pagehide", onPageHide]]) {
+          win.removeEventListener(name, fn, name === "pagehide" ? void 0 : true);
+        }
+        if (model.edit) endEditLocally("cancel");
+        channel?.close();
         root.remove();
         doc.getElementById(STYLE_ID)?.remove();
-        engine?.release(conversationId).catch(() => void 0).finally(() => store?.close());
+        engine?.release(target).catch(() => void 0).finally(() => store?.close());
       }
     };
-  }
-  function interruptError(outcome) {
-    if (outcome.kind === "interrupt-failed") return { message: outcome.error.message, action: outcome.error.action };
-    if (outcome.kind === "halted") return { message: `The first message is ${outcome.status}.`, action: "Resolve it before sending the next." };
-    if (outcome.kind === "failed" || outcome.kind === "manual-review") {
-      return { message: "The message was not confirmed sent.", action: "See the message below for what to do." };
-    }
-    const message = MESSAGES[outcome.kind];
-    return message ? { message, action: "" } : null;
   }
   var CSS_ESCAPE = (value) => value.replace(/["\\]/g, "\\$&");
 
@@ -3455,7 +3953,7 @@ ${LAYOUT_CSS}`;
   var boot = createBoot({
     win: window,
     adapter: chatgptAdapter,
-    version: "0.7.0",
+    version: "0.8.0",
     onDispose: () => queueUi.shutdown(),
     mount() {
       const runtime = createRuntime({ win: window, adapter: chatgptAdapter, backend: createTurnBackend(), queueUi });

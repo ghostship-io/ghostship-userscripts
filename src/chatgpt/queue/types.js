@@ -18,31 +18,29 @@ export const systemClock = {
 };
 
 /**
- * @typedef {"pending"|"sending"|"sent"|"failed"|"manual-review"|"blocked"} ItemStatus
- *   pending: waiting; sending: claimed, outcome unrecorded; sent: accepted by the dispatcher;
- *   failed: definitely not delivered, out of retries; manual-review: delivery uncertain, never
- *   retried without the user; blocked: needs user action (e.g. reattach files).
+ * @typedef {{accountId: string, conversationId: string}} Target
+ *   What a record belongs to, fixed when its first text is queued; never "whatever is on screen".
  *
  * @typedef {{name: string, size: number, type: string, restorable: boolean}} AttachmentRef
  * @typedef {{code: string, message: string, action: string, at: number}} ItemError
  *
- * @typedef {object} QueueItem
- * @property {string} id Stable; doubles as the dispatcher idempotency key.
- * @property {string} conversationId
- * @property {string} text
+ * @typedef {object} PendingRecord The ONE accumulating prompt of a target.
+ * @property {string} key `${accountId}:${conversationId}`
+ * @property {string} id Stable across appends and edits.
+ * @property {string} text Contributions joined by exactly one blank line.
  * @property {AttachmentRef[]} attachments
- * @property {string|null} model Model the message will use, when known at queue time.
- * @property {ItemStatus} status
- * @property {number} position Sort key within a conversation.
- * @property {number} version Bumped by every user-visible change; detects edits racing a send.
- * @property {number} attempts Submissions started.
- * @property {number} notBefore Earliest time a retry may be claimed.
- * @property {string|null} attemptId Current/last claim; finalization is compare-and-set on it.
- * @property {number|null} leaseToken Lease token the current claim ran under.
+ * @property {"pending"|"blocked"} status blocked: needs the user (files, composer lost, Send unavailable).
+ * @property {number} version Bumped by every change; an edit compares against it.
  * @property {ItemError|null} lastError
- * @property {number} createdAt
- * @property {number} updatedAt
- * @property {number|null} sentAt
+ * @property {string[]} ops Recently applied operation ids (idempotent appends).
+ *
+ * @typedef {object} InflightRecord The immutable text a send claimed; at most one per target.
+ * @property {string} id Doubles as the dispatcher's idempotency key.
+ * @property {string} sourceId Id of the pending record it was claimed from.
+ * @property {string} text Never modified once claimed.
+ * @property {"sending"|"manual-review"} status sending: outcome unrecorded; manual-review: delivery uncertain, never retried without the user.
+ * @property {number} attempts Real Send clicks started; waiting never counts.
+ * @property {number|null} leaseToken
  *
  * @typedef {{now(): number, after(ms: number, fn: () => void): () => void}} Clock
  */
