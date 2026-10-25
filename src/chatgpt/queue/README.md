@@ -1,0 +1,1 @@
+Durable queue core (state machine, IndexedDB store, dispatch boundary, cross-tab lease). Logic only: the above-composer UI and the live adapter build on `index.js`; every send and stop goes through `DispatchBoundary`, and `DryRunDispatcher` is the no-side-effect adapter.

@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "scripts": [
+    {
+      "id": "ghostship-chatgpt",
+      "version": "0.1.0",
+      "file": "ghostship-chatgpt.user.js",
+      "sha256": "7d62dfd3ae936bb236ed3d45436b4aa17b90ef981e7f21c66b1db1d050620bbc"
+    }
+  ]
+}
