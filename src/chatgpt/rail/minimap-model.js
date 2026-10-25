@@ -1,5 +1,6 @@
-// Pure turn overview model: block elements -> weighted bars. No layout reads, so it
-// works for turns that are virtualized out, and never copies message content.
+// Turn overview model. `silhouette` turns the real rendered boxes of a turn into at most `maxItems` items
+// (fractions of the turn's box); `buildTurnModel` + `layoutBars` estimate the same from content for a turn that
+// is not rendered (virtualized out), where no real geometry exists. Neither copies message content.
 const HEADING = /^H[1-6]$/;
 const PRIORITY = ["code", "table", "image", "heading", "text"];
 
@@ -19,16 +20,21 @@ function classify(el) {
 
 const textLength = (el) => (el.textContent ?? "").trim().length;
 
+/** What a block element draws as, or null when it is skipped (nested in code/table, a wrapper, or empty text). */
+export function blockKind(el) {
+  if (el.parentElement?.closest("pre,table")) return null;
+  if (el.tagName === "LI" && el.querySelector("p")) return null;
+  const kind = classify(el);
+  return kind === "text" && textLength(el) === 0 ? null : kind;
+}
+
 /** `blocks`: block-level elements in document order. Nested duplicates are skipped. */
 export function buildTurnModel(blocks) {
   const model = [];
   for (const el of blocks) {
-    const nested = el.parentElement?.closest("pre,table");
-    if (nested) continue;
-    if (el.tagName === "LI" && el.querySelector("p")) continue;
-    const kind = classify(el);
+    const kind = blockKind(el);
+    if (!kind) continue;
     const len = textLength(el);
-    if (kind === "text" && len === 0) continue;
     let lines;
     let width;
     if (kind === "code") {
@@ -52,7 +58,7 @@ export function buildTurnModel(blocks) {
   return model.length ? model : [{ kind: "text", lines: 1, width: 0.3 }];
 }
 
-/** Positions in 0..1 of the turn; at most `maxBars` bars so the overview DOM stays bounded. */
+/** Estimated items for a turn without geometry: `{ kind, top, height, left, width }`, all 0..1. */
 export function layoutBars(model, maxBars = 120) {
   const chunk = Math.ceil(model.length / maxBars);
   const merged = [];
@@ -69,8 +75,43 @@ export function layoutBars(model, maxBars = 120) {
   return merged.map((b) => {
     const top = cursor / total;
     cursor += b.lines + 0.5;
-    return { kind: b.kind, top, height: b.lines / total, width: b.width };
+    const width = b.width * 0.76;
+    return { kind: b.kind, top, height: b.lines / total, left: 0.12, width };
   });
+}
+
+/**
+ * The turn as it is really laid out. `boxes`: `{ kind, top, bottom, left, right }` in page pixels, kind one of
+ * prompt | text | heading | code | table | image; `extent`: `{ top, bottom }` of the whole turn. Items are
+ * fractions of the turn's box (horizontally of the span the boxes cover), at most `maxItems`: neighbours are
+ * merged (the most structural kind wins) when there are more.
+ */
+export function silhouette(boxes, extent, maxItems = 120) {
+  const span = extent.bottom - extent.top;
+  const live = boxes.filter((b) => b.bottom > b.top && b.right > b.left).sort((a, b) => a.top - b.top);
+  if (span <= 0 || !live.length) return [];
+  const chunk = Math.ceil(live.length / maxItems);
+  const merged = [];
+  for (let i = 0; i < live.length; i += chunk) {
+    const group = live.slice(i, i + chunk);
+    merged.push({
+      kind: group.length === 1 ? group[0].kind : ["prompt", ...PRIORITY].find((k) => group.some((g) => g.kind === k)),
+      top: Math.min(...group.map((g) => g.top)),
+      bottom: Math.max(...group.map((g) => g.bottom)),
+      left: Math.min(...group.map((g) => g.left)),
+      right: Math.max(...group.map((g) => g.right)),
+    });
+  }
+  const x0 = Math.min(...merged.map((b) => b.left));
+  const w = Math.max(...merged.map((b) => b.right)) - x0;
+  const clamp01 = (n) => Math.max(0, Math.min(1, n));
+  return merged.map((b) => ({
+    kind: b.kind,
+    top: clamp01((b.top - extent.top) / span),
+    height: clamp01((b.bottom - b.top) / span),
+    left: w > 0 ? clamp01((b.left - x0) / w) : 0,
+    width: w > 0 ? clamp01((b.right - b.left) / w) : 1,
+  }));
 }
 
 /** Where the viewport sits in the turn (0..1) and the fraction of the turn visible; null when they do not intersect. */

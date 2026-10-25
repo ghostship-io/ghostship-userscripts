@@ -163,3 +163,19 @@ test("native summary pane: one pinned pane, Outputs collapses, Sources stays, th
     assert.equal(guards.isClean(), true, JSON.stringify(guards.report()));
   }
 });
+
+test("opening a conversation: one scroll to the start of the latest prompt, then streaming never moves it; a minimap silhouette is drawn", async () => {
+  const { fx, guards, health } = await boot({ width: 1600, turns: 39 });
+  const last = fx.elements().at(-1);
+  assert.equal(fx.rawTop(), fx.topOf(last), "the start of the latest prompt is at the top of the viewport");
+  const events = fx.scrollEvents.length;
+  for (let i = 0; i < 10; i++) {
+    fx.stream(last.firstElementChild, 25);
+    fx.pageAutoscroll();
+    await fx.settle();
+  }
+  assert.equal(fx.scrollEvents.length, events, "no repeat while streaming");
+  assert.equal(health.diagnostics()["scroll.moved.open"], 1);
+  assert.ok(fx.doc.querySelectorAll(".gs-bar").length > 0, "the overview is drawn");
+  assert.equal(guards.isClean(), true, JSON.stringify(guards.report()));
+});

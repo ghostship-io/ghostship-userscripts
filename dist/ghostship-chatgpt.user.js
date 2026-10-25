@@ -483,6 +483,15 @@
         return true;
       },
       scrollTop: rawGet,
+      /**
+       * Whether the one scroll that positions a freshly opened conversation may still happen: false once the
+       * user scrolled (or is scrolling), so that scroll always yields to the user.
+       */
+      mayOpen() {
+        const ok = !disposed && !intentActive() && stats.userScrolls === 0;
+        if (!ok) diagnostics?.count("scroll.open.yielded");
+        return ok;
+      },
       setAnchors(candidates, resolve) {
         anchors = candidates;
         resolveAnchor = resolve ?? null;
@@ -641,6 +650,7 @@
         onLayoutChange: none,
         isTurnActive: () => true,
         navigateTo: () => false,
+        open: () => false,
         dispose: () => queue2.dispose()
       });
       diagnostics.count("runtime.composer-only");
@@ -664,7 +674,7 @@
       backend.unmount();
       observers.disposeAll();
       scroll.dispose();
-      Object.assign(runtime, { mode: "safe", scroll: void 0, observers: void 0, navigateTo: void 0, onIndexChange: void 0, onLayoutChange: void 0, isTurnActive: void 0, dispose: () => queue.dispose() });
+      Object.assign(runtime, { mode: "safe", scroll: void 0, observers: void 0, navigateTo: void 0, open: void 0, onIndexChange: void 0, onLayoutChange: void 0, isTurnActive: void 0, dispose: () => queue.dispose() });
       diagnostics.count("virtualization.fallback");
       diagnostics.warnOnce("virtualization", `virtualization disabled (${reason}); running in safe mode`);
     };
@@ -703,6 +713,16 @@
       /** The one explicit navigation entry: activates a virtualized-out turn, then scrolls to it. */
       navigateTo(el2, options) {
         return backend.navigateToElement?.(el2, options) || scroll.navigateTo(el2, options);
+      },
+      /**
+       * The one programmatic scroll on opening a conversation (the top of its latest prompt to the top of the
+       * viewport): only while the user has not scrolled, so it yields to any user scroll. The caller makes it once.
+       */
+      open(el2, options) {
+        if (!scroll.mayOpen()) return false;
+        const moved = runtime.navigateTo(el2, options);
+        if (moved) diagnostics.count("scroll.moved.open");
+        return moved;
       },
       observers,
       queue,
@@ -2183,15 +2203,18 @@
     }
   }
   var textLength = (el2) => (el2.textContent ?? "").trim().length;
+  function blockKind(el2) {
+    if (el2.parentElement?.closest("pre,table")) return null;
+    if (el2.tagName === "LI" && el2.querySelector("p")) return null;
+    const kind = classify(el2);
+    return kind === "text" && textLength(el2) === 0 ? null : kind;
+  }
   function buildTurnModel(blocks) {
     const model = [];
     for (const el2 of blocks) {
-      const nested = el2.parentElement?.closest("pre,table");
-      if (nested) continue;
-      if (el2.tagName === "LI" && el2.querySelector("p")) continue;
-      const kind = classify(el2);
+      const kind = blockKind(el2);
+      if (!kind) continue;
       const len = textLength(el2);
-      if (kind === "text" && len === 0) continue;
       let lines;
       let width;
       if (kind === "code") {
@@ -2230,8 +2253,36 @@
     return merged.map((b) => {
       const top = cursor / total;
       cursor += b.lines + 0.5;
-      return { kind: b.kind, top, height: b.lines / total, width: b.width };
+      const width = b.width * 0.76;
+      return { kind: b.kind, top, height: b.lines / total, left: 0.12, width };
     });
+  }
+  function silhouette(boxes, extent, maxItems = 120) {
+    const span = extent.bottom - extent.top;
+    const live = boxes.filter((b) => b.bottom > b.top && b.right > b.left).sort((a, b) => a.top - b.top);
+    if (span <= 0 || !live.length) return [];
+    const chunk = Math.ceil(live.length / maxItems);
+    const merged = [];
+    for (let i = 0; i < live.length; i += chunk) {
+      const group = live.slice(i, i + chunk);
+      merged.push({
+        kind: group.length === 1 ? group[0].kind : ["prompt", ...PRIORITY].find((k) => group.some((g) => g.kind === k)),
+        top: Math.min(...group.map((g) => g.top)),
+        bottom: Math.max(...group.map((g) => g.bottom)),
+        left: Math.min(...group.map((g) => g.left)),
+        right: Math.max(...group.map((g) => g.right))
+      });
+    }
+    const x0 = Math.min(...merged.map((b) => b.left));
+    const w = Math.max(...merged.map((b) => b.right)) - x0;
+    const clamp01 = (n) => Math.max(0, Math.min(1, n));
+    return merged.map((b) => ({
+      kind: b.kind,
+      top: clamp01((b.top - extent.top) / span),
+      height: clamp01((b.bottom - b.top) / span),
+      left: w > 0 ? clamp01((b.left - x0) / w) : 0,
+      width: w > 0 ? clamp01((b.right - b.left) / w) : 1
+    }));
   }
   function viewportIndicator({ turnTop, turnBottom, viewTop, viewBottom }) {
     const span = turnBottom - turnTop;
@@ -2400,7 +2451,11 @@
   var LINE = "var(--border-light,color-mix(in srgb,currentColor 14%,transparent))";
   var HOVER = "var(--surface-hover,color-mix(in srgb,currentColor 7%,transparent))";
   var SELECTED = "var(--interactive-bg-secondary-selected,color-mix(in srgb,currentColor 12%,transparent))";
-  var FIELD = "var(--bg-elevated-secondary,color-mix(in srgb,currentColor 6%,transparent))";
+  var CODE = "var(--bg-elevated-secondary,color-mix(in srgb,currentColor 12%,transparent))";
+  var BUBBLE = "var(--message-surface,color-mix(in srgb,currentColor 10%,transparent))";
+  var INK = "color-mix(in srgb,currentColor 38%,transparent)";
+  var INK_FAINT = "color-mix(in srgb,currentColor 22%,transparent)";
+  var ACCENT = "var(--interactive-bg-accent-default,AccentColor)";
   var MUTED = "var(--text-secondary,color-mix(in srgb,currentColor 65%,transparent))";
   var FOCUS = "outline:2px solid var(--border-heavy,currentColor);outline-offset:-2px";
   var CHEVRON = '<svg class="gs-chevron" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>';
@@ -2422,14 +2477,17 @@
 .gs-sec-body{display:flex;flex-direction:column;min-height:0;padding:0 16px 12px}
 .gs-sec-prompts .gs-sec-body{flex:1 1 auto}
 .gs-sec[data-gs-collapsed="true"] .gs-sec-body{display:none}
-.gs-minimap{position:relative;flex:0 0 auto;height:min(220px,28vh);border:1px solid ${LINE};border-radius:8px;background:${FIELD};cursor:pointer;touch-action:none;overflow:hidden}
+.gs-minimap{position:relative;flex:0 0 auto;height:min(220px,28vh);border:1px solid ${LINE};border-radius:8px;background:transparent;cursor:pointer;touch-action:none;overflow:hidden}
 .gs-minimap:focus-visible,.gs-search input:focus-visible,.gs-prompt:focus-visible,.gs-pane-toggle:focus-visible,.gs-sec-head:focus-visible,.gs-filter:focus-visible,.gs-outputs-toggle:focus-visible{${FOCUS}}
-.gs-bar{position:absolute;left:12%;min-height:2px;border-radius:2px;background:currentColor;opacity:.3}
-.gs-bar[data-kind="heading"]{opacity:.7}
-.gs-bar[data-kind="code"]{opacity:.45}
-.gs-bar[data-kind="table"]{opacity:.5}
-.gs-bar[data-kind="image"]{opacity:.55}
-.gs-view{position:absolute;left:2px;right:2px;border:1px solid var(--text-secondary,currentColor);border-radius:4px;background:${SELECTED};pointer-events:none}
+.gs-bars{position:absolute;inset:0;--gs-lh:4px}
+.gs-bar{position:absolute;min-height:2px;border-radius:2px;pointer-events:none}
+.gs-bar[data-kind="text"]{background-image:linear-gradient(${INK_FAINT} 0 50%,transparent 50%);background-size:100% var(--gs-lh)}
+.gs-bar[data-kind="heading"]{background-image:linear-gradient(${INK} 0 60%,transparent 60%);background-size:100% var(--gs-lh)}
+.gs-bar[data-kind="code"]{border-radius:3px;background-color:${CODE};background-image:linear-gradient(${INK_FAINT} 0 40%,transparent 40%);background-size:100% var(--gs-lh)}
+.gs-bar[data-kind="table"]{border:1px solid ${INK};background-image:linear-gradient(${INK_FAINT} 0 1px,transparent 1px);background-size:100% calc(var(--gs-lh) * 2)}
+.gs-bar[data-kind="image"]{border:1px solid ${INK};background-color:${INK_FAINT}}
+.gs-bar[data-kind="prompt"]{border-radius:6px;background-color:${BUBBLE}}
+.gs-view{position:absolute;left:0;right:0;border:1px solid ${ACCENT};border-radius:4px;background:color-mix(in srgb,${ACCENT} 16%,transparent);pointer-events:none}
 .gs-caption{margin-top:8px;font-size:12px;line-height:16px;color:${MUTED}}
 .gs-search{display:flex;flex:0 0 auto;gap:6px;align-items:center;margin-bottom:8px}
 .gs-search-field{position:relative;flex:1 1 auto;min-width:0}
@@ -2464,6 +2522,7 @@ ${LAYOUT_CSS}`;
   }
   var clamp2 = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
   var PREVIEW_MAX = 100;
+  var BLOCK_CAP = 800;
   function createRail({ win, adapter, runtime, store = createRailStateStore(), prefs = createPanePrefs(win.localStorage) }) {
     const doc = win.document;
     const scroll = runtime.scroll;
@@ -2496,6 +2555,7 @@ ${LAYOUT_CSS}`;
     let bookmarkToRestore = null;
     let listTopToRestore = null;
     let outputsCollapsed = false;
+    let openPending = convId !== "new";
     let lastHost = null;
     let outputsHost = null;
     let slot = null;
@@ -2632,6 +2692,18 @@ ${LAYOUT_CSS}`;
       if (!mark || mark.bottom || userScrolled) return;
       const el2 = els.find((e, i) => adapter.turnId(e, i) === mark.id);
       if (el2) runtime.navigateTo(el2, { offset: mark.offset });
+    }
+    function openAtLatest() {
+      if (!openPending || disposed) return;
+      if (didRestore || userScrolled) {
+        openPending = false;
+        return;
+      }
+      const last = prompts.at(-1);
+      const el2 = last && els[last.turnIndex];
+      if (restore || !el2 || !runtime.isTurnActive(el2) || !el2.getBoundingClientRect().height) return;
+      openPending = false;
+      runtime.open(el2, { offset: 0 });
     }
     function setVar(name, value) {
       for (const el2 of [root, toggle]) if (el2.style.getPropertyValue(name) !== value) el2.style.setProperty(name, value);
@@ -2815,10 +2887,31 @@ ${LAYOUT_CSS}`;
       if (!a || !z) return null;
       return { i, a, z };
     }
+    function silhouetteItems(ext, slice, top, height) {
+      if (slice.every((e) => runtime.isTurnActive(e))) {
+        const users = slice.map((t) => adapter.userMessage(t)).filter(Boolean);
+        const boxes = [];
+        const add = (kind, el2) => {
+          const r = el2.getBoundingClientRect();
+          boxes.push({ kind, top: r.top, bottom: r.bottom, left: r.left, right: r.right });
+        };
+        for (const u of users) add("prompt", u);
+        for (const el2 of adapter.blocks(slice).slice(0, BLOCK_CAP)) {
+          const kind = !users.some((u) => u.contains(el2)) && blockKind(el2);
+          if (kind) add(kind, el2);
+        }
+        const items = silhouette(boxes, { top, bottom: top + height });
+        if (items.length) return items;
+      }
+      return layoutBars(buildTurnModel(adapter.blocks(slice)));
+    }
     function renderMinimap(m) {
       const ext = turnExtent();
       if (!ext || overviewCard.dataset.gsCollapsed === "true") return;
-      const key = `${activeId}:${els.slice(prompts[ext.i].turnIndex, promptEnd(ext.i) + 1).map((e) => e.textContent.length).join(",")}`;
+      const slice = els.slice(prompts[ext.i].turnIndex, promptEnd(ext.i) + 1);
+      const turnBox = ext.a.getBoundingClientRect();
+      const turnPx = ext.z.getBoundingClientRect().bottom - turnBox.top;
+      const key = `${activeId}:${slice.map((e) => e.textContent.length).join(",")}:${slice.every((e) => runtime.isTurnActive(e))}:${Math.round(turnPx / 20)}:${Math.round(turnBox.width / 8)}`;
       const now = win.performance.now();
       const throttled = key !== modelKey && modelKey !== "" && modelKey.startsWith(`${activeId}:`) && now - modelBuiltAt < 500 && !forceModel;
       if (throttled && !trailing) {
@@ -2832,13 +2925,14 @@ ${LAYOUT_CSS}`;
         forceModel = false;
         modelKey = key;
         modelBuiltAt = now;
-        const model = buildTurnModel(adapter.blocks(els.slice(prompts[ext.i].turnIndex, promptEnd(ext.i) + 1)));
         bars.textContent = "";
-        for (const b of layoutBars(model)) {
+        const scale = (minimap.getBoundingClientRect().height || 220) / Math.max(turnPx, 1);
+        bars.style.setProperty("--gs-lh", `${Math.max(3, Math.min(8, 24 * scale)).toFixed(1)}px`);
+        for (const b of silhouetteItems(ext, slice, turnBox.top, turnPx)) {
           const d = doc.createElement("div");
           d.className = "gs-bar";
           d.dataset.kind = b.kind;
-          d.style.cssText = `top:${(b.top * 100).toFixed(2)}%;height:${(b.height * 100).toFixed(2)}%;width:${(b.width * 76).toFixed(1)}%`;
+          d.style.cssText = `top:${(b.top * 100).toFixed(2)}%;height:${(b.height * 100).toFixed(2)}%;left:${(b.left * 100).toFixed(2)}%;width:${(b.width * 100).toFixed(2)}%`;
           bars.append(d);
         }
       }
@@ -2921,6 +3015,7 @@ ${LAYOUT_CSS}`;
         finishRestore();
         markActive();
       }
+      openAtLatest();
       schedule();
     }
     function select(p) {

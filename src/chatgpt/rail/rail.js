@@ -1,5 +1,5 @@
 import { searchPrompts } from "../../core/prompt-index.js";
-import { buildTurnModel, layoutBars, scrollTopForFraction, viewportIndicator } from "./minimap-model.js";
+import { blockKind, buildTurnModel, layoutBars, scrollTopForFraction, silhouette, viewportIndicator } from "./minimap-model.js";
 import { LAYOUT_CSS, RAIL_WIDTH, createRailLayout } from "./rail-layout.js";
 import { contentSignature, createPanePrefs, createRailStateStore } from "./rail-state.js";
 
@@ -17,6 +17,11 @@ const LINE = "var(--border-light,color-mix(in srgb,currentColor 14%,transparent)
 const HOVER = "var(--surface-hover,color-mix(in srgb,currentColor 7%,transparent))";
 const SELECTED = "var(--interactive-bg-secondary-selected,color-mix(in srgb,currentColor 12%,transparent))";
 const FIELD = "var(--bg-elevated-secondary,color-mix(in srgb,currentColor 6%,transparent))";
+const CODE = "var(--bg-elevated-secondary,color-mix(in srgb,currentColor 12%,transparent))";
+const BUBBLE = "var(--message-surface,color-mix(in srgb,currentColor 10%,transparent))";
+const INK = "color-mix(in srgb,currentColor 38%,transparent)";
+const INK_FAINT = "color-mix(in srgb,currentColor 22%,transparent)";
+const ACCENT = "var(--interactive-bg-accent-default,AccentColor)";
 const MUTED = "var(--text-secondary,color-mix(in srgb,currentColor 65%,transparent))";
 const FOCUS = "outline:2px solid var(--border-heavy,currentColor);outline-offset:-2px";
 const CHEVRON = '<svg class="gs-chevron" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>';
@@ -39,14 +44,17 @@ const CSS = `
 .gs-sec-body{display:flex;flex-direction:column;min-height:0;padding:0 16px 12px}
 .gs-sec-prompts .gs-sec-body{flex:1 1 auto}
 .gs-sec[data-gs-collapsed="true"] .gs-sec-body{display:none}
-.gs-minimap{position:relative;flex:0 0 auto;height:min(220px,28vh);border:1px solid ${LINE};border-radius:8px;background:${FIELD};cursor:pointer;touch-action:none;overflow:hidden}
+.gs-minimap{position:relative;flex:0 0 auto;height:min(220px,28vh);border:1px solid ${LINE};border-radius:8px;background:transparent;cursor:pointer;touch-action:none;overflow:hidden}
 .gs-minimap:focus-visible,.gs-search input:focus-visible,.gs-prompt:focus-visible,.gs-pane-toggle:focus-visible,.gs-sec-head:focus-visible,.gs-filter:focus-visible,.gs-outputs-toggle:focus-visible{${FOCUS}}
-.gs-bar{position:absolute;left:12%;min-height:2px;border-radius:2px;background:currentColor;opacity:.3}
-.gs-bar[data-kind="heading"]{opacity:.7}
-.gs-bar[data-kind="code"]{opacity:.45}
-.gs-bar[data-kind="table"]{opacity:.5}
-.gs-bar[data-kind="image"]{opacity:.55}
-.gs-view{position:absolute;left:2px;right:2px;border:1px solid var(--text-secondary,currentColor);border-radius:4px;background:${SELECTED};pointer-events:none}
+.gs-bars{position:absolute;inset:0;--gs-lh:4px}
+.gs-bar{position:absolute;min-height:2px;border-radius:2px;pointer-events:none}
+.gs-bar[data-kind="text"]{background-image:linear-gradient(${INK_FAINT} 0 50%,transparent 50%);background-size:100% var(--gs-lh)}
+.gs-bar[data-kind="heading"]{background-image:linear-gradient(${INK} 0 60%,transparent 60%);background-size:100% var(--gs-lh)}
+.gs-bar[data-kind="code"]{border-radius:3px;background-color:${CODE};background-image:linear-gradient(${INK_FAINT} 0 40%,transparent 40%);background-size:100% var(--gs-lh)}
+.gs-bar[data-kind="table"]{border:1px solid ${INK};background-image:linear-gradient(${INK_FAINT} 0 1px,transparent 1px);background-size:100% calc(var(--gs-lh) * 2)}
+.gs-bar[data-kind="image"]{border:1px solid ${INK};background-color:${INK_FAINT}}
+.gs-bar[data-kind="prompt"]{border-radius:6px;background-color:${BUBBLE}}
+.gs-view{position:absolute;left:0;right:0;border:1px solid ${ACCENT};border-radius:4px;background:color-mix(in srgb,${ACCENT} 16%,transparent);pointer-events:none}
 .gs-caption{margin-top:8px;font-size:12px;line-height:16px;color:${MUTED}}
 .gs-search{display:flex;flex:0 0 auto;gap:6px;align-items:center;margin-bottom:8px}
 .gs-search-field{position:relative;flex:1 1 auto;min-width:0}
@@ -84,6 +92,7 @@ export function describePrompt(text, reply = "") {
 
 const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
 const PREVIEW_MAX = 100;
+const BLOCK_CAP = 800; // rendered blocks measured per rebuild
 
 /**
  * The right pane: current-turn minimap on top, searchable chronological prompt list
@@ -130,6 +139,7 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
   let bookmarkToRestore = null;
   let listTopToRestore = null;
   let outputsCollapsed = false;
+  let openPending = convId !== "new"; // the one scroll that positions a freshly opened conversation
   let lastHost = null;
   let outputsHost = null; // { section, head } of the native Outputs section we added the disclosure to
   let slot = null;
@@ -286,6 +296,25 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
     if (!mark || mark.bottom || userScrolled) return;
     const el = els.find((e, i) => adapter.turnId(e, i) === mark.id);
     if (el) runtime.navigateTo(el, { offset: mark.offset });
+  }
+
+  /**
+   * Opening a conversation: once, put the top of its latest prompt at the top of the viewport, through the shared
+   * scroll controller. Not when a saved reading position is restored instead, and never once the user scrolled
+   * (the controller refuses it then); it waits until that turn is rendered and is never repeated, so streaming
+   * and later renders leave the viewport alone.
+   */
+  function openAtLatest() {
+    if (!openPending || disposed) return;
+    if (didRestore || userScrolled) {
+      openPending = false;
+      return;
+    }
+    const last = prompts.at(-1);
+    const el = last && els[last.turnIndex];
+    if (restore || !el || !runtime.isTurnActive(el) || !el.getBoundingClientRect().height) return;
+    openPending = false;
+    runtime.open(el, { offset: 0 });
   }
 
   // ---- layout -----------------------------------------------------------------------------
@@ -502,10 +531,37 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
     return { i, a, z };
   }
 
+  /**
+   * The turn's silhouette from its real rendered boxes: the prompt bubble, then each block of the reply at its
+   * measured position and size. A turn the virtualizer skipped has no boxes, so its content is estimated instead.
+   */
+  function silhouetteItems(ext, slice, top, height) {
+    if (slice.every((e) => runtime.isTurnActive(e))) {
+      const users = slice.map((t) => adapter.userMessage(t)).filter(Boolean);
+      const boxes = [];
+      const add = (kind, el) => {
+        const r = el.getBoundingClientRect();
+        boxes.push({ kind, top: r.top, bottom: r.bottom, left: r.left, right: r.right });
+      };
+      for (const u of users) add("prompt", u);
+      for (const el of adapter.blocks(slice).slice(0, BLOCK_CAP)) {
+        const kind = !users.some((u) => u.contains(el)) && blockKind(el);
+        if (kind) add(kind, el);
+      }
+      const items = silhouette(boxes, { top, bottom: top + height });
+      if (items.length) return items;
+    }
+    return layoutBars(buildTurnModel(adapter.blocks(slice)));
+  }
+
   function renderMinimap(m) {
     const ext = turnExtent();
     if (!ext || overviewCard.dataset.gsCollapsed === "true") return;
-    const key = `${activeId}:${els.slice(prompts[ext.i].turnIndex, promptEnd(ext.i) + 1).map((e) => e.textContent.length).join(",")}`;
+    const slice = els.slice(prompts[ext.i].turnIndex, promptEnd(ext.i) + 1);
+    const turnBox = ext.a.getBoundingClientRect();
+    const turnPx = ext.z.getBoundingClientRect().bottom - turnBox.top;
+    // Content, rendered-ness and the turn's size (to 20px / 8px): anything that changes the drawn boxes.
+    const key = `${activeId}:${slice.map((e) => e.textContent.length).join(",")}:${slice.every((e) => runtime.isTurnActive(e))}:${Math.round(turnPx / 20)}:${Math.round(turnBox.width / 8)}`;
     // A growing (streaming) turn rebuilds its overview at most twice a second.
     const now = win.performance.now();
     const throttled = key !== modelKey && modelKey !== "" && modelKey.startsWith(`${activeId}:`) && now - modelBuiltAt < 500 && !forceModel;
@@ -520,13 +576,15 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
       forceModel = false;
       modelKey = key;
       modelBuiltAt = now;
-      const model = buildTurnModel(adapter.blocks(els.slice(prompts[ext.i].turnIndex, promptEnd(ext.i) + 1)));
       bars.textContent = "";
-      for (const b of layoutBars(model)) {
+      // One text line of the real turn, scaled to the overview (never finer than 3px).
+      const scale = (minimap.getBoundingClientRect().height || 220) / Math.max(turnPx, 1);
+      bars.style.setProperty("--gs-lh", `${Math.max(3, Math.min(8, 24 * scale)).toFixed(1)}px`);
+      for (const b of silhouetteItems(ext, slice, turnBox.top, turnPx)) {
         const d = doc.createElement("div");
         d.className = "gs-bar";
         d.dataset.kind = b.kind;
-        d.style.cssText = `top:${(b.top * 100).toFixed(2)}%;height:${(b.height * 100).toFixed(2)}%;width:${(b.width * 76).toFixed(1)}%`;
+        d.style.cssText = `top:${(b.top * 100).toFixed(2)}%;height:${(b.height * 100).toFixed(2)}%;left:${(b.left * 100).toFixed(2)}%;width:${(b.width * 100).toFixed(2)}%`;
         bars.append(d);
       }
     }
@@ -620,6 +678,7 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
       finishRestore();
       markActive();
     }
+    openAtLatest();
     schedule();
   }
 
