@@ -93,6 +93,8 @@ export function describePrompt(text, reply = "") {
 
 const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
 const PREVIEW_MAX = 100;
+const OPEN_SETTLE_MS = 500; // the prompt list unchanged this long: the page has settled
+const OPEN_FOLLOW_MS = 1500; // after selecting, further prompts loading within this window re-target
 const SCAN_MS = 400; // at most one page scan for ChatGPT's pane per this long
 const BLOCK_CAP = 800;
 const CONTENT_W = 768; // the conversation column's usual width, when it cannot be measured
@@ -146,7 +148,11 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
   let bookmarkToRestore = null;
   let listTopToRestore = null;
   let outputsCollapsed = false;
-  let openPending = convId !== "new"; // the one scroll that positions a freshly opened conversation
+  let opening = convId === "new" ? "done" : "waiting"; // opening a conversation: waiting -> following -> done
+  let openSig = null;
+  let openStalled = false;
+  let openGen = 0;
+  let interacted = false;
   let lastHost = null;
   let scannedAt = -Infinity;
   let scanTimer = null;
@@ -309,22 +315,50 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
   }
 
   /**
-   * Opening a conversation: once, put the top of its latest prompt at the top of the viewport, through the shared
-   * scroll controller. Not when a saved reading position is restored instead, and never once the user scrolled
-   * (the controller refuses it then); it waits until that turn is rendered and is never repeated, so streaming
-   * and later renders leave the viewport alone.
+   * Opening a conversation: once the page has settled (the prompt list unchanged for OPEN_SETTLE_MS and the last
+   * turn rendered), select the last prompt in the list exactly as a click on it would (highlight, minimap, and
+   * the shared scroll controller puts its start at the top of the viewport). While more prompts keep loading it
+   * re-targets the new last prompt each time, and stops once the list has stayed unchanged for OPEN_FOLLOW_MS.
+   * It stops for good as soon as the user scrolls or clicks, types or touches anything, never runs when a saved
+   * reading position is restored instead, and later renders or streaming leave the viewport alone.
    */
-  function openAtLatest() {
-    if (!openPending || disposed) return;
-    if (didRestore || userScrolled) {
-      openPending = false;
-      return;
-    }
+  function openTick() {
+    if (opening === "done" || disposed) return;
+    if (didRestore || userScrolled || interacted) return stopOpening();
     const last = prompts.at(-1);
-    const el = last && els[last.turnIndex];
-    if (restore || !el || !runtime.isTurnActive(el) || !el.getBoundingClientRect().height) return;
-    openPending = false;
-    runtime.open(el, { offset: 0 });
+    if (restore || !last) return;
+    const sig = `${last.id}:${prompts.length}`;
+    if (sig !== openSig || openStalled) {
+      const el = els[last.turnIndex];
+      if (sig === openSig && !(el && runtime.isTurnActive(el) && el.getBoundingClientRect().height)) return; // still rendering
+      openSig = sig;
+      openStalled = false;
+      armOpen("select", OPEN_SETTLE_MS);
+    }
+  }
+
+  function stopOpening() {
+    opening = "done";
+    openGen++;
+  }
+
+  function armOpen(step, ms) {
+    const gen = ++openGen;
+    win.setTimeout(() => {
+      if (gen !== openGen || disposed || opening === "done") return;
+      if (didRestore || userScrolled || interacted) return stopOpening();
+      if (step === "finish") return stopOpening();
+      const last = prompts.at(-1);
+      const el = last && els[last.turnIndex];
+      if (!el || !runtime.isTurnActive(el) || !el.getBoundingClientRect().height) {
+        openStalled = true; // the next refresh re-arms once the turn has rendered
+        return;
+      }
+      if (!scroll.mayOpen()) return stopOpening();
+      opening = "following";
+      select(last, true);
+      armOpen("finish", OPEN_FOLLOW_MS);
+    }, ms);
   }
 
   // ---- layout -----------------------------------------------------------------------------
@@ -713,16 +747,16 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
       finishRestore();
       markActive();
     }
-    openAtLatest();
+    openTick();
     schedule();
   }
 
-  function select(p) {
+  function select(p, automatic = false) {
     activeId = p.id;
     listManual = false;
     markActive();
     const el = els[p.turnIndex];
-    if (el) runtime.navigateTo(el, { offset: 0 });
+    if (el) automatic ? runtime.open(el, { offset: 0 }) : runtime.navigateTo(el, { offset: 0 });
     modelKey = "";
     renderMinimap(measureView());
     persist();
@@ -855,6 +889,8 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
   });
   on(doc, "transitionend", (e) => !root.contains(e.target) && !body.contains(e.target) && /width|margin|padding|left|right|transform/.test(e.propertyName ?? "") && scheduleLayout(true), { capture: true, passive: true });
 
+  // Anything the user does ends the automatic selection of the last prompt.
+  for (const type of ["pointerdown", "keydown", "wheel", "touchstart"]) on(doc, type, () => (interacted = true), { capture: true, passive: true });
   cleanups.push(scroll.onScroll((kind) => {
     if (kind === "user") userScrolled = true;
     schedule();
