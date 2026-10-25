@@ -10,7 +10,7 @@ import { CSS } from "../src/chatgpt/queue/view.js";
 import { loadFixture } from "./helpers.js";
 import { ManualClock, until } from "./queue-helpers.js";
 
-async function mountUi({ form = false, dispatcher = new DryRunDispatcher() } = {}) {
+async function mountUi({ form = false, dispatcher = new DryRunDispatcher(), adapter = chatgptAdapter } = {}) {
   const dom = await loadFixture();
   const { window } = dom;
   if (form) {
@@ -22,7 +22,7 @@ async function mountUi({ form = false, dispatcher = new DryRunDispatcher() } = {
   const clock = new ManualClock();
   const ui = createQueueUi({
     win: window,
-    adapter: chatgptAdapter,
+    adapter,
     dispatcher,
     indexedDB: new IDBFactory(),
     clock,
@@ -43,7 +43,7 @@ async function mountUi({ form = false, dispatcher = new DryRunDispatcher() } = {
     key("add:input").dispatchEvent(new window.Event("input", { bubbles: true }));
     await click("add:submit");
   };
-  const rows = () => $$(".gs-q-item").map((li) => li.querySelector(".gs-q-text")?.textContent ?? li.querySelector("textarea").value);
+  const rows = () => $$(".gs-q-item").map((li) => li.querySelector(".gs-q-name")?.textContent ?? li.querySelector("textarea").value);
   const ids = () => $$(".gs-q-item").map((li) => li.dataset.id);
   const press = async (target, init) => {
     target.dispatchEvent(new window.KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init }));
@@ -81,9 +81,14 @@ test("queue ui: add, edit, reorder and remove by keyboard persist through the en
   assert.equal(t.key("add:input").value, "");
 
   const [a, b, c] = t.ids();
-  await t.press(t.key(`${c}:up`), { key: "ArrowUp", altKey: true });
+  await t.press(t.key(`${c}:handle`), { key: "ArrowUp" });
   assert.deepEqual(t.rows(), ["first", "third", "second"]);
-  assert.equal(t.doc.activeElement.dataset.gsKey, `${c}:up`, "focus follows the moved item");
+  assert.equal(t.doc.activeElement.dataset.gsKey, `${c}:handle`, "focus follows the moved item");
+  await t.press(t.key(`${c}:edit`), { key: "ArrowDown", altKey: true });
+  assert.deepEqual(t.rows(), ["first", "second", "third"], "Alt+Arrow works from any control in the row");
+  await t.press(t.key(`${c}:edit`), { key: "ArrowDown" });
+  assert.deepEqual(t.rows(), ["first", "second", "third"], "a bare arrow elsewhere does nothing");
+  await t.press(t.key(`${c}:handle`), { key: "ArrowUp" });
 
   await t.click(`${a}:edit`);
   const area = t.key(`${a}:edit`);
@@ -98,7 +103,7 @@ test("queue ui: add, edit, reorder and remove by keyboard persist through the en
 
   await t.click(`${b}:remove`);
   assert.deepEqual(t.rows(), ["first, edited", "third"]);
-  assert.equal(t.$(".gs-q-status").textContent, "2 queued");
+  assert.equal(t.$(".gs-q-title").textContent, "Queue (2)");
 });
 
 test("queue ui: Interrupt & Send Next is disabled when empty, while the stop is in flight, and behind an unresolved message", async () => {
@@ -123,7 +128,7 @@ test("queue ui: Interrupt & Send Next is disabled when empty, while the stop is 
   dispatcher.state = "idle";
   dispatcher.submitScript = [{ kind: "uncertain", code: "no-ack", message: "No acknowledgment." }];
   await t.click("head:interrupt");
-  assert.match(t.$(".gs-q-chip").textContent, /Needs review/);
+  assert.match(t.$(".gs-q-state").textContent, /Needs review/);
   assert.equal(t.key("head:interrupt").disabled, true, "head needs review");
   assert.match(t.key("head:interrupt").title, /Needs review/);
 });
@@ -138,7 +143,8 @@ test("queue ui: a confirmed stop sends exactly the next message, in order, throu
   await t.click("head:interrupt");
   assert.deepEqual(dispatcher.actions(), ["stop", `submit:${first}`]);
   assert.deepEqual(t.rows(), ["two"]);
-  assert.match(t.$(".gs-q-status").textContent, /1 queued · 1 sent/);
+  assert.equal(t.$(".gs-q-title").textContent, "Queue (1)");
+  assert.match(t.$(".gs-q-status").textContent, /1 sent/);
   assert.equal(t.$(".gs-q-error"), null);
 });
 
@@ -159,7 +165,7 @@ test("queue ui: interrupt failures are surfaced with an action and nothing is se
     assert.match(alert.textContent, pattern);
     assert.deepEqual(dispatcher.actions(), ["stop"]);
     assert.deepEqual(t.rows(), ["keep me"]);
-    assert.match(t.$(".gs-q-chip").textContent, /Queued/);
+    assert.equal(t.$(".gs-q-item").dataset.status, "pending");
     assert.match(t.$(".gs-q-note").textContent, /Nothing was sent|try again|check/i);
     assert.equal(t.key("head:interrupt").disabled, false, "the user can try again");
   }
@@ -236,5 +242,102 @@ test("queue ui: stylesheet declares no fixed pixel widths, so narrow screens can
   // Defect: a fixed-width rule forcing horizontal overflow on mobile layouts (jsdom has no layout engine).
   assert.doesNotMatch(CSS, /(?<![-\w])(min-)?width:\s*\d+px/);
   assert.match(CSS, /max-width:100%/);
-  assert.match(CSS, /@media \(max-width:480px\)/);
+  assert.match(CSS, /@media \(max-width:560px\)/);
+});
+
+const withModel = (name) => ({ ...chatgptAdapter, currentModel: () => name });
+
+test("queue card: header shows Queue (N) with a collapsible chevron and the right-hand actions in order", async () => {
+  // Defect: header deviating from the owner's layout, or a collapse that hides state instead of the list.
+  const t = await mountUi();
+  assert.equal(t.$(".gs-q-title").textContent, "Queue (0)");
+  assert.equal(t.key("head:clear").disabled, true, "nothing to clear");
+  await t.add("one");
+  await t.add("two");
+  assert.equal(t.$(".gs-q-title").textContent, "Queue (2)");
+  const actions = [...t.$(".gs-q-head-actions").children].map((b) => b.textContent.trim());
+  assert.deepEqual(actions, ["Interrupt & Send Next", "Pause", "Clear"]);
+  assert.ok(t.$$(".gs-q-head-actions svg").length === 3, "each header action carries an icon");
+
+  const toggle = t.key("head:toggle");
+  assert.equal(toggle.getAttribute("aria-expanded"), "true");
+  await t.click("head:toggle");
+  assert.equal(t.key("head:toggle").getAttribute("aria-expanded"), "false");
+  assert.equal(t.$(".gs-q-list"), null);
+  assert.equal(t.key("add:input"), null);
+  assert.equal(t.$(".gs-q-title").textContent, "Queue (2)", "count stays visible while collapsed");
+  assert.equal(t.key("head:interrupt").disabled, false, "actions stay available while collapsed");
+  await t.click("head:toggle");
+  assert.deepEqual(t.rows(), ["one", "two"]);
+});
+
+test("queue card: Clear needs a second press, can be cancelled, and then empties the queue", async () => {
+  // Defect: one stray click discarding every queued draft.
+  const t = await mountUi();
+  await t.add("keep");
+  await t.add("also keep");
+  await t.click("head:clear");
+  assert.equal(t.key("head:clear").textContent.trim(), "Confirm clear");
+  assert.deepEqual(t.rows(), ["keep", "also keep"], "first press deletes nothing");
+  await t.press(t.key("head:clear"), { key: "Escape" });
+  assert.equal(t.key("head:clear").textContent.trim(), "Clear");
+  await t.click("head:clear");
+  await t.click("head:pause"); // any other action disarms it
+  assert.equal(t.key("head:clear").textContent.trim(), "Clear");
+  assert.deepEqual(t.rows(), ["keep", "also keep"]);
+  await t.click("head:clear");
+  await t.click("head:clear");
+  assert.deepEqual(t.rows(), []);
+  assert.equal(t.$(".gs-q-title").textContent, "Queue (0)");
+});
+
+test("queue card: rows carry a number badge, bold title, muted preview, model chip when known, handle, edit and remove, and no overflow menu", async () => {
+  // Defect: row controls missing or reduced to a hidden menu; a model chip invented when the model is unknown.
+  const known = await mountUi({ adapter: withModel("GPT-5") });
+  await known.add("Review the plan\nCompare approaches and list risks");
+  await known.add("Second");
+  const [first, second] = known.$$(".gs-q-item");
+  assert.equal(first.querySelector(".gs-q-num").textContent, "1");
+  assert.equal(second.querySelector(".gs-q-num").textContent, "2");
+  assert.equal(first.querySelector(".gs-q-name").textContent, "Review the plan");
+  assert.equal(first.querySelector(".gs-q-preview").textContent, "Compare approaches and list risks");
+  assert.equal(second.querySelector(".gs-q-preview"), null, "no preview for a one-line message");
+  assert.equal(first.querySelector(".gs-q-model").textContent, "GPT-5");
+  for (const row of [first, second]) {
+    const names = [...row.querySelectorAll("button")].map((b) => b.getAttribute("aria-label"));
+    assert.deepEqual(names.map((n) => n.split(" ")[0]), ["Reorder", "Edit", "Remove"]);
+    assert.ok(row.querySelectorAll("button svg").length === 3);
+  }
+  assert.ok(!known.$$("button").some((b) => /[…⋯⋮]|\.\.\.|more|menu/i.test(`${b.textContent}${b.getAttribute("aria-label")}${b.title}`)));
+
+  const unknown = await mountUi();
+  await unknown.add("No model known");
+  assert.equal(unknown.$(".gs-q-model"), null);
+});
+
+test("queue card: dragging a handle reorders the queue and nothing moves when released in place", async () => {
+  // Defect: drag handle that is decorative, or a drop that reorders to the wrong slot.
+  const t = await mountUi();
+  for (const text of ["a", "b", "c"]) await t.add(text);
+  const rowEls = t.$$(".gs-q-item");
+  rowEls.forEach((row, i) => {
+    row.getBoundingClientRect = () => ({ top: i * 40, bottom: i * 40 + 40, left: 0, right: 300, width: 300, height: 40 });
+  });
+  const drag = async (index, ...ys) => {
+    const handle = t.$$(".gs-q-item")[index].querySelector(".gs-q-handle");
+    const fire = (type, y) => handle.dispatchEvent(new t.window.MouseEvent(type, { bubbles: true, button: 0, clientY: y }));
+    fire("pointerdown", ys[0]);
+    for (const y of ys.slice(1, -1)) fire("pointermove", y);
+    assert.ok(t.$$(".gs-q-item")[index].classList.contains("gs-q-dragging"));
+    fire("pointerup", ys.at(-1));
+    await t.ui.settled();
+  };
+  await drag(0, 20, 110, 110); // a dropped below c's midpoint
+  assert.deepEqual(t.rows(), ["b", "c", "a"]);
+  const again = t.$$(".gs-q-item");
+  again.forEach((row, i) => {
+    row.getBoundingClientRect = () => ({ top: i * 40, bottom: i * 40 + 40, left: 0, right: 300, width: 300, height: 40 });
+  });
+  await drag(1, 60, 62); // released where it started
+  assert.deepEqual(t.rows(), ["b", "c", "a"]);
 });

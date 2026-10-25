@@ -7,7 +7,7 @@
       "id": "ghostship-chatgpt",
       "name": "GhostShip ChatGPT",
       "description": "Fast, queue-aware ChatGPT interface for the owner browser.",
-      "version": "0.4.0",
+      "version": "0.5.0",
       "entry": "src/chatgpt/main.js",
       "match": [
         "https://chatgpt.com/*"

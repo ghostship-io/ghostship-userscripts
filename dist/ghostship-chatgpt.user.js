@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GhostShip ChatGPT
 // @namespace    https://github.com/ghostship-io/ghostship-userscripts
-// @version      0.4.0
+// @version      0.5.0
 // @description  Fast, queue-aware ChatGPT interface for the owner browser.
 // @match        https://chatgpt.com/*
 // @grant        none
@@ -707,6 +707,8 @@
           conversationId,
           text: input.text,
           attachments,
+          // The model the message will use, when the page could tell at queue time.
+          model: input.model ?? null,
           status: "pending",
           position: items.length ? items[items.length - 1].position + 1 : 0,
           version: 1,
@@ -810,11 +812,12 @@
         item.lastError = null;
       });
     }
-    clearSent(conversationId) {
+    /** Removes every message except one being sent (its outcome is still unrecorded). */
+    clear(conversationId) {
       return this.#store.transact(async (tx) => {
-        const sent = (await tx.itemsOf(conversationId)).filter((i) => i.status === "sent");
-        for (const item of sent) await tx.deleteItem(item.id);
-        return sent.length;
+        const removable = (await tx.itemsOf(conversationId)).filter((i) => i.status !== "sending");
+        for (const item of removable) await tx.deleteItem(item.id);
+        return removable.length;
       });
     }
     list(conversationId) {
@@ -1174,28 +1177,55 @@
   // src/chatgpt/queue/view.js
   var STYLE_ID = "gs-queue-style";
   var CSS = `
-.gs-q{box-sizing:border-box;width:100%;max-width:100%;min-width:0;margin:0 0 8px;padding:8px 10px;border:1px solid rgba(127,127,127,.35);border-radius:12px;background:var(--main-surface-secondary,rgba(127,127,127,.1));color:inherit;font:inherit;font-size:14px;line-height:1.35}
+.gs-q{box-sizing:border-box;width:100%;max-width:100%;min-width:0;margin:0 0 8px;padding:6px 8px;border:1px solid rgba(127,127,127,.3);border-radius:16px;background:var(--main-surface-secondary,rgba(127,127,127,.1));color:inherit;font:inherit;font-size:14px;line-height:1.35}
 .gs-q *{box-sizing:border-box;min-width:0}
-.gs-q-head{display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px}
-.gs-q-title{font-weight:600}
-.gs-q-status{flex:1 1 8em;opacity:.75}
-.gs-q-badge{padding:1px 8px;border:1px solid currentColor;border-radius:999px;font-size:12px;opacity:.8}
-.gs-q button{min-height:32px;padding:4px 10px;border:1px solid rgba(127,127,127,.5);border-radius:8px;background:transparent;color:inherit;font:inherit;cursor:pointer}
+.gs-q svg{width:1.1em;height:1.1em;flex:none;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.gs-q button{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:32px;padding:4px 10px;border:1px solid rgba(127,127,127,.45);border-radius:10px;background:transparent;color:inherit;font:inherit;cursor:pointer}
+.gs-q button:hover:not(:disabled){background:rgba(127,127,127,.15)}
 .gs-q button:disabled{opacity:.45;cursor:not-allowed}
 .gs-q button:focus-visible,.gs-q textarea:focus-visible{outline:2px solid #2563eb;outline-offset:1px}
-.gs-q .gs-q-primary{background:var(--text-primary,#111);color:var(--main-surface-primary,#fff);border-color:transparent;font-weight:600}
+.gs-q-head{display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px}
+.gs-q-toggle{border-color:transparent!important;padding:4px 6px!important}
+.gs-q-toggle svg{transition:transform .15s}
+.gs-q-toggle[aria-expanded="false"] svg{transform:rotate(-90deg)}
+.gs-q-title{font-weight:600}
+.gs-q-status{opacity:.7;font-size:12px}
+.gs-q-badge{padding:1px 8px;border:1px solid currentColor;border-radius:999px;font-size:12px;opacity:.8}
+.gs-q-spacer{flex:1 1 0}
+.gs-q-head-actions{display:flex;flex-wrap:wrap;gap:6px}
+.gs-q .gs-q-interrupt{border-color:currentColor;font-weight:600}
+.gs-q .gs-q-armed{border-color:#b91c1c;color:#b91c1c}
 .gs-q-error{margin:6px 0 0;padding:6px 8px;border-radius:8px;border:1px solid #b91c1c;color:#b91c1c;overflow-wrap:anywhere}
-.gs-q-list{list-style:none;margin:8px 0 0;padding:0;display:grid;gap:4px}
-.gs-q-item{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 8px;align-items:center;padding:4px 0;border-top:1px solid rgba(127,127,127,.2)}
-.gs-q-text{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
-.gs-q-chip{margin-left:6px;font-size:12px;opacity:.75;white-space:nowrap}
-.gs-q-actions{display:flex;flex-wrap:wrap;gap:4px;justify-content:flex-end}
+.gs-q-list{list-style:none;margin:6px 0 0;padding:0;display:grid;gap:2px}
+.gs-q-item{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;align-items:center;gap:2px 10px;padding:4px 2px;border-top:1px solid rgba(127,127,127,.18)}
+.gs-q-item.gs-q-dragging{opacity:.5}
+.gs-q-item.gs-q-drop-before{box-shadow:0 -2px 0 #2563eb}
+.gs-q-item.gs-q-drop-after{box-shadow:0 2px 0 #2563eb}
+.gs-q-num{display:inline-flex;align-items:center;justify-content:center;min-width:2em;padding:2px 6px;border:1px solid rgba(127,127,127,.4);border-radius:8px;font-size:13px}
+.gs-q-main{display:flex;gap:12px;align-items:baseline;overflow:hidden}
+.gs-q-name{flex:0 1 45%;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gs-q-preview{flex:1 1 0;opacity:.65;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gs-q-state{flex:none;font-size:12px;padding:0 6px;border-radius:6px;background:rgba(127,127,127,.25)}
+.gs-q-model{grid-column:3;padding:1px 8px;border-radius:8px;background:rgba(127,127,127,.2);font-size:12px;white-space:nowrap}
+.gs-q-actions{grid-column:4;display:flex;flex-wrap:wrap;align-items:center;gap:2px;justify-content:flex-end}
+.gs-q .gs-q-icon{border-color:transparent;padding:4px 6px}
+.gs-q .gs-q-handle{touch-action:none;cursor:grab}
 .gs-q-note{grid-column:1/-1;margin:0;font-size:12px;opacity:.8;overflow-wrap:anywhere}
-.gs-q-edit{grid-column:1/-1;display:grid;gap:4px}
+.gs-q-edit{grid-column:2/-1;display:grid;gap:4px}
+.gs-q-edit .gs-q-actions{justify-content:flex-start}
 .gs-q textarea{width:100%;max-width:100%;resize:vertical;font:inherit;color:inherit;background:transparent;border:1px solid rgba(127,127,127,.5);border-radius:8px;padding:6px 8px}
-.gs-q-add{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;align-items:flex-end}
+.gs-q-add{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;align-items:flex-end}
 .gs-q-add textarea{flex:1 1 12em}
-@media (max-width:480px){.gs-q-item{grid-template-columns:minmax(0,1fr)}.gs-q-actions{justify-content:flex-start}.gs-q button{min-height:36px}}
+@media (max-width:560px){
+.gs-q-head-actions{flex:1 1 100%}
+.gs-q-head-actions button{flex:1 1 auto}
+.gs-q-item{grid-template-columns:auto minmax(0,1fr) auto}
+.gs-q-main{display:block}
+.gs-q-name,.gs-q-preview{display:block}
+.gs-q-model{grid-column:2/-1;justify-self:start}
+.gs-q-actions{grid-column:1/-1;justify-content:flex-end}
+.gs-q button{min-height:36px}
+}
 `;
   var STATUS_LABEL = {
     pending: "Queued",
@@ -1206,7 +1236,28 @@
     blocked: "Blocked"
   };
   var EDITABLE = /* @__PURE__ */ new Set(["pending", "failed", "blocked"]);
-  var summarize = (text) => text.replace(/\s+/g, " ").trim();
+  var ICONS = {
+    chevron: ["M6 9l6 6 6-6"],
+    interrupt: ["M5 5l7 7-7 7", "M13 5l7 7-7 7"],
+    pause: ["M9 5v14", "M15 5v14"],
+    play: ["M7 5l12 7-12 7z"],
+    trash: ["M4 7h16", "M9 7V4h6v3", "M6 7l1 13h10l1-13"],
+    grip: ["M9 6h.01", "M15 6h.01", "M9 12h.01", "M15 12h.01", "M9 18h.01", "M15 18h.01"],
+    pencil: ["M4 20l4-1 11-11-3-3L5 16z", "M14 7l3 3"],
+    remove: ["M12 21a9 9 0 100-18 9 9 0 000 18z", "M9 9l6 6", "M15 9l-6 6"]
+  };
+  function icon(doc, name) {
+    const ns = "http://www.w3.org/2000/svg";
+    const svg = doc.createElementNS(ns, "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("aria-hidden", "true");
+    for (const d of ICONS[name]) {
+      const path = doc.createElementNS(ns, "path");
+      path.setAttribute("d", d);
+      svg.append(path);
+    }
+    return svg;
+  }
   function el(doc, tag, attrs = {}, children = []) {
     const node = doc.createElement(tag);
     for (const [key, value] of Object.entries(attrs)) {
@@ -1216,16 +1267,19 @@
     for (const child of [].concat(children)) node.append(child);
     return node;
   }
-  function button(doc, key, label, onClick, { label: aria, disabled, primary } = {}) {
-    const node = el(doc, "button", {
-      type: "button",
-      "data-gs-key": key,
-      "aria-label": aria,
-      disabled,
-      class: primary ? "gs-q-primary" : null
-    }, label);
+  function button(doc, key, content, onClick, { label, disabled, className, title, pressed, expanded } = {}) {
+    const node = el(
+      doc,
+      "button",
+      { type: "button", "data-gs-key": key, "aria-label": label, disabled, class: className, title, "aria-expanded": expanded == null ? null : String(expanded) },
+      content
+    );
     node.addEventListener("click", onClick);
     return node;
+  }
+  function summarize(text) {
+    const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    return { title: lines[0] ?? "(empty message)", preview: lines.slice(1).join(" ") };
   }
   function interruptBlocker({ items, interrupting }) {
     if (interrupting) return "Stopping the current response.";
@@ -1235,57 +1289,83 @@
     if (head.status !== "pending") return `Resolve the first message (${STATUS_LABEL[head.status]}) first.`;
     return null;
   }
+  function dropIndex(rects, y) {
+    let index = 0;
+    for (const rect of rects) {
+      if (y > rect.top + (rect.bottom - rect.top) / 2) index += 1;
+    }
+    return index;
+  }
   function renderPanel(doc, root, model, on) {
     const unsent = model.items.filter((i) => i.status !== "sent");
     const sentCount = model.items.length - unsent.length;
     const blocker = interruptBlocker(model);
-    const statusBits = [`${unsent.length} queued`];
+    const clearable = model.items.some((i) => i.status !== "sending");
+    const statusBits = [];
     if (model.paused) statusBits.push("paused");
     if (sentCount) statusBits.push(`${sentCount} sent`);
+    const interruptBtn = button(doc, "head:interrupt", [icon(doc, "interrupt"), "Interrupt & Send Next"], () => on.interrupt(), {
+      className: "gs-q-interrupt",
+      disabled: blocker !== null,
+      title: blocker
+    });
+    if (model.interrupting) interruptBtn.setAttribute("aria-busy", "true");
     const head = el(doc, "div", { class: "gs-q-head" }, [
-      el(doc, "span", { class: "gs-q-title" }, "Queue"),
+      button(doc, "head:toggle", icon(doc, "chevron"), () => on.toggleCollapsed(), {
+        className: "gs-q-toggle",
+        label: model.collapsed ? "Expand queue" : "Collapse queue",
+        expanded: !model.collapsed
+      }),
+      el(doc, "span", { class: "gs-q-title" }, `Queue (${unsent.length})`),
       el(doc, "span", { class: "gs-q-status", role: "status", "aria-live": "polite" }, statusBits.join(" \xB7 ")),
       model.dryRun ? el(doc, "span", { class: "gs-q-badge", title: "Dry run: nothing is sent to ChatGPT" }, "Dry run") : null,
-      button(doc, "head:pause", model.paused ? "Resume" : "Pause", () => on.togglePause(), {
-        label: model.paused ? "Resume queue" : "Pause queue"
-      }),
-      sentCount ? button(doc, "head:clear", "Clear sent", () => on.clearSent()) : null,
-      // The explicit Interrupt & Send Next control; there is deliberately no overflow menu.
-      button(doc, "head:interrupt", "Interrupt & Send Next", () => on.interrupt(), { primary: true, disabled: blocker !== null })
-    ].filter(Boolean));
-    const interruptBtn = head.querySelector('[data-gs-key="head:interrupt"]');
-    if (blocker) interruptBtn.setAttribute("title", blocker);
-    if (model.interrupting) interruptBtn.setAttribute("aria-busy", "true");
+      el(doc, "span", { class: "gs-q-spacer" }),
+      el(doc, "div", { class: "gs-q-head-actions" }, [
+        interruptBtn,
+        button(doc, "head:pause", [icon(doc, model.paused ? "play" : "pause"), model.paused ? "Resume" : "Pause"], () => on.togglePause(), {
+          label: model.paused ? "Resume queue" : "Pause queue"
+        }),
+        button(doc, "head:clear", [icon(doc, "trash"), model.confirmClear ? "Confirm clear" : "Clear"], () => on.clear(), {
+          label: model.confirmClear ? "Confirm clearing the queue" : "Clear queue",
+          disabled: !clearable,
+          className: model.confirmClear ? "gs-q-armed" : null
+        })
+      ])
+    ]);
     const children = [head];
     const message = model.error ?? (model.note ? { message: model.note, action: "" } : null);
     if (message) {
       children.push(el(doc, "p", { class: "gs-q-error", role: model.error ? "alert" : "status" }, `${message.message} ${message.action}`.trim()));
     }
-    const list = el(doc, "ol", { class: "gs-q-list", "aria-label": "Queued messages" });
-    unsent.forEach((item, index) => list.append(renderItem(doc, item, index, unsent.length, model, on)));
-    children.push(list);
-    const input = el(doc, "textarea", {
-      rows: 1,
-      "data-gs-key": "add:input",
-      "aria-label": "Message to queue",
-      placeholder: "Queue a message"
-    });
-    input.value = model.draft ?? "";
-    input.addEventListener("input", () => on.draft(input.value));
-    input.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
-        event.preventDefault();
-        on.add(input.value);
-      }
-    });
-    children.push(
-      el(doc, "div", { class: "gs-q-add" }, [input, button(doc, "add:submit", "Add to queue", () => on.add(input.value))])
-    );
+    if (!model.collapsed) {
+      const list = el(doc, "ol", { class: "gs-q-list", "aria-label": "Queued messages" });
+      unsent.forEach((item, index) => list.append(renderItem(doc, item, index, unsent.length, model, on)));
+      children.push(list);
+      const input = el(doc, "textarea", {
+        rows: 1,
+        "data-gs-key": "add:input",
+        "aria-label": "Message to queue",
+        placeholder: "Queue a message"
+      });
+      input.value = model.draft ?? "";
+      input.addEventListener("input", () => on.draft(input.value));
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+          event.preventDefault();
+          on.add(input.value);
+        }
+      });
+      children.push(el(doc, "div", { class: "gs-q-add" }, [input, button(doc, "add:submit", "Add to queue", () => on.add(input.value))]));
+    }
     root.replaceChildren(...children);
+    root.onkeydown = (event) => {
+      if (event.key === "Escape" && model.confirmClear) on.disarmClear();
+    };
   }
   function renderItem(doc, item, index, count, model, on) {
     const li = el(doc, "li", { class: "gs-q-item", "data-id": item.id, "data-status": item.status });
     const editing = model.edit?.id === item.id;
+    const number = el(doc, "span", { class: "gs-q-num", "aria-label": `Message ${index + 1} of ${count}` }, String(index + 1));
     if (editing) {
       const area = el(doc, "textarea", { rows: 3, "data-gs-key": `${item.id}:edit`, "aria-label": "Edit queued message" });
       area.value = model.edit.text;
@@ -1300,45 +1380,90 @@
         }
       });
       li.append(
+        number,
         el(doc, "div", { class: "gs-q-edit" }, [
           area,
           el(doc, "div", { class: "gs-q-actions" }, [
-            button(doc, `${item.id}:save`, "Save", () => on.saveEdit(item.id, area.value), { primary: true }),
+            button(doc, `${item.id}:save`, "Save", () => on.saveEdit(item.id, area.value), { className: "gs-q-interrupt" }),
             button(doc, `${item.id}:cancel`, "Cancel", () => on.cancelEdit())
           ])
         ])
       );
       return li;
     }
-    const text = summarize(item.text) || "(empty message)";
-    li.append(
-      el(doc, "div", {}, [
-        el(doc, "span", { class: "gs-q-text", title: item.text }, text),
-        el(doc, "span", { class: "gs-q-chip" }, STATUS_LABEL[item.status] ?? item.status)
-      ])
-    );
-    const actions = el(doc, "div", { class: "gs-q-actions", role: "group", "aria-label": "Message actions" });
+    const { title, preview } = summarize(item.text);
     const locked = item.status === "sending";
-    actions.append(
-      button(doc, `${item.id}:up`, "Up", () => on.move(item.id, index - 1), { label: "Move up", disabled: locked || index === 0 }),
-      button(doc, `${item.id}:down`, "Down", () => on.move(item.id, index + 1), { label: "Move down", disabled: locked || index === count - 1 })
-    );
-    if (EDITABLE.has(item.status)) actions.append(button(doc, `${item.id}:edit`, "Edit", () => on.startEdit(item)));
+    const main = el(doc, "div", { class: "gs-q-main", title: item.text }, [
+      el(doc, "span", { class: "gs-q-name" }, title),
+      preview ? el(doc, "span", { class: "gs-q-preview" }, preview) : null,
+      item.status !== "pending" ? el(doc, "span", { class: "gs-q-state" }, STATUS_LABEL[item.status] ?? item.status) : null
+    ]);
+    li.append(number, main);
+    if (item.model) li.append(el(doc, "span", { class: "gs-q-model", title: "Model for this message" }, item.model));
+    const handle = button(doc, `${item.id}:handle`, icon(doc, "grip"), () => void 0, {
+      className: "gs-q-icon gs-q-handle",
+      label: `Reorder message ${index + 1}: drag, or use the arrow keys`,
+      disabled: locked || count < 2
+    });
+    attachReorder(doc, handle, li, item, index, on);
+    const actions = el(doc, "div", { class: "gs-q-actions", role: "group", "aria-label": `Actions for message ${index + 1}` });
+    actions.append(handle);
+    if (EDITABLE.has(item.status)) {
+      actions.append(button(doc, `${item.id}:edit`, icon(doc, "pencil"), () => on.startEdit(item), { className: "gs-q-icon", label: `Edit message ${index + 1}` }));
+    }
     if (item.status === "failed" || item.status === "manual-review") {
       actions.append(button(doc, `${item.id}:retry`, "Retry", () => on.retry(item.id)));
       actions.append(button(doc, `${item.id}:delivered`, "Mark delivered", () => on.markDelivered(item.id)));
     }
-    actions.append(button(doc, `${item.id}:remove`, "Remove", () => on.remove(item.id), { disabled: locked }));
-    actions.addEventListener("keydown", (event) => {
-      if (!event.altKey || event.key !== "ArrowUp" && event.key !== "ArrowDown" || locked) return;
-      event.preventDefault();
-      on.move(item.id, index + (event.key === "ArrowUp" ? -1 : 1), `${item.id}:${event.key === "ArrowUp" ? "up" : "down"}`);
-    });
+    actions.append(
+      button(doc, `${item.id}:remove`, icon(doc, "remove"), () => on.remove(item.id), {
+        className: "gs-q-icon",
+        label: `Remove message ${index + 1}`,
+        disabled: locked
+      })
+    );
     li.append(actions);
+    li.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowUp" && event.key !== "ArrowDown" || locked) return;
+      if (!event.altKey && event.target !== handle) return;
+      event.preventDefault();
+      on.move(item.id, index + (event.key === "ArrowUp" ? -1 : 1), `${item.id}:handle`);
+    });
     if (item.lastError) {
       li.append(el(doc, "p", { class: "gs-q-note", "data-gs-note": item.lastError.code }, `${item.lastError.message} ${item.lastError.action}`));
     }
     return li;
+  }
+  function attachReorder(doc, handle, li, item, index, on) {
+    let drag = null;
+    const rows = () => [...li.parentElement.children];
+    const target = (y) => {
+      const others = rows().filter((row) => row !== li);
+      const index2 = dropIndex(others.map((row) => row.getBoundingClientRect()), y);
+      return { index: index2, row: others[index2] ?? others[others.length - 1], before: index2 < others.length };
+    };
+    const clearMarks = () => rows().forEach((row) => row.classList.remove("gs-q-drop-before", "gs-q-drop-after", "gs-q-dragging"));
+    const finish = (commitY) => {
+      if (!drag) return;
+      const { index: to } = commitY == null ? { index } : target(commitY);
+      drag = null;
+      clearMarks();
+      if (to !== index) on.move(item.id, to, `${item.id}:handle`);
+    };
+    handle.addEventListener("pointerdown", (event) => {
+      if (handle.disabled || event.button != null && event.button !== 0) return;
+      drag = { id: event.pointerId };
+      handle.setPointerCapture?.(event.pointerId);
+      li.classList.add("gs-q-dragging");
+    });
+    handle.addEventListener("pointermove", (event) => {
+      if (!drag) return;
+      rows().forEach((row2) => row2.classList.remove("gs-q-drop-before", "gs-q-drop-after"));
+      const { row, before } = target(event.clientY);
+      row?.classList.add(before ? "gs-q-drop-before" : "gs-q-drop-after");
+    });
+    handle.addEventListener("pointerup", (event) => finish(event.clientY));
+    handle.addEventListener("pointercancel", () => finish(null));
   }
 
   // src/chatgpt/queue/controller.js
@@ -1365,7 +1490,18 @@
       } };
     }
     let conversationId = adapter.conversationId(win);
-    const model = { items: [], paused: false, interrupting: false, error: null, note: null, edit: null, draft: "", dryRun: dispatcher.dryRun === true };
+    const model = {
+      items: [],
+      paused: false,
+      interrupting: false,
+      error: null,
+      note: null,
+      edit: null,
+      draft: "",
+      collapsed: false,
+      confirmClear: false,
+      dryRun: dispatcher.dryRun === true
+    };
     let engine = null;
     let store = null;
     let disposed = false;
@@ -1394,16 +1530,16 @@
     };
     let painted = null;
     function render(focusKey) {
-      const { items, paused, interrupting, error, note, edit, dryRun } = model;
-      const signature = JSON.stringify({ items, paused, interrupting, error, note, dryRun, editing: edit?.id ?? null });
+      const { items, paused, interrupting, error, note, edit, dryRun, collapsed, confirmClear } = model;
+      const signature = JSON.stringify({ items, paused, interrupting, error, note, dryRun, collapsed, confirmClear, editing: edit?.id ?? null });
       if (signature === painted && !focusKey) return;
       painted = signature;
       const active = doc.activeElement;
       const key = focusKey ?? (root.contains(active) ? active.getAttribute("data-gs-key") : null);
       renderPanel(doc, root, model, handlers);
       if (!key) return;
-      const target = root.querySelector(`[data-gs-key="${CSS_ESCAPE(key)}"]`) ?? root.querySelector("button:not(:disabled)");
-      target?.focus({ preventScroll: true });
+      const wanted = root.querySelector(`[data-gs-key="${CSS_ESCAPE(key)}"]`);
+      (wanted && !wanted.disabled ? wanted : root.querySelector("button:not(:disabled)"))?.focus({ preventScroll: true });
     }
     async function reload() {
       const view = await engine.list(conversationId);
@@ -1414,6 +1550,7 @@
     }
     const act = (fn, focusKey) => run(async () => {
       model.error = null;
+      model.confirmClear = false;
       await fn();
       await reload();
       if (focusKey) render(focusKey);
@@ -1428,7 +1565,8 @@
       add: (text) => {
         if (!text.trim()) return;
         model.draft = "";
-        return act(() => engine.enqueue(conversationId, { text }), "add:input");
+        const modelName = adapter.currentModel?.(doc) ?? null;
+        return act(() => engine.enqueue(conversationId, { text, model: modelName }), "add:input");
       },
       startEdit: (item) => {
         model.edit = { id: item.id, text: item.text };
@@ -1447,11 +1585,29 @@
       remove: (id) => act(() => engine.remove(id), "add:input"),
       retry: (id) => act(() => engine.retry(id)),
       markDelivered: (id) => act(() => engine.markDelivered(id)),
-      clearSent: () => act(() => engine.clearSent(conversationId)),
+      toggleCollapsed: () => {
+        model.collapsed = !model.collapsed;
+        model.confirmClear = false;
+        render("head:toggle");
+      },
+      // Clearing discards drafts, so it takes a second press.
+      clear() {
+        if (!model.confirmClear) {
+          model.confirmClear = true;
+          render("head:clear");
+          return;
+        }
+        return act(() => engine.clear(conversationId), "head:clear");
+      },
+      disarmClear: () => {
+        model.confirmClear = false;
+        render("head:clear");
+      },
       togglePause: () => act(() => model.paused ? engine.resume(conversationId) : engine.pause(conversationId)),
       interrupt() {
         model.interrupting = true;
         model.error = null;
+        model.confirmClear = false;
         render("head:interrupt");
         return run(async () => {
           try {
