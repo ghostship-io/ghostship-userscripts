@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GhostShip ChatGPT
 // @namespace    https://github.com/ghostship-io/ghostship-userscripts
-// @version      0.7.2
+// @version      0.7.4
 // @description  Fast, queue-aware ChatGPT interface for the owner browser.
 // @match        https://chatgpt.com/*
 // @grant        none
@@ -3301,6 +3301,8 @@ ${LAYOUT_CSS}`;
   }
   var clamp2 = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
   var PREVIEW_MAX = 100;
+  var OPEN_SETTLE_MS = 500;
+  var OPEN_FOLLOW_MS = 1500;
   var SCAN_MS = 400;
   var BLOCK_CAP = 800;
   var CONTENT_W = 768;
@@ -3342,7 +3344,11 @@ ${LAYOUT_CSS}`;
     let bookmarkToRestore = null;
     let listTopToRestore = null;
     let outputsCollapsed = false;
-    let openPending = convId !== "new";
+    let opening = convId === "new" ? "done" : "waiting";
+    let openSig = null;
+    let openStalled = false;
+    let openGen = 0;
+    let interacted = false;
     let lastHost = null;
     let scannedAt = -Infinity;
     let scanTimer = null;
@@ -3468,17 +3474,41 @@ ${LAYOUT_CSS}`;
       const el2 = els.find((e, i) => adapter.turnId(e, i) === mark.id);
       if (el2) runtime.navigateTo(el2, { offset: mark.offset });
     }
-    function openAtLatest() {
-      if (!openPending || disposed) return;
-      if (didRestore || userScrolled) {
-        openPending = false;
-        return;
-      }
+    function openTick() {
+      if (opening === "done" || disposed) return;
+      if (didRestore || userScrolled || interacted) return stopOpening();
       const last = prompts.at(-1);
-      const el2 = last && els[last.turnIndex];
-      if (restore || !el2 || !runtime.isTurnActive(el2) || !el2.getBoundingClientRect().height) return;
-      openPending = false;
-      runtime.open(el2, { offset: 0 });
+      if (restore || !last) return;
+      const sig = `${last.id}:${prompts.length}`;
+      if (sig !== openSig || openStalled) {
+        const el2 = els[last.turnIndex];
+        if (sig === openSig && !(el2 && runtime.isTurnActive(el2) && el2.getBoundingClientRect().height)) return;
+        openSig = sig;
+        openStalled = false;
+        armOpen("select", OPEN_SETTLE_MS);
+      }
+    }
+    function stopOpening() {
+      opening = "done";
+      openGen++;
+    }
+    function armOpen(step, ms) {
+      const gen = ++openGen;
+      win.setTimeout(() => {
+        if (gen !== openGen || disposed || opening === "done") return;
+        if (didRestore || userScrolled || interacted) return stopOpening();
+        if (step === "finish") return stopOpening();
+        const last = prompts.at(-1);
+        const el2 = last && els[last.turnIndex];
+        if (!el2 || !runtime.isTurnActive(el2) || !el2.getBoundingClientRect().height) {
+          openStalled = true;
+          return;
+        }
+        if (!scroll.mayOpen()) return stopOpening();
+        opening = "following";
+        select(last, true);
+        armOpen("finish", OPEN_FOLLOW_MS);
+      }, ms);
     }
     function setVar(name, value) {
       for (const el2 of [mapPanel, promptsPanel]) if (el2.style.getPropertyValue(name) !== value) el2.style.setProperty(name, value);
@@ -3859,15 +3889,15 @@ ${LAYOUT_CSS}`;
         finishRestore();
         markActive();
       }
-      openAtLatest();
+      openTick();
       schedule();
     }
-    function select(p) {
+    function select(p, automatic = false) {
       activeId = p.id;
       listManual = false;
       markActive();
       const el2 = els[p.turnIndex];
-      if (el2) runtime.navigateTo(el2, { offset: 0 });
+      if (el2) automatic ? runtime.open(el2, { offset: 0 }) : runtime.navigateTo(el2, { offset: 0 });
       modelKey = "";
       renderMinimap(measureView());
       persist();
@@ -3981,6 +4011,7 @@ ${LAYOUT_CSS}`;
       schedule();
     });
     on(doc, "transitionend", (e) => !root.contains(e.target) && !actions.contains(e.target) && /width|margin|padding|left|right|transform/.test(e.propertyName ?? "") && scheduleLayout(true), { capture: true, passive: true });
+    for (const type of ["pointerdown", "keydown", "wheel", "touchstart"]) on(doc, type, () => interacted = true, { capture: true, passive: true });
     cleanups.push(scroll.onScroll((kind) => {
       if (kind === "user") userScrolled = true;
       schedule();
@@ -4273,7 +4304,7 @@ ${LAYOUT_CSS}`;
   var boot = createBoot({
     win: window,
     adapter: chatgptAdapter,
-    version: "0.7.2",
+    version: "0.7.4",
     extraDiagnostics: () => recoveryDiagnostics.snapshot(),
     onDispose: () => {
       queueUi.shutdown();
