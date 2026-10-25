@@ -10,10 +10,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Release policy (versions are set by the release step; a change needs a changelog entry)
+        if: github.event_name == 'pull_request'
+        run: git fetch origin "${{ github.base_ref }}" && node scripts/check-pr.mjs "origin/${{ github.base_ref }}"
+      - name: Release plan (dry run)
+        run: node scripts/release.mjs
       - run: npm test
       - run: npm run gate
