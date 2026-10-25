@@ -52,6 +52,11 @@ export function createTurnBackend() {
     setWindow(turn, options) {
       return api?.navigateToTurn(turn, options) ?? false;
     },
+    /** Navigate to the turn that owns `el`; false when `el` is not a known turn element. */
+    navigateToElement(el, options) {
+      const i = api?.turnIndexOf(el);
+      return i === undefined ? false : api.navigateToTurn(i, options);
+    },
     unmount() {
       api?.dispose();
       api = null;
@@ -224,6 +229,7 @@ function mountTurns({ doc, adapter, scroll, observers, config, fallback }) {
     stats,
     sync,
     turnCount: () => turns.length,
+    turnIndexOf: (el) => turnOf.get(el),
     activeTurnCount: () => turns.filter((t) => t.elements.some((e) => e.getAttribute(STATE) === "active")).length,
     observerStats: () => ({ resizeTargets: observed.size, hubSubscriptions: observers.size() }),
     navigateToTurn(i, { offset = 0 } = {}) {

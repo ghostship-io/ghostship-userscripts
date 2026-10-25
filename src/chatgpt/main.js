@@ -2,6 +2,7 @@ import { createRuntime } from "../core/runtime.js";
 import { chatgptAdapter } from "./adapter.js";
 import { DryRunDispatcher } from "./queue/dispatch.js";
 import { createQueueUi } from "./queue/controller.js";
+import { createRail } from "./rail/rail.js";
 import { createTurnBackend } from "./virtualization/backend.js";
 
 // No live transport exists yet: the queue always runs against the dry-run
@@ -12,5 +13,6 @@ const queueUi = ({ win, adapter, diagnostics, config }) => {
 };
 
 const runtime = createRuntime({ win: window, adapter: chatgptAdapter, backend: createTurnBackend(), queueUi });
+if (runtime.mode === "active") createRail({ win: window, adapter: chatgptAdapter, runtime });
 // Non-sensitive health only: mode and counters.
 window.__ghostshipUserscripts = { mode: runtime.mode, diagnostics: () => runtime.diagnostics.snapshot() };
