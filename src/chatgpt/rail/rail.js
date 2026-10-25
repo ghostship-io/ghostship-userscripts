@@ -35,7 +35,7 @@ const CSS = `
 .gs-panel{position:fixed;z-index:30;display:flex;flex-direction:column;width:min(${PANEL_WIDTH}px,calc(100vw - 16px));box-sizing:border-box;border:1px solid ${LINE};border-radius:16px;background:var(--main-surface-primary,Canvas);color:var(--text-primary,CanvasText);font:inherit;font-size:14px;line-height:20px;overflow:hidden}
 .gs-panel[hidden]{display:none}
 .gs-panel *,.gs-hbtns *{box-sizing:border-box}
-.gs-panel-map{top:var(--gs-top,8px);right:var(--gs-right,12px);max-height:calc(100vh - var(--gs-top,8px) - 16px)}
+.gs-panel-map{top:var(--gs-top,8px);right:var(--gs-right,12px);max-height:calc(100vh - var(--gs-top,8px) - var(--gs-map-bottom,16px))}
 .gs-panel-prompts{left:var(--gs-left,12px);bottom:var(--gs-bottom,16px);max-height:calc(100vh - 96px - var(--gs-bottom,16px))}
 .gs-panel[data-gs-drawer="true"]{max-width:calc(100vw - 16px)}
 .gs-panel-head{display:flex;flex:0 0 auto;align-items:center;justify-content:space-between;min-height:44px;padding:8px 8px 8px 16px;font-weight:600}
@@ -99,6 +99,7 @@ const SCAN_MS = 400; // at most one page scan for ChatGPT's pane per this long
 const BLOCK_CAP = 800; // rendered blocks measured per rebuild
 const CONTENT_W = 768; // the conversation column's usual width, when it cannot be measured
 const MAP_PAD = 18; // the track's padding and borders
+const MAP_CHROME = 120; // the minimap panel's header, caption and padding around the frame
 const MAP_W = 244; // the track's width when it cannot be measured
 
 /**
@@ -443,10 +444,10 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
     }
     // A drawer sits in its free corner and ends above the composer, never over it or the header.
     const rect = adapter.composer(doc)?.getBoundingClientRect();
-    if (!docked.prompts) {
-      const bottom = rect?.height ? `${Math.max(16, Math.round(win.innerHeight - rect.top + 8))}px` : "96px";
-      if (promptsPanel.style.getPropertyValue("--gs-bottom") !== bottom) promptsPanel.style.setProperty("--gs-bottom", bottom);
-    }
+    const clear = rect?.height ? `${Math.max(16, Math.round(win.innerHeight - rect.top + 8))}px` : "96px";
+    if (!docked.prompts && promptsPanel.style.getPropertyValue("--gs-bottom") !== clear) promptsPanel.style.setProperty("--gs-bottom", clear);
+    const mapBottom = docked.minimap ? "16px" : clear;
+    if (mapPanel.style.getPropertyValue("--gs-map-bottom") !== mapBottom) mapPanel.style.setProperty("--gs-map-bottom", mapBottom);
   }
 
   /** Panel anchors: docked panels sit in the corners of the space the page column leaves; drawers in the window's corners. */
@@ -625,7 +626,7 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
     const turnPx = ext.z.getBoundingClientRect().bottom - turnBox.top;
     const contentWidth = Math.min(turnBox.width || CONTENT_W, CONTENT_W); // ChatGPT's centered conversation column
     // Content, rendered-ness and the turn's size (to 20px / 8px): anything that changes the drawn boxes.
-    const key = `${activeId}:${slice.map((e) => e.textContent.length).join(",")}:${slice.every((e) => runtime.isTurnActive(e))}:${Math.round(turnPx / 20)}:${Math.round(turnBox.width / 8)}:${Math.round(minimap.getBoundingClientRect().width / 8)}`;
+    const key = `${activeId}:${slice.map((e) => e.textContent.length).join(",")}:${slice.every((e) => runtime.isTurnActive(e))}:${Math.round(turnPx / 20)}:${Math.round(turnBox.width / 8)}:${Math.round(minimap.getBoundingClientRect().width / 8)}:${Math.round(win.innerHeight / 8)}:${mapPanel.style.getPropertyValue("--gs-map-bottom")}`;
     // A growing (streaming) turn rebuilds its overview at most twice a second.
     const now = win.performance.now();
     const throttled = key !== modelKey && modelKey !== "" && modelKey.startsWith(`${activeId}:`) && now - modelBuiltAt < 500 && !forceModel;
@@ -644,7 +645,8 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
       const items = silhouetteItems(ext, slice, turnBox.top, turnPx);
       // The frame keeps the conversation's real aspect ratio: one scale for both axes, fitted to the box.
       const box = minimap.getBoundingClientRect();
-      const maxH = clamp(win.innerHeight * 0.45, 120, 360); // the panel grows with the conversation, up to this
+      const room = win.innerHeight - parseFloat(mapPanel.style.getPropertyValue("--gs-map-bottom") || "16") - (adapter.headerBottom(doc) + 8) - MAP_CHROME;
+      const maxH = clamp(Math.min(win.innerHeight * 0.45, room), 48, 360); // the panel grows with the conversation, up to this
       const scale = Math.min((box.width ? box.width - MAP_PAD : MAP_W) / contentWidth, maxH / Math.max(turnPx, 1));
       const size = { w: `${Math.max(24, Math.round(contentWidth * scale))}px`, h: `${Math.max(8, Math.round(turnPx * scale))}px` };
       if (frame.style.width !== size.w) frame.style.width = size.w;
@@ -878,7 +880,10 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
     persist();
   });
   // The page column moves with the window and with ChatGPT's own sidebar (an animated width change).
-  on(win, "resize", () => scheduleLayout(true));
+  on(win, "resize", () => {
+    scheduleLayout(true);
+    schedule();
+  });
   on(doc, "transitionend", (e) => !root.contains(e.target) && !actions.contains(e.target) && /width|margin|padding|left|right|transform/.test(e.propertyName ?? "") && scheduleLayout(true), { capture: true, passive: true });
 
   cleanups.push(scroll.onScroll((kind) => {

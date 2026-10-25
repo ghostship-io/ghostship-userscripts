@@ -457,3 +457,17 @@ test("the overlay's reservation is removed with the panels and written only once
   assert.equal(overlay.style.getPropertyValue("--gs-reserve-left"), "");
   assert.equal(overlay.style.position, "absolute", "the page's own style survives");
 });
+
+test("a header that ChatGPT replaces (column and composer untouched) takes over the cancelling margins", async () => {
+  const fx = createFixture({ turns: 20, width: 1280, markup: "real", header: true });
+  mount(fx);
+  await fx.settle();
+  const old = fx.doc.getElementById("page-header");
+  assert.equal(old.hasAttribute("data-gs-header"), true);
+  const fresh = old.cloneNode(true);
+  fresh.removeAttribute("data-gs-header");
+  old.replaceWith(fresh);
+  fx.win.dispatchEvent(new fx.win.Event("resize"));
+  await fx.settle();
+  assert.equal(fresh.hasAttribute("data-gs-header"), true, "the new header cancels the padding too");
+});

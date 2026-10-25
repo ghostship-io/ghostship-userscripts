@@ -3019,8 +3019,12 @@
     let written = [];
     let known = null;
     let applied = { left: 0, right: 0 };
+    let epoch = 0;
     const findColumns = () => {
-      if (!known || !known.frame.isConnected || known.pads.some((el2) => !el2.isConnected)) known = adapter.columns(doc);
+      if (!known || !known.frame.isConnected || known.pads.some((el2) => !el2.isConnected) || known.header && !known.header.isConnected) {
+        known = adapter.columns(doc);
+        epoch++;
+      }
       return known;
     };
     function release(el2) {
@@ -3070,7 +3074,7 @@
       const cols = findColumns();
       if (!cols) return "none";
       const r = cols.frame.getBoundingClientRect();
-      return `${win.innerWidth}|${Math.round(r.left)}|${Math.round(r.right)}|${cols.pads.length}|${paneLeft == null ? "-" : Math.round(paneLeft)}`;
+      return `${win.innerWidth}|${Math.round(r.left)}|${Math.round(r.right)}|${cols.pads.length}|${paneLeft == null ? "-" : Math.round(paneLeft)}|${epoch}`;
     }
     const natural = (col) => {
       const r = col.getBoundingClientRect();
@@ -3228,7 +3232,7 @@
 .gs-panel{position:fixed;z-index:30;display:flex;flex-direction:column;width:min(${PANEL_WIDTH}px,calc(100vw - 16px));box-sizing:border-box;border:1px solid ${LINE};border-radius:16px;background:var(--main-surface-primary,Canvas);color:var(--text-primary,CanvasText);font:inherit;font-size:14px;line-height:20px;overflow:hidden}
 .gs-panel[hidden]{display:none}
 .gs-panel *,.gs-hbtns *{box-sizing:border-box}
-.gs-panel-map{top:var(--gs-top,8px);right:var(--gs-right,12px);max-height:calc(100vh - var(--gs-top,8px) - 16px)}
+.gs-panel-map{top:var(--gs-top,8px);right:var(--gs-right,12px);max-height:calc(100vh - var(--gs-top,8px) - var(--gs-map-bottom,16px))}
 .gs-panel-prompts{left:var(--gs-left,12px);bottom:var(--gs-bottom,16px);max-height:calc(100vh - 96px - var(--gs-bottom,16px))}
 .gs-panel[data-gs-drawer="true"]{max-width:calc(100vw - 16px)}
 .gs-panel-head{display:flex;flex:0 0 auto;align-items:center;justify-content:space-between;min-height:44px;padding:8px 8px 8px 16px;font-weight:600}
@@ -3289,6 +3293,7 @@ ${LAYOUT_CSS}`;
   var BLOCK_CAP = 800;
   var CONTENT_W = 768;
   var MAP_PAD = 18;
+  var MAP_CHROME = 120;
   var MAP_W = 244;
   function createRail({ win, adapter, runtime, store = createRailStateStore(), prefs = createPanePrefs(win.localStorage), layoutPrefs = createPanelPrefs(win.localStorage) }) {
     const doc = win.document;
@@ -3574,10 +3579,10 @@ ${LAYOUT_CSS}`;
         applyVisibility();
       }
       const rect = adapter.composer(doc)?.getBoundingClientRect();
-      if (!docked.prompts) {
-        const bottom = rect?.height ? `${Math.max(16, Math.round(win.innerHeight - rect.top + 8))}px` : "96px";
-        if (promptsPanel.style.getPropertyValue("--gs-bottom") !== bottom) promptsPanel.style.setProperty("--gs-bottom", bottom);
-      }
+      const clear = rect?.height ? `${Math.max(16, Math.round(win.innerHeight - rect.top + 8))}px` : "96px";
+      if (!docked.prompts && promptsPanel.style.getPropertyValue("--gs-bottom") !== clear) promptsPanel.style.setProperty("--gs-bottom", clear);
+      const mapBottom = docked.minimap ? "16px" : clear;
+      if (mapPanel.style.getPropertyValue("--gs-map-bottom") !== mapBottom) mapPanel.style.setProperty("--gs-map-bottom", mapBottom);
     }
     function applyVars(edge) {
       const set = (name, prop, value) => {
@@ -3728,7 +3733,7 @@ ${LAYOUT_CSS}`;
       const turnBox = ext.a.getBoundingClientRect();
       const turnPx = ext.z.getBoundingClientRect().bottom - turnBox.top;
       const contentWidth = Math.min(turnBox.width || CONTENT_W, CONTENT_W);
-      const key = `${activeId}:${slice.map((e) => e.textContent.length).join(",")}:${slice.every((e) => runtime.isTurnActive(e))}:${Math.round(turnPx / 20)}:${Math.round(turnBox.width / 8)}:${Math.round(minimap.getBoundingClientRect().width / 8)}`;
+      const key = `${activeId}:${slice.map((e) => e.textContent.length).join(",")}:${slice.every((e) => runtime.isTurnActive(e))}:${Math.round(turnPx / 20)}:${Math.round(turnBox.width / 8)}:${Math.round(minimap.getBoundingClientRect().width / 8)}:${Math.round(win.innerHeight / 8)}:${mapPanel.style.getPropertyValue("--gs-map-bottom")}`;
       const now = win.performance.now();
       const throttled = key !== modelKey && modelKey !== "" && modelKey.startsWith(`${activeId}:`) && now - modelBuiltAt < 500 && !forceModel;
       if (throttled && !trailing) {
@@ -3745,7 +3750,8 @@ ${LAYOUT_CSS}`;
         bars.textContent = "";
         const items = silhouetteItems(ext, slice, turnBox.top, turnPx);
         const box = minimap.getBoundingClientRect();
-        const maxH = clamp2(win.innerHeight * 0.45, 120, 360);
+        const room = win.innerHeight - parseFloat(mapPanel.style.getPropertyValue("--gs-map-bottom") || "16") - (adapter.headerBottom(doc) + 8) - MAP_CHROME;
+        const maxH = clamp2(Math.min(win.innerHeight * 0.45, room), 48, 360);
         const scale = Math.min((box.width ? box.width - MAP_PAD : MAP_W) / contentWidth, maxH / Math.max(turnPx, 1));
         const size = { w: `${Math.max(24, Math.round(contentWidth * scale))}px`, h: `${Math.max(8, Math.round(turnPx * scale))}px` };
         if (frame.style.width !== size.w) frame.style.width = size.w;
@@ -3958,7 +3964,10 @@ ${LAYOUT_CSS}`;
       renderList();
       persist();
     });
-    on(win, "resize", () => scheduleLayout(true));
+    on(win, "resize", () => {
+      scheduleLayout(true);
+      schedule();
+    });
     on(doc, "transitionend", (e) => !root.contains(e.target) && !actions.contains(e.target) && /width|margin|padding|left|right|transform/.test(e.propertyName ?? "") && scheduleLayout(true), { capture: true, passive: true });
     cleanups.push(scroll.onScroll((kind) => {
       if (kind === "user") userScrolled = true;

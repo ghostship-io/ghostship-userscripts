@@ -33,10 +33,14 @@ export function createRailLayout({ win, adapter, target }) {
   let written = []; // the elements we have written to
   let known = null; // { frame, pads } once found: the panels are rebuilt whenever the page layout is
   let applied = { left: 0, right: 0 };
+  let epoch = 0; // counts how often the page's elements were looked up again
 
   /** `{ frame, pads }`: the page column that is measured, and the elements that get the padding; null when not found. */
   const findColumns = () => {
-    if (!known || !known.frame.isConnected || known.pads.some((el) => !el.isConnected)) known = adapter.columns(doc);
+    if (!known || !known.frame.isConnected || known.pads.some((el) => !el.isConnected) || (known.header && !known.header.isConnected)) {
+      known = adapter.columns(doc);
+      epoch++;
+    }
     return known;
   };
 
@@ -92,7 +96,7 @@ export function createRailLayout({ win, adapter, target }) {
     const cols = findColumns();
     if (!cols) return "none";
     const r = cols.frame.getBoundingClientRect();
-    return `${win.innerWidth}|${Math.round(r.left)}|${Math.round(r.right)}|${cols.pads.length}|${paneLeft == null ? "-" : Math.round(paneLeft)}`;
+    return `${win.innerWidth}|${Math.round(r.left)}|${Math.round(r.right)}|${cols.pads.length}|${paneLeft == null ? "-" : Math.round(paneLeft)}|${epoch}`;
   }
 
   /** The column's box: our padding changes what is inside it, never its own edges. */
