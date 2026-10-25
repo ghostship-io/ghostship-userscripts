@@ -318,3 +318,33 @@ test("the store is bounded and keeps one entry per conversation", () => {
   assert.equal(store.owner("sig-d"), "d");
   assert.equal(store.save("new", { sig: "x" }), false);
 });
+
+test("the composer clears the rail when it sits in an overlay inside the scrolling column (live chatgpt.com layout)", async () => {
+  for (const [width, nav] of [[1600, 52], [1448, 52], [1280, 0], [1180, 52], [DOCK_MIN_VIEWPORT, 0]]) {
+    const fx = createFixture({ turns: 20, width, nav, markup: "real", overlay: true });
+    const { q } = mount(fx);
+    await fx.settle();
+    const label = `${width}px wide, ${nav}px navigation`;
+    const { turn, composer } = rects(fx);
+    assert.equal(q(".gs-rail").dataset.gsMode, "docked", label);
+    assert.ok(turn.right <= railLeft(fx), `${label}: conversation ends at ${turn.right}, rail starts at ${railLeft(fx)}`);
+    assert.ok(composer.right <= railLeft(fx), `${label}: composer ends at ${composer.right}, rail starts at ${railLeft(fx)}`);
+    assert.equal(composer.left, turn.left, `${label}: composer and conversation shift together`);
+  }
+});
+
+test("the overlay's reservation is removed with the rail and written only once", async () => {
+  const fx = createFixture({ turns: 20, width: 1280, markup: "real", overlay: true });
+  const overlay = fx.doc.getElementById("overlay");
+  const { stop } = mount(fx);
+  await fx.settle();
+  assert.equal(overlay.hasAttribute("data-gs-column"), true);
+  const writes = [];
+  new fx.win.MutationObserver((list) => writes.push(...list)).observe(fx.doc.documentElement, { attributes: true, subtree: true });
+  await fx.settle();
+  assert.equal(writes.length, 0, "idle: no layout writes");
+  stop();
+  assert.equal(overlay.hasAttribute("data-gs-column"), false);
+  assert.equal(overlay.style.getPropertyValue("--gs-reserve"), "");
+  assert.equal(overlay.style.position, "absolute", "the page's own style survives");
+});

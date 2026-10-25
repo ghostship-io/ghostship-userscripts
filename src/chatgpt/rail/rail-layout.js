@@ -21,76 +21,79 @@ export const LAYOUT_CSS = `
  */
 export function createRailLayout({ win, adapter, target }) {
   const doc = win.document;
-  let column = null; // the column we have written to
-  let known = null; // the column element once found: the rail is rebuilt whenever the page layout is
+  let written = []; // the elements we have written to
+  let known = null; // the page column (and composer overlay) once found: the rail is rebuilt whenever the page layout is
   let applied = 0;
 
-  const findColumn = () => {
-    if (!known?.isConnected) known = adapter.column(doc);
+  const findColumns = () => {
+    if (!known?.length || known.some((el) => !el.isConnected)) known = adapter.columns(doc);
     return known;
   };
 
-  function setReserve(col, px) {
-    if (column && column !== col) clear();
-    column = col;
-    if (px > 0) {
-      if (col.getAttribute("data-gs-column") === null) col.setAttribute("data-gs-column", "");
-      const v = `${Math.round(px)}px`;
-      if (col.style.getPropertyValue("--gs-reserve") !== v) col.style.setProperty("--gs-reserve", v);
-    } else if (applied > 0 || col.hasAttribute("data-gs-column")) {
-      col.removeAttribute("data-gs-column");
-      col.style.removeProperty("--gs-reserve");
-      if (!col.getAttribute("style")) col.removeAttribute("style");
+  function release(el) {
+    el.removeAttribute("data-gs-column");
+    el.style.removeProperty("--gs-reserve");
+    if (!el.getAttribute("style")) el.removeAttribute("style");
+  }
+
+  function setReserve(cols, px) {
+    if (written.some((el) => !cols.includes(el))) clear();
+    written = cols;
+    for (const col of cols) {
+      if (px > 0) {
+        if (col.getAttribute("data-gs-column") === null) col.setAttribute("data-gs-column", "");
+        const v = `${Math.round(px)}px`;
+        if (col.style.getPropertyValue("--gs-reserve") !== v) col.style.setProperty("--gs-reserve", v);
+      } else if (applied > 0 || col.hasAttribute("data-gs-column")) release(col);
     }
     applied = px > 0 ? Math.round(px) : 0;
   }
 
   function clear() {
-    if (!column) return;
-    column.removeAttribute("data-gs-column");
-    column.style.removeProperty("--gs-reserve");
-    if (!column.getAttribute("style")) column.removeAttribute("style");
-    column = null;
+    for (const el of written) release(el);
+    written = [];
     applied = 0;
   }
 
   /** What decides the layout independent of the reserve we applied; a change means re-evaluate. */
   function signature() {
-    const col = findColumn();
-    if (!col) return "none";
-    const r = col.getBoundingClientRect();
-    return `${win.innerWidth}|${Math.round(r.left)}|${Math.round(r.right + (col === column ? applied : 0))}`;
+    const cols = findColumns();
+    if (!cols.length) return "none";
+    const r = cols[0].getBoundingClientRect();
+    return `${win.innerWidth}|${Math.round(r.left)}|${Math.round(r.right + (written.includes(cols[0]) ? applied : 0))}|${cols.length}`;
   }
 
   /** Measure the natural layout, then reserve what the rail needs. Returns `{ docked, reserve }`. */
   function evaluate() {
-    const col = findColumn();
+    const cols = findColumns();
     const el = target() ?? adapter.composer(doc);
-    if (!col || !el || win.innerWidth < DOCK_MIN_VIEWPORT) {
-      if (col) setReserve(col, 0);
+    // Both the conversation and the composer must clear the rail; they can sit in different boxes.
+    const edge = () => Math.max(el.getBoundingClientRect().right, adapter.composer(doc)?.getBoundingClientRect().right ?? 0);
+    if (!cols.length || !el || win.innerWidth < DOCK_MIN_VIEWPORT) {
+      if (cols.length) setReserve(cols, 0);
       else clear();
       return { docked: false, reserve: 0 };
     }
-    setReserve(col, 0);
-    const room = Math.max(0, win.innerWidth - col.getBoundingClientRect().right); // free space outside the column
+    setReserve(cols, 0);
+    const room = Math.max(0, win.innerWidth - cols[0].getBoundingClientRect().right); // free space outside the column
     const cap = Math.max(0, RAIL_RESERVE - room);
     const limit = win.innerWidth - RAIL_RESERVE;
-    let rect = el.getBoundingClientRect();
+    let right = edge();
     let reserve = 0;
-    if (rect.right > limit && cap > 0) {
+    if (right > limit && cap > 0) {
       // A centered conversation moves by half the shrink, a full-width one by all of it: grow until it clears.
-      reserve = Math.min(cap, 2 * (rect.right - limit));
+      reserve = Math.min(cap, 2 * (right - limit));
       for (let i = 0; i < 3; i++) {
-        setReserve(col, reserve);
-        rect = el.getBoundingClientRect();
-        const over = rect.right - limit;
+        setReserve(cols, reserve);
+        right = edge();
+        const over = right - limit;
         if (over <= 0.5 || reserve >= cap) break;
         reserve = Math.min(cap, reserve + over);
       }
     }
-    const fits = rect.right <= limit + 0.5 && (reserve === 0 || rect.width >= MIN_CONTENT);
+    const fits = right <= limit + 0.5 && (reserve === 0 || el.getBoundingClientRect().width >= MIN_CONTENT);
     if (!fits) {
-      setReserve(col, 0);
+      setReserve(cols, 0);
       return { docked: false, reserve: 0 };
     }
     return { docked: true, reserve };

@@ -144,3 +144,19 @@ test("compare: passes a clean improvement and fails each release-gate regression
   assert.match(mutate((r) => (r.env.scriptMode = null)), /scriptMode/);
   assert.match(mutate((r) => delete r.revealOldestMs), /missing after/);
 });
+
+test("measure.js records the current chatgpt.com markup: per-turn wrappers, timeline scroller, no author-role attribute", async () => {
+  const fx = createFixture({ turns: 40, markup: "real", width: 1600 });
+  fakePerformanceObserver(fx.win);
+  await fx.settle();
+  install(fx);
+  fx.win.__gsProfile.start("thread-A");
+  await scrollToTop(fx);
+  await fx.settle();
+  const result = JSON.parse(JSON.stringify(fx.win.__gsProfile.stop()));
+  fx.win.__gsProfile.dispose();
+  assert.equal(result.dom.end.turnElements, 40);
+  assert.ok(result.scroll.userEvents > 0, "scrolls on the timeline scroller are seen, not the page");
+  assert.equal(result.scroll.unsolicitedEvents, 0);
+  assert.equal(typeof result.revealOldestMs, "number", "the oldest turn is recognised as revealed");
+});
