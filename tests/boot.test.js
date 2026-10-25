@@ -285,76 +285,53 @@ test("health reports version, mode and missing selectors without conversation id
   assert.ok(["active", "composer-only", "waiting", "safe", "off"].includes(health.mode));
 });
 
-test("queue survives the new-chat first send: route change and turns remount the page features, not the queue", async () => {
+test("the queue survives the new-chat first send: route change and turns remount the page features, not the queue, which follows the route", async () => {
+  // Defect: tearing the queue down (and dropping text or an in-flight send) every time the page features restart,
+  // or intercepting Enter in an unsaved new chat that has no destination yet.
   const fx = createFixture({ turns: 0, width: 1600 });
   fx.win.history.replaceState(null, "", "/");
-  const clock = new ManualClock();
-  const dispatcher = new DryRunDispatcher();
-  const submitted = [];
-  const realSubmit = dispatcher.submit.bind(dispatcher);
-  dispatcher.submit = async (request) => {
-    submitted.push(request.text);
-    if (submitted.length === 1) {
-      // What ChatGPT does on the first send of a new chat: the URL gains an id and turns render.
-      fx.win.history.pushState({}, "", "/c/eeeeeeee-0000-0000-0000-000000000005");
-      fx.addTurn();
-    }
-    const result = await realSubmit(request);
-    dispatcher.state = "idle"; // the reply finished
-    return result;
-  };
+  const dispatcher = new DryRunDispatcher("generating");
   let created = 0;
-  let queueDiagnostics = null;
   const queueUi = persistentQueueUi((ctx) => {
     created++;
-    queueDiagnostics = ctx.diagnostics;
-    return createQueueUi({ win: ctx.win, adapter: ctx.adapter, diagnostics: ctx.diagnostics, dispatcher, indexedDB: new IDBFactory(), clock, tabId: "tab-1", pollMs: 0 });
+    return createQueueUi({ win: ctx.win, adapter: ctx.adapter, diagnostics: ctx.diagnostics, dispatcher, indexedDB: new IDBFactory(), clock: new ManualClock(), tabId: "tab-1", pollMs: 0 });
   });
   const { boot, health, flush, log } = setup(fx, { queueUi });
   assert.equal(health.mode, "composer-only");
   const panel = fx.doc.querySelector("[data-gs-queue]");
   assert.ok(panel, "queue panel mounted in the new chat");
-
-  const add = async (text) => {
-    const input = panel.querySelector('[data-gs-key="add:input"]');
-    input.value = text;
-    input.dispatchEvent(new fx.win.Event("input", { bubbles: true }));
-    panel.querySelector('[data-gs-key="add:submit"]').click();
-    await boot.runtime().queue.settled();
-  };
-  const step = async () => {
-    const { queue } = boot.runtime();
-    await queue.tick();
-    await queue.settled();
-  };
   await boot.runtime().queue.ready;
   await boot.runtime().queue.settled();
-  const names = () => [...panel.querySelectorAll(".gs-q-item")].map((li) => li.querySelector(".gs-q-name")?.textContent ?? "");
-  await add("first");
-  await add("second");
-  assert.deepEqual(names(), ["first", "second"]);
 
-  // First pass sends "first"; the page navigates to the new conversation and renders its turns.
-  await step();
-  assert.deepEqual(submitted, ["first"]);
-  await flush(); // boot notices the route change and the new turns and rebuilds the page features
+  const input = fx.doc.querySelector("#prompt-textarea");
+  const form = fx.doc.getElementById("composer");
+  form.insertAdjacentHTML("beforeend", `<button type="button" data-testid="stop-button">Stop</button>`);
+  const press = async () => {
+    const enter = new fx.win.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+    input.dispatchEvent(enter);
+    await boot.runtime().queue.settled();
+    return enter;
+  };
+  input.value = "first message of a new chat";
+  assert.equal((await press()).defaultPrevented, false, "an unsaved new chat has no destination: Enter is left to ChatGPT");
+
+  // What ChatGPT does on the first send of a new chat: the URL gains an id and turns render.
+  fx.win.history.pushState({}, "", "/c/eeeeeeee-0000-0000-0000-000000000005");
+  fx.addTurn();
+  await flush();
   assert.equal(health.mode, "active");
   assert.ok(log.mounts >= 2, "page features were re-initialized");
   assert.equal(created, 1, "the queue was not re-created");
   assert.equal(fx.doc.querySelector("[data-gs-queue]"), panel, "same panel, not rebuilt");
   assert.equal(panel.nextElementSibling, chatgptAdapter.composer(fx.doc));
 
-  // Next passes follow the navigation, adopt the draft queue and send the second message exactly once.
-  clock.advance(5000);
-  await step();
-  await until(() => submitted.length >= 2);
-  for (let i = 0; i < 3; i++) {
-    clock.advance(5000);
-    await step();
-  }
-  assert.deepEqual(submitted, ["first", "second"], "each message dispatched exactly once");
-  assert.equal(dispatcher.log.filter((e) => e.type === "submit").length, 2);
-  assert.equal(queueDiagnostics.snapshot()["queue.adopted"], 1, "the draft queue followed the new conversation");
+  // The queue now follows the route: a second message while the reply streams queues for this conversation.
+  await boot.runtime().queue.tick();
+  input.value = "second message";
+  assert.equal((await press()).defaultPrevented, true);
+  await boot.runtime().queue.settled();
+  assert.equal(panel.querySelector(".gs-q-text").textContent, "second message");
+  assert.equal(dispatcher.log.length, 0, "nothing is sent while the response runs");
   boot.dispose();
 });
 

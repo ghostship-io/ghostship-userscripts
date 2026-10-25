@@ -1,343 +1,390 @@
+// The queue card and its wiring to ChatGPT's native composer, against the fake page. No separate input exists: the
+// native composer is the only place text is entered or edited.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { IDBFactory } from "fake-indexeddb";
-import { createRuntime } from "../src/core/runtime.js";
-import { DEFAULTS } from "../src/core/config.js";
 import { chatgptAdapter } from "../src/chatgpt/adapter.js";
 import { DryRunDispatcher } from "../src/chatgpt/queue/dispatch.js";
+import { createLiveDispatcher } from "../src/chatgpt/queue/live-dispatcher.js";
 import { createQueueUi } from "../src/chatgpt/queue/controller.js";
-import { CSS } from "../src/chatgpt/queue/view.js";
-import { loadFixture } from "./helpers.js";
-import { ManualClock, until } from "./queue-helpers.js";
+import { ManualClock } from "./queue-helpers.js";
+import { fakePage } from "./fake-page.js";
 
-async function mountUi({ form = false, dispatcher = new DryRunDispatcher(), adapter = chatgptAdapter } = {}) {
-  const dom = await loadFixture();
-  const { window } = dom;
-  if (form) {
-    const area = window.document.querySelector("#prompt-textarea");
-    const wrap = window.document.createElement("form");
-    area.replaceWith(wrap);
-    wrap.append(area);
-  }
-  const clock = new ManualClock();
-  const ui = createQueueUi({
-    win: window,
-    adapter,
-    dispatcher,
-    indexedDB: new IDBFactory(),
-    clock,
-    tabId: "ui-tab",
-    pollMs: 0,
-  });
+/** Mounts the queue on a fake page. `live` drives the real dispatcher against the page; otherwise the dry-run adapter. */
+async function mount({ page, factory = new IDBFactory(), clock = new ManualClock(), tabId = "tab-1", live = false, dispatcher } = {}) {
+  page ??= await fakePage();
+  const { window } = page;
+  const t = { now: 1_000_000 };
+  dispatcher ??= live
+    ? createLiveDispatcher({ win: window, adapter: chatgptAdapter, pollMs: 1, settleMs: 0, sendWaitMs: 40, steerWaitMs: 15, ackMs: 40, stopWaitMs: 40, now: () => t.now })
+    : new DryRunDispatcher();
+  const ui = createQueueUi({ win: window, adapter: chatgptAdapter, dispatcher, indexedDB: factory, clock, tabId, pollMs: 0 });
   await ui.ready;
   await ui.settled();
   const $ = (sel) => ui.root.querySelector(sel);
   const $$ = (sel) => [...ui.root.querySelectorAll(sel)];
   const key = (k) => ui.root.querySelector(`[data-gs-key="${k}"]`);
   const click = async (k) => {
+    assert.ok(key(k), `no control ${k}`);
     key(k).click();
     await ui.settled();
   };
-  const add = async (text) => {
-    key("add:input").value = text;
-    key("add:input").dispatchEvent(new window.Event("input", { bubbles: true }));
-    await click("add:submit");
+  const press = async (init, target = page.input) => {
+    const event = new window.KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
+    target.dispatchEvent(event);
+    await ui.settled();
+    return event;
   };
-  const rows = () => $$(".gs-q-item").map((li) => li.querySelector(".gs-q-name")?.textContent ?? li.querySelector("textarea").value);
-  const ids = () => $$(".gs-q-item").map((li) => li.dataset.id);
-  const press = async (target, init) => {
-    target.dispatchEvent(new window.KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init }));
+  const enter = async (text, init = {}) => {
+    page.type(text);
+    return press({ key: "Enter", ...init });
+  };
+  const tick = async () => {
+    t.now += 1_000;
+    clock.advance(1_000);
+    await ui.tick();
     await ui.settled();
   };
-  return { dom, window, doc: window.document, ui, clock, dispatcher, $, $$, key, click, add, rows, ids, press };
+  const queued = () => $(".gs-q-text")?.textContent ?? null;
+  const rows = () => $$(".gs-q-text").length;
+  const navigate = async (id) => {
+    window.history.pushState({}, "", `/c/${id}`);
+    await tick();
+  };
+  return { page, ui, window, doc: window.document, factory, clock, t, $, $$, key, click, press, enter, tick, queued, rows, navigate, dispatcher };
 }
 
-test("queue ui: panel sits directly above the composer and leaves the composer untouched, with no overflow control", async () => {
-  // Defect: panel inserted elsewhere / composer mutated / a hidden "…" menu hiding core actions.
-  for (const form of [false, true]) {
-    const before = await loadFixture();
-    const composerBefore = before.window.document.querySelector("#prompt-textarea").outerHTML;
-    const t = await mountUi({ form });
-    const composer = chatgptAdapter.composer(t.doc);
-    assert.equal(composer.previousElementSibling, t.ui.root);
-    assert.equal(t.doc.querySelector("#prompt-textarea").outerHTML, composerBefore);
-    assert.equal(composer.hasAttribute("style"), false);
-    const labels = t.$$("button").map((b) => `${b.textContent} ${b.getAttribute("aria-label") ?? ""}`);
-    assert.equal(labels.filter((l) => l.includes("Interrupt & Send Next")).length, 1);
-    assert.ok(!labels.some((l) => /[…⋯⋮]|\.\.\.|more|menu/i.test(l)), `unexpected overflow control: ${labels}`);
-    assert.match(t.$(".gs-q-badge").textContent, /Dry run/);
-    t.ui.dispose();
-    assert.equal(t.doc.querySelector("[data-gs-queue]"), null);
+const noNullText = (ui) => assert.doesNotMatch(ui.root.textContent, /\bnull\b|\bundefined\b|\[object/);
+
+test("the card sits directly above the native composer, has no separate input and no overflow control, and hides when nothing is queued", async () => {
+  // Defect: the shipped panel had its own `Queue a message` textarea, an ellipsis menu and always occupied space.
+  const t = await mount();
+  const composer = chatgptAdapter.composer(t.doc);
+  assert.equal(composer.previousElementSibling, t.ui.root);
+  assert.equal(t.ui.root.hidden, true);
+  assert.equal(t.$$("textarea, input").length, 0);
+  assert.equal(composer.hasAttribute("style"), false);
+
+  t.page.startStreaming();
+  await t.enter("a thought");
+  assert.equal(t.ui.root.hidden, false);
+  assert.equal(t.$$("textarea, input").length, 0, "the native composer is the only input");
+  assert.doesNotMatch(t.ui.root.textContent, /Queue a message/);
+  const labels = t.$$("button").map((b) => `${b.textContent} ${b.getAttribute("aria-label") ?? ""}`);
+  assert.ok(!labels.some((l) => /[…⋯⋮]|\.\.\.|\bmore\b|menu/i.test(l)), `unexpected overflow control: ${labels}`);
+  for (const wanted of ["Edit", "Delete", "Steer", "Interrupt & Send Next", "Pause"]) assert.ok(labels.some((l) => l.includes(wanted)), wanted);
+  assert.ok(!t.$(".gs-q-handle, [class*=drag], ol, li"), "no rows, grips or reorder controls");
+  assert.match(t.$(".gs-q-title").textContent, /^Queue \(1\)$/);
+  t.ui.dispose();
+  assert.equal(t.doc.querySelector("[data-gs-queue]"), null);
+});
+
+test("Enter A, Enter B, Enter C while generating: one card row `A\\n\\nB\\n\\nC`, count 1, composer cleared, zero native sends", async () => {
+  // Defect: Enter steering natively, creating a row per Enter, or the count growing with each addition.
+  const t = await mount();
+  t.page.startStreaming();
+  for (const part of ["A", "B", "C"]) {
+    const event = await t.enter(part);
+    assert.equal(event.defaultPrevented, true, "the native send is suppressed");
+    assert.equal(t.page.text(), "", "the composer is cleared once the write is confirmed");
   }
+  assert.equal(t.rows(), 1);
+  assert.equal(t.queued(), "A\n\nB\n\nC");
+  assert.match(t.$(".gs-q-title").textContent, /^Queue \(1\)$/);
+  assert.deepEqual(t.page.log, [], "zero native sends and zero stops");
+  assert.equal(t.ui.root.querySelector(".gs-q-text").dataset.version, "3");
+  noNullText(t.ui);
 });
 
-test("queue ui: add, edit, reorder and remove by keyboard persist through the engine", async () => {
-  // Defect: UI state diverging from the durable queue, or an action unreachable without a pointer.
-  const t = await mountUi();
-  await t.add("first");
-  await t.add("second");
-  await t.add("third");
-  assert.deepEqual(t.rows(), ["first", "second", "third"]);
-  assert.equal(t.key("add:input").value, "");
+test("outside a running response Enter is left to ChatGPT; Shift+Enter, IME composition and empty Enter never queue", async () => {
+  // Defect: swallowing the user's normal sends, breaking IME input, or queueing blanks.
+  const t = await mount();
+  const idle = await t.enter("normal message");
+  assert.equal(idle.defaultPrevented, false);
+  assert.equal(t.page.text(), "normal message");
+  assert.equal(t.ui.root.hidden, true);
 
-  const [a, b, c] = t.ids();
-  await t.press(t.key(`${c}:handle`), { key: "ArrowUp" });
-  assert.deepEqual(t.rows(), ["first", "third", "second"]);
-  assert.equal(t.doc.activeElement.dataset.gsKey, `${c}:handle`, "focus follows the moved item");
-  await t.press(t.key(`${c}:edit`), { key: "ArrowDown", altKey: true });
-  assert.deepEqual(t.rows(), ["first", "second", "third"], "Alt+Arrow works from any control in the row");
-  await t.press(t.key(`${c}:edit`), { key: "ArrowDown" });
-  assert.deepEqual(t.rows(), ["first", "second", "third"], "a bare arrow elsewhere does nothing");
-  await t.press(t.key(`${c}:handle`), { key: "ArrowUp" });
+  t.page.startStreaming();
+  t.page.type("line one");
+  assert.equal((await t.press({ key: "Enter", shiftKey: true })).defaultPrevented, false, "Shift+Enter stays a newline");
+  assert.equal((await t.press({ key: "Enter", isComposing: true })).defaultPrevented, false, "IME composition is left alone");
+  assert.equal((await t.press({ key: "Enter", keyCode: 229 })).defaultPrevented, false);
+  assert.equal(t.page.text(), "line one");
+  assert.equal(t.rows(), 0);
 
-  await t.click(`${a}:edit`);
-  const area = t.key(`${a}:edit`);
-  area.value = "first, edited";
-  area.dispatchEvent(new t.window.Event("input", { bubbles: true }));
-  await t.press(area, { key: "Escape" });
-  assert.deepEqual(t.rows(), ["first", "third", "second"], "Escape cancels the edit");
-  await t.click(`${a}:edit`);
-  t.key(`${a}:edit`).value = "first, edited";
-  await t.press(t.key(`${a}:edit`), { key: "Enter", ctrlKey: true });
-  assert.deepEqual(t.rows(), ["first, edited", "third", "second"]);
-
-  await t.click(`${b}:remove`);
-  assert.deepEqual(t.rows(), ["first, edited", "third"]);
-  assert.equal(t.$(".gs-q-title").textContent, "Queue (2)");
+  t.page.type("   ");
+  const blank = await t.press({ key: "Enter" });
+  assert.equal(blank.defaultPrevented, true, "not sent natively either");
+  assert.equal(t.rows(), 0, "whitespace-only is ignored");
 });
 
-test("queue ui: Interrupt & Send Next is disabled when empty, while the stop is in flight, and behind an unresolved message", async () => {
-  // Defect: a double-press during a stop, or sending past an item that needs attention.
-  const dispatcher = new DryRunDispatcher("generating");
-  const t = await mountUi({ dispatcher });
-  assert.equal(t.key("head:interrupt").disabled, true, "empty queue");
-  await t.add("go");
-  assert.equal(t.key("head:interrupt").disabled, false);
-
-  dispatcher.stopScript = ["hang"];
-  t.key("head:interrupt").click();
-  assert.equal(t.key("head:interrupt").disabled, true, "disabled synchronously on press");
-  assert.equal(t.key("head:interrupt").getAttribute("aria-busy"), "true");
-  await until(() => dispatcher.log.length === 1);
-  t.clock.advance(10_000);
+test("a form submit or native Send/steer click while generating appends too, and one gesture counted twice queues once", async () => {
+  // Defect: the form path bypassing the Enter handler, or Enter + submit doubling the text.
+  const t = await mount({ page: await fakePage({ steer: true }) });
+  t.page.startStreaming();
+  t.page.type("via submit");
+  const submit = new t.window.Event("submit", { bubbles: true, cancelable: true });
+  t.page.form.dispatchEvent(submit);
   await t.ui.settled();
-  assert.equal(dispatcher.log.filter((e) => e.type === "stop").length, 1);
-  assert.equal(t.key("head:interrupt").disabled, false, "re-enabled once the stop resolved");
-  assert.equal(t.key("head:interrupt").hasAttribute("aria-busy"), false);
+  assert.equal(submit.defaultPrevented, true);
+  assert.equal(t.queued(), "via submit");
 
-  dispatcher.state = "idle";
-  dispatcher.submitScript = [{ kind: "uncertain", code: "no-ack", message: "No acknowledgment." }];
-  await t.click("head:interrupt");
-  assert.match(t.$(".gs-q-state").textContent, /Needs review/);
-  assert.equal(t.key("head:interrupt").disabled, true, "head needs review");
-  assert.match(t.key("head:interrupt").title, /Needs review/);
+  t.page.type("via steer button");
+  t.page.steerButton.click();
+  await t.ui.settled();
+  assert.equal(t.queued(), "via submit\n\nvia steer button");
+  assert.deepEqual(t.page.log, [], "the native steer control was not triggered");
+
+  t.page.type("once");
+  await Promise.all([t.press({ key: "Enter" }), t.press({ key: "Enter" })]);
+  t.page.form.dispatchEvent(new t.window.Event("submit", { bubbles: true, cancelable: true }));
+  await t.ui.settled();
+  assert.equal(t.queued(), "via submit\n\nvia steer button\n\nonce");
 });
 
-test("queue ui: a confirmed stop sends exactly the next message, in order, through the dry-run dispatcher", async () => {
-  // Defect: submit before stop, more than one message sent, or a live send in dry-run mode.
-  const dispatcher = new DryRunDispatcher("generating");
-  const t = await mountUi({ dispatcher });
-  await t.add("one");
-  await t.add("two");
-  const [first] = t.ids();
-  await t.click("head:interrupt");
-  assert.deepEqual(dispatcher.actions(), ["stop", `submit:${first}`]);
-  assert.deepEqual(t.rows(), ["two"]);
-  assert.equal(t.$(".gs-q-title").textContent, "Queue (1)");
-  assert.match(t.$(".gs-q-status").textContent, /1 sent/);
-  assert.equal(t.$(".gs-q-error"), null);
+test("the Queue button appends the composer text while generating, without Enter", async () => {
+  // Defect: no visible way to queue other than the keyboard.
+  const t = await mount();
+  t.page.startStreaming();
+  t.page.type("typed");
+  await t.press({ key: "a" });
+  assert.equal(t.key("head:queue")?.disabled, false);
+  await t.click("head:queue");
+  assert.equal(t.queued(), "typed");
+  assert.equal(t.page.text(), "");
 });
 
-test("queue ui: interrupt failures are surfaced with an action and nothing is sent", async () => {
-  // Defect: a failed or ambiguous stop silently swallowed, or the item sent anyway.
-  const cases = [
-    [{ kind: "failed", code: "stop-rejected", message: "The Stop control was not found." }, /Stop control was not found/],
-    [{ kind: "ambiguous", code: "stop-unclear", message: "Could not tell if the response stopped." }, /Could not tell/],
-    [new Error("boom"), /boom/],
-  ];
-  for (const [script, pattern] of cases) {
-    const dispatcher = new DryRunDispatcher("generating");
-    const t = await mountUi({ dispatcher });
-    await t.add("keep me");
-    dispatcher.stopScript = [script];
-    await t.click("head:interrupt");
-    const alert = t.$('[role="alert"]');
-    assert.match(alert.textContent, pattern);
-    assert.deepEqual(dispatcher.actions(), ["stop"]);
-    assert.deepEqual(t.rows(), ["keep me"]);
-    assert.equal(t.$(".gs-q-item").dataset.status, "pending");
-    assert.match(t.$(".gs-q-note").textContent, /Nothing was sent|try again|check/i);
-    assert.equal(t.key("head:interrupt").disabled, false, "the user can try again");
-  }
+test("Edit puts the whole text in the native composer; Enter saves it under the same id (version up, nothing sent); Cancel restores the previous draft", async () => {
+  // Defect: edit appending a duplicate, sending to ChatGPT, or losing the user's unrelated draft.
+  const t = await mount();
+  t.page.startStreaming();
+  await t.enter("A");
+  await t.enter("B");
+  const id = t.$(".gs-q-text").dataset.id;
+  const version = Number(t.$(".gs-q-text").dataset.version);
+
+  t.page.type("an unrelated draft");
+  await t.click("head:edit");
+  assert.equal(t.page.text(), "A\n\nB", "the entire accumulated text is in the native composer");
+  assert.match(t.$(".gs-q-status").textContent, /Editing/);
+  assert.equal(t.key("head:steer"), null, "no competing actions while editing");
+
+  // Cancel
+  await t.press({ key: "Escape" });
+  assert.equal(t.page.text(), "an unrelated draft");
+  assert.equal(t.queued(), "A\n\nB");
+  assert.equal(t.$(".gs-q-text").dataset.version, String(version));
+
+  // Save
+  await t.click("head:edit");
+  t.page.type("A\n\nB rewritten\n\nC");
+  const event = await t.press({ key: "Enter" });
+  assert.equal(event.defaultPrevented, true);
+  assert.equal(t.queued(), "A\n\nB rewritten\n\nC");
+  assert.equal(t.$(".gs-q-text").dataset.id, id);
+  assert.equal(Number(t.$(".gs-q-text").dataset.version), version + 1);
+  assert.equal(t.rows(), 1);
+  assert.equal(t.page.text(), "an unrelated draft", "the draft is back");
+  assert.deepEqual(t.page.log, [], "an edit is never submitted to ChatGPT");
+  noNullText(t.ui);
 });
 
-test("queue ui: pause stops the background drain and resume restores it", async () => {
-  // Defect: pause being cosmetic, or draining while paused.
-  const dispatcher = new DryRunDispatcher();
-  const t = await mountUi({ dispatcher });
-  await t.add("queued");
-  await t.click("head:pause");
-  assert.equal(t.key("head:pause").textContent, "Resume");
-  assert.match(t.$(".gs-q-status").textContent, /paused/);
-  await t.ui.tick();
-  assert.deepEqual(dispatcher.log, []);
-  await t.click("head:pause");
-  assert.equal(t.key("head:pause").textContent, "Pause");
-  await t.ui.tick();
-  assert.equal(dispatcher.log.length, 1);
+test("editing while another tab queues more: the addition is kept after the edit and the user is told", async () => {
+  // Defect: an edit silently overwriting what another tab just queued.
+  const factory = new IDBFactory();
+  const one = await mount({ factory, tabId: "tab-1" });
+  const two = await mount({ factory, tabId: "tab-2", page: await fakePage() });
+  for (const t of [one, two]) t.page.startStreaming();
+  await one.enter("first");
+  await one.click("head:edit");
+  two.window.history.replaceState({}, "", "/c/fixture");
+  await two.tick();
+  assert.equal(two.queued(), "first");
+  assert.match(two.$(".gs-q-status").textContent, /another tab/);
+  await two.enter("from tab two");
+  one.page.type("first, edited");
+  await one.press({ key: "Enter" });
+  assert.equal(one.queued(), "first, edited\n\nfrom tab two");
+  assert.match(one.ui.root.textContent, /another tab/);
+  one.ui.dispose();
+  two.ui.dispose();
 });
 
-test("queue ui: the background poll does not rebuild the panel while the user is typing", async () => {
-  // Defect: a periodic re-render dropping the caret/IME state of the add box.
-  const t = await mountUi();
-  const input = t.key("add:input");
-  input.focus();
-  input.value = "half-typed";
-  input.dispatchEvent(new t.window.Event("input", { bubbles: true }));
-  await t.ui.tick();
-  assert.equal(t.key("add:input"), input, "same element, not a rebuilt copy");
-  assert.equal(t.doc.activeElement, input);
-  assert.equal(input.value, "half-typed");
-});
-
-test("queue ui: the panel is put back above the composer if the page re-renders it away", async () => {
-  // Defect: the queue disappearing after a React re-render of the composer area.
-  const t = await mountUi({ form: true });
-  t.ui.root.remove();
-  await t.ui.tick();
-  assert.equal(chatgptAdapter.composer(t.doc).previousElementSibling, t.ui.root);
-});
-
-test("queue ui: without a composer the page is left untouched", async () => {
-  // Defect: mounting into an unrecognised layout.
-  const dom = await loadFixture();
-  dom.window.document.querySelector("#prompt-textarea").remove();
-  const before = dom.window.document.documentElement.outerHTML;
-  const ui = createQueueUi({ win: dom.window, adapter: chatgptAdapter, dispatcher: new DryRunDispatcher(), indexedDB: new IDBFactory(), pollMs: 0 });
-  assert.equal(ui.mounted, false);
-  assert.equal(dom.window.document.documentElement.outerHTML, before);
-});
-
-test("queue ui: runtime mounts and disposes the panel, and a queue failure never disables the rest", async () => {
-  // Defect: queue errors taking down the runtime, or leaking the panel after dispose.
-  const dom = await loadFixture();
-  const warnings = [];
-  dom.window.console.warn = (m) => warnings.push(m);
-  const queueUi = ({ win, adapter, diagnostics }) =>
-    createQueueUi({ win, adapter, diagnostics, dispatcher: new DryRunDispatcher(), indexedDB: new IDBFactory(), pollMs: 0 });
-  const runtime = createRuntime({ win: dom.window, adapter: chatgptAdapter, queueUi, config: DEFAULTS });
-  assert.equal(runtime.mode, "active");
-  assert.ok(dom.window.document.querySelector("[data-gs-queue]"));
-  runtime.dispose();
-  assert.equal(dom.window.document.querySelector("[data-gs-queue]"), null);
-
-  const broken = await loadFixture();
-  broken.window.console.warn = (m) => warnings.push(m);
-  const survivor = createRuntime({ win: broken.window, adapter: chatgptAdapter, queueUi: () => { throw new Error("nope"); }, config: DEFAULTS });
-  assert.equal(survivor.mode, "active");
-  assert.equal(survivor.diagnostics.snapshot()["queue.mount.failed"], 1);
-});
-
-test("queue ui: stylesheet declares no fixed pixel widths, so narrow screens cannot overflow horizontally", () => {
-  // Defect: a fixed-width rule forcing horizontal overflow on mobile layouts (jsdom has no layout engine).
-  assert.doesNotMatch(CSS, /(?<![-\w])(min-)?width:\s*\d+px/);
-  assert.match(CSS, /max-width:100%/);
-  assert.match(CSS, /@media \(max-width:560px\)/);
-});
-
-const withModel = (name) => ({ ...chatgptAdapter, currentModel: () => name });
-
-test("queue card: header shows Queue (N) with a collapsible chevron and the right-hand actions in order", async () => {
-  // Defect: header deviating from the owner's layout, or a collapse that hides state instead of the list.
-  const t = await mountUi();
-  assert.equal(t.$(".gs-q-title").textContent, "Queue (0)");
-  assert.equal(t.key("head:clear").disabled, true, "nothing to clear");
-  await t.add("one");
-  await t.add("two");
-  assert.equal(t.$(".gs-q-title").textContent, "Queue (2)");
-  const actions = [...t.$(".gs-q-head-actions").children].map((b) => b.textContent.trim());
-  assert.deepEqual(actions, ["Interrupt & Send Next", "Pause", "Clear"]);
-  assert.ok(t.$$(".gs-q-head-actions svg").length === 3, "each header action carries an icon");
-
-  const toggle = t.key("head:toggle");
-  assert.equal(toggle.getAttribute("aria-expanded"), "true");
-  await t.click("head:toggle");
-  assert.equal(t.key("head:toggle").getAttribute("aria-expanded"), "false");
-  assert.equal(t.$(".gs-q-list"), null);
-  assert.equal(t.key("add:input"), null);
-  assert.equal(t.$(".gs-q-title").textContent, "Queue (2)", "count stays visible while collapsed");
-  assert.equal(t.key("head:interrupt").disabled, false, "actions stay available while collapsed");
-  await t.click("head:toggle");
-  assert.deepEqual(t.rows(), ["one", "two"]);
-});
-
-test("queue card: Clear needs a second press, can be cancelled, and then empties the queue", async () => {
-  // Defect: one stray click discarding every queued draft.
-  const t = await mountUi();
-  await t.add("keep");
-  await t.add("also keep");
-  await t.click("head:clear");
-  assert.equal(t.key("head:clear").textContent.trim(), "Confirm clear");
-  assert.deepEqual(t.rows(), ["keep", "also keep"], "first press deletes nothing");
-  await t.press(t.key("head:clear"), { key: "Escape" });
-  assert.equal(t.key("head:clear").textContent.trim(), "Clear");
-  await t.click("head:clear");
-  await t.click("head:pause"); // any other action disarms it
-  assert.equal(t.key("head:clear").textContent.trim(), "Clear");
-  assert.deepEqual(t.rows(), ["keep", "also keep"]);
-  await t.click("head:clear");
-  await t.click("head:clear");
-  assert.deepEqual(t.rows(), []);
+test("Delete removes the whole queued prompt, even during an edit, and restores the draft", async () => {
+  // Defect: delete leaving text behind or the edit text leaking into the composer.
+  const t = await mount();
+  t.page.startStreaming();
+  await t.enter("gone soon");
+  t.page.type("my draft");
+  await t.click("head:edit");
+  await t.click("head:delete");
+  assert.equal(t.queued(), null);
+  assert.equal(t.page.text(), "my draft", "the draft is back");
   assert.equal(t.$(".gs-q-title").textContent, "Queue (0)");
 });
 
-test("queue card: rows carry a number badge, bold title, muted preview, model chip when known, handle, edit and remove, and no overflow menu", async () => {
-  // Defect: row controls missing or reduced to a hidden menu; a model chip invented when the model is unknown.
-  const known = await mountUi({ adapter: withModel("GPT-5") });
-  await known.add("Review the plan\nCompare approaches and list risks");
-  await known.add("Second");
-  const [first, second] = known.$$(".gs-q-item");
-  assert.equal(first.querySelector(".gs-q-num").textContent, "1");
-  assert.equal(second.querySelector(".gs-q-num").textContent, "2");
-  assert.equal(first.querySelector(".gs-q-name").textContent, "Review the plan");
-  assert.equal(first.querySelector(".gs-q-preview").textContent, "Compare approaches and list risks");
-  assert.equal(second.querySelector(".gs-q-preview"), null, "no preview for a one-line message");
-  assert.equal(first.querySelector(".gs-q-model").textContent, "GPT-5");
-  for (const row of [first, second]) {
-    const names = [...row.querySelectorAll("button")].map((b) => b.getAttribute("aria-label"));
-    assert.deepEqual(names.map((n) => n.split(" ")[0]), ["Reorder", "Edit", "Remove"]);
-    assert.ok(row.querySelectorAll("button svg").length === 3);
-  }
-  assert.ok(!known.$$("button").some((b) => /[…⋯⋮]|\.\.\.|more|menu/i.test(`${b.textContent}${b.getAttribute("aria-label")}${b.title}`)));
-
-  const unknown = await mountUi();
-  await unknown.add("No model known");
-  assert.equal(unknown.$(".gs-q-model"), null);
+test("the card never renders literal null/undefined, in any state", async () => {
+  // Defect: the shipped view appended null children, which the DOM turns into the text `null`.
+  const t = await mount({ dispatcher: new DryRunDispatcher() });
+  noNullText(t.ui);
+  t.page.startStreaming();
+  t.page.type("x");
+  await t.press({ key: "a" });
+  noNullText(t.ui);
+  await t.enter("x");
+  noNullText(t.ui);
+  await t.click("head:pause");
+  noNullText(t.ui);
+  await t.click("head:pause");
+  await t.click("head:edit");
+  noNullText(t.ui);
+  await t.click("head:cancel");
+  t.dispatcher.state = "generating";
+  t.dispatcher.stopScript = [{ kind: "failed", code: "stop-button-missing", message: "no stop" }];
+  await t.click("head:interrupt");
+  noNullText(t.ui);
+  assert.ok(t.$(".gs-q-note"), "the failure is shown as text");
 });
 
-test("queue card: dragging a handle reorders the queue and nothing moves when released in place", async () => {
-  // Defect: drag handle that is decorative, or a drop that reorders to the wrong slot.
-  const t = await mountUi();
-  for (const text of ["a", "b", "c"]) await t.add(text);
-  const rowEls = t.$$(".gs-q-item");
-  rowEls.forEach((row, i) => {
-    row.getBoundingClientRect = () => ({ top: i * 40, bottom: i * 40 + 40, left: 0, right: 300, width: 300, height: 40 });
-  });
-  const drag = async (index, ...ys) => {
-    const handle = t.$$(".gs-q-item")[index].querySelector(".gs-q-handle");
-    const fire = (type, y) => handle.dispatchEvent(new t.window.MouseEvent(type, { bubbles: true, button: 0, clientY: y }));
-    fire("pointerdown", ys[0]);
-    for (const y of ys.slice(1, -1)) fire("pointermove", y);
-    assert.ok(t.$$(".gs-q-item")[index].classList.contains("gs-q-dragging"));
-    fire("pointerup", ys.at(-1));
-    await t.ui.settled();
-  };
-  await drag(0, 20, 110, 110); // a dropped below c's midpoint
-  assert.deepEqual(t.rows(), ["b", "c", "a"]);
-  const again = t.$$(".gs-q-item");
-  again.forEach((row, i) => {
-    row.getBoundingClientRect = () => ({ top: i * 40, bottom: i * 40 + 40, left: 0, right: 300, width: 300, height: 40 });
-  });
-  await drag(1, 60, 62); // released where it started
-  assert.deepEqual(t.rows(), ["b", "c", "a"]);
+test("Pause holds automatic dispatch; Resume lets the prompt go out once the response settles", async () => {
+  // Defect: pause ignored, or resume sending while the response is still running.
+  const t = await mount({ live: true });
+  t.page.startStreaming();
+  await t.enter("later");
+  await t.click("head:pause");
+  assert.match(t.$(".gs-q-status").textContent, /Paused/);
+  t.page.finishStreaming();
+  await t.tick();
+  await t.tick();
+  assert.deepEqual(t.page.log, []);
+  await t.click("head:pause");
+  await t.tick();
+  await t.tick();
+  assert.deepEqual(t.page.sends(), ["send:later"]);
+  assert.equal(t.ui.root.hidden, true, "nothing left to show once sent");
+});
+
+test("while the response runs the card says `Waiting for response`; when Send is available the prompt goes out once", async () => {
+  // Defect: the shipped queue reported `send-button-missing` instead of waiting.
+  const t = await mount({ live: true, page: await fakePage({ sendOnlyWithText: true }) });
+  t.page.startStreaming();
+  await t.enter("A");
+  await t.enter("B");
+  for (let i = 0; i < 4; i++) await t.tick();
+  assert.match(t.$(".gs-q-status").textContent, /Waiting for response/);
+  assert.equal(t.$(".gs-q-note"), null, "no error while waiting");
+  assert.deepEqual(t.page.log, []);
+  t.page.finishStreaming();
+  for (let i = 0; i < 4; i++) await t.tick();
+  assert.deepEqual(t.page.sends(), ["send:A\n\nB"]);
+  assert.equal(t.queued(), null);
+});
+
+test("Steer sends the whole text once through the native control; Interrupt & Send Next stops first, then sends once", async () => {
+  // Defect: steering with part of the text, or sending before the stop.
+  const steerable = await mount({ live: true, page: await fakePage({ steer: true }) });
+  steerable.page.startStreaming();
+  await steerable.enter("A");
+  await steerable.enter("B");
+  await steerable.click("head:steer");
+  assert.deepEqual(steerable.page.log, ["steer:A\n\nB"]);
+  assert.equal(steerable.queued(), null);
+
+  const plain = await mount({ live: true });
+  plain.page.startStreaming();
+  await plain.enter("A");
+  await plain.enter("B");
+  await plain.click("head:interrupt");
+  assert.deepEqual(plain.page.log, ["stop", "send:A\n\nB"]);
+  assert.equal(plain.queued(), null);
+});
+
+test("a failed interrupt leaves the prompt queued with an actionable message and sends nothing", async () => {
+  // Defect: an ambiguous stop turning into a send, or the error disappearing.
+  const t = await mount({ live: true, page: await fakePage({ stopWorks: false }) });
+  t.page.startStreaming();
+  await t.enter("urgent");
+  await t.click("head:interrupt");
+  assert.deepEqual(t.page.log, ["stop"]);
+  assert.equal(t.queued(), "urgent");
+  assert.match(t.$(".gs-q-note").textContent, /not confirm|did not end|Nothing was sent|still be running/i);
+});
+
+test("an unacknowledged send needs review: the card offers Mark delivered / Restore, and nothing is sent again", async () => {
+  // Defect: blind resend of an ambiguous message.
+  const t = await mount({ live: true, page: await fakePage({ acknowledges: false }) });
+  t.page.startStreaming();
+  await t.enter("maybe");
+  t.page.finishStreaming();
+  for (let i = 0; i < 4; i++) await t.tick();
+  assert.match(t.$(".gs-q-status").textContent, /Needs review/);
+  assert.deepEqual(t.page.sends(), ["send:maybe"]);
+  await t.click("inflight:restore");
+  assert.equal(t.queued(), "maybe");
+});
+
+test("A -> B -> A: each conversation shows and keeps its own prompt; A's text is never shown in, or sent to, B", async () => {
+  // Defect: UI bleed or a wrong-destination send after a client-side navigation.
+  const t = await mount({ live: true });
+  t.page.startStreaming();
+  await t.enter("for A");
+  await t.navigate("conv-b");
+  assert.equal(t.queued(), null, "B starts empty");
+  await t.enter("for B");
+  assert.equal(t.queued(), "for B");
+  t.page.finishStreaming();
+  for (let i = 0; i < 4; i++) await t.tick();
+  assert.deepEqual(t.page.sends(), ["send:for B"], "only B's own prompt went out on B's page");
+  t.page.finishStreaming();
+  await t.navigate("fixture");
+  assert.equal(t.queued(), "for A", "A is restored exactly");
+  for (let i = 0; i < 4; i++) await t.tick();
+  assert.deepEqual(t.page.sends(), ["send:for B", "send:for A"]);
+});
+
+test("a navigation during an edit cancels it and gives the old page's composer its draft back", async () => {
+  // Defect: the edit text leaking into the next conversation.
+  const t = await mount();
+  t.page.startStreaming();
+  await t.enter("queued");
+  t.page.type("draft");
+  await t.click("head:edit");
+  await t.navigate("conv-b");
+  assert.equal(t.page.text(), "draft");
+  assert.equal(t.queued(), null);
+});
+
+test("an idle card costs nothing: unchanged state means no repaint, and focus survives the poll", async () => {
+  // Defect: whole-card repaints on every observation dropped focus and the caret.
+  const t = await mount({ dispatcher: new DryRunDispatcher("generating") });
+  t.page.startStreaming();
+  await t.enter("x");
+  await t.tick(); // the first pass settles the status line
+  t.key("head:edit").focus();
+  const records = [];
+  const observer = new t.window.MutationObserver((r) => records.push(...r));
+  observer.observe(t.ui.root, { childList: true, subtree: true, characterData: true, attributes: true });
+  for (let i = 0; i < 5; i++) await t.tick();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  observer.disconnect();
+  assert.equal(records.length, 0);
+  assert.equal(t.doc.activeElement, t.key("head:edit"));
+});
+
+test("dry run is labelled, and nothing it does reaches the page", async () => {
+  const t = await mount({ dispatcher: new DryRunDispatcher() });
+  t.page.startStreaming();
+  await t.enter("x");
+  assert.match(t.$(".gs-q-badge").textContent, /Dry run/);
+});
+
+test("a new unsaved chat is not intercepted", async () => {
+  // Defect: swallowing Enter where there is no destination to queue to.
+  const page = await fakePage();
+  page.window.history.replaceState({}, "", "/");
+  const t = await mount({ page });
+  page.startStreaming();
+  const event = await t.enter("hello");
+  assert.equal(event.defaultPrevented, false);
+  assert.equal(t.rows(), 0);
 });

@@ -1,457 +1,528 @@
+// The queue engine: one accumulating pending prompt per account + conversation. Every test names the defect
+// it catches. Nothing here touches ChatGPT: the dispatcher is the dry-run adapter.
+import test from "node:test";
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
-import { DryRunDispatcher } from "../src/chatgpt/queue/dispatch.js";
-import { CONV, World, settle, until } from "./queue-helpers.js";
+import { A, B, OTHER_ACCOUNT, World, until } from "./queue-helpers.js";
+import { normalizeContribution } from "../src/chatgpt/queue/text.js";
 
-const texts = async (tab) => (await tab.engine.list(CONV)).items.map((i) => `${i.text}:${i.status}`);
+const pendingOf = async (engine, target) => (await engine.view(target)).pending;
+const textOf = async (engine, target) => (await pendingOf(engine, target))?.text;
+const submits = (w) => w.dispatcher.log.filter((e) => e.type === "submit");
 
-describe("ordering and sequential drain", () => {
-  it("sends items in queue order, one per idle step, and never stops a running response", async () => {
-    // Defect: draining out of order, sending while generating, or interrupting to drain.
-    const w = new World();
-    const { engine } = await w.tab("A");
-    const a = await engine.enqueue(CONV, { text: "a" });
-    const b = await engine.enqueue(CONV, { text: "b" });
-    const c = await engine.enqueue(CONV, { text: "c" });
-    await engine.move(c.id, 0); // c, a, b
-
-    assert.deepEqual(await engine.step(CONV), { kind: "sent", itemId: c.id });
-    assert.deepEqual(await engine.step(CONV), { kind: "waiting", reason: "generating" });
-    w.dispatcher.finishGeneration();
-    assert.deepEqual(await engine.step(CONV), { kind: "sent", itemId: a.id });
-    w.dispatcher.finishGeneration();
-    assert.deepEqual(await engine.step(CONV), { kind: "sent", itemId: b.id });
-    w.dispatcher.finishGeneration();
-    assert.deepEqual(await engine.step(CONV), { kind: "idle" });
-    assert.deepEqual(w.dispatcher.actions(), [`submit:${c.id}`, `submit:${a.id}`, `submit:${b.id}`]);
-  });
-
-  it("moves an item to any index and rejects a bad index or a reorder during a send", async () => {
-    // Defect: reorder corrupting positions or racing a claimed item.
-    const w = new World();
-    const { engine } = await w.tab("A");
-    const [a, b, c] = [
-      await engine.enqueue(CONV, { text: "a" }),
-      await engine.enqueue(CONV, { text: "b" }),
-      await engine.enqueue(CONV, { text: "c" }),
-    ];
-    await engine.move(a.id, 2);
-    assert.deepEqual(await texts({ engine }), ["b:pending", "c:pending", "a:pending"]);
-    await engine.move(a.id, 0);
-    assert.deepEqual(await texts({ engine }), ["a:pending", "b:pending", "c:pending"]);
-    await assert.rejects(engine.move(b.id, 3), { code: "invalid-order" });
-    await engine.step(CONV); // a is now sent; reorder only concerns unsent items
-    await engine.move(c.id, 0);
-    assert.deepEqual(await texts({ engine }), ["a:sent", "c:pending", "b:pending"]);
-  });
-});
-
-describe("edit, remove, pause", () => {
-  it("sends the edited text, locks items being sent, and honors pause/resume", async () => {
-    // Defect: stale text sent after an edit; edit of an in-flight item; pause ignored.
-    const w = new World();
-    const { engine } = await w.tab("A");
-    const a = await engine.enqueue(CONV, { text: "old" });
-    const b = await engine.enqueue(CONV, { text: "b" });
-    await engine.edit(a.id, { text: "new" });
-    await engine.pause(CONV);
-    assert.deepEqual(await engine.step(CONV), { kind: "paused" });
-    assert.deepEqual(w.dispatcher.log, []);
-    await engine.resume(CONV);
-    w.dispatcher.submitScript = ["hang"];
-    const sending = engine.step(CONV);
-    await until(() => w.dispatcher.log.length === 1);
-    assert.equal(w.dispatcher.log[0].request.text, "new");
-    await assert.rejects(engine.edit(a.id, { text: "x" }), { code: "item-locked" });
-    await assert.rejects(engine.remove(a.id), { code: "item-locked" });
-    await engine.remove(b.id);
-    w.clock.advance(10_000);
-    assert.deepEqual(await sending, { kind: "manual-review", itemId: a.id });
-  });
-});
-
-describe("restart persistence", () => {
-  it("keeps items, order and pause across a restart, and quarantines a send the dead tab never reported", async () => {
-    // Defect: lost queue on reload; auto-resend of an item whose delivery is unknown after a crash.
-    const w = new World();
-    const first = await w.tab("A");
-    const a = await first.engine.enqueue(CONV, {
-      text: "a",
-      attachments: [{ name: "f.png", size: 1, type: "image/png", restorable: false }],
-    });
-    const b = await first.engine.enqueue(CONV, { text: "b" });
-    const c = await first.engine.enqueue(CONV, { text: "c" });
-    await first.engine.move(c.id, 0);
-    await first.engine.pause(CONV);
-    first.store.close();
-
-    const second = await w.tab("A");
-    const view = await second.engine.list(CONV);
-    assert.equal(view.paused, true);
-    assert.deepEqual(
-      view.items.map((i) => [i.id, i.status]),
-      [
-        [c.id, "pending"],
-        [a.id, "blocked"],
-        [b.id, "pending"],
-      ],
-    );
-    assert.equal(view.items[1].lastError?.code, "attachments-not-restorable");
-
-    // crash mid-send: tab A claims c, dies without recording a result.
-    await second.engine.resume(CONV);
-    w.dispatcher.submitScript = ["hang"];
-    void second.engine.step(CONV);
-    await until(() => w.dispatcher.log.length === 1);
-    second.store.close();
-
-    w.clock.advance(20_000); // lease expires
-    const third = await w.tab("A", {}, new DryRunDispatcher());
-    const outcome = await third.engine.step(CONV);
-    assert.deepEqual(outcome, { kind: "halted", itemId: c.id, status: "manual-review" });
-    assert.equal((await third.engine.list(CONV)).items[0].lastError?.code, "orphaned-send");
-  });
-
-  it("holds the queue at a blocked item until files are reattached", async () => {
-    // Defect: sending a message whose attachments cannot be restored, or skipping past it.
-    const w = new World();
-    const { engine } = await w.tab("A");
-    const a = await engine.enqueue(CONV, {
-      text: "a",
-      attachments: [{ name: "f.png", size: 1, type: "image/png", restorable: false }],
-    });
-    await engine.enqueue(CONV, { text: "b" });
-    assert.deepEqual(await engine.step(CONV), { kind: "halted", itemId: a.id, status: "blocked" });
-    await engine.reattach(a.id, [{ name: "f.png", size: 1, type: "image/png", restorable: true }]);
-    assert.deepEqual(await engine.step(CONV), { kind: "sent", itemId: a.id });
-  });
-});
-
-describe("duplicate tabs", () => {
-  it("lets one tab send; the other is refused until the lease expires, then recovers without double-sending", async () => {
-    // Defect: two tabs sending the same queue; a dead sender's lease never expiring.
-    const w = new World();
-    const a = await w.tab("A");
-    const b = await w.tab("B");
-    await a.engine.enqueue(CONV, { text: "a" });
-    await a.engine.enqueue(CONV, { text: "b" });
-
-    const [ra, rb] = await Promise.all([a.engine.step(CONV), b.engine.step(CONV)]);
-    const results = [ra, rb];
-    assert.equal(results.filter((r) => r.kind === "sent").length, 1);
-    assert.equal(results.filter((r) => r.kind === "not-leader").length, 1);
-    assert.equal(w.dispatcher.log.length, 1);
-
-    // The non-leader keeps being refused while the leader's lease is live.
-    w.dispatcher.finishGeneration();
-    const loser = ra.kind === "sent" ? b : a;
-    const winner = ra.kind === "sent" ? a : b;
-    assert.equal((await loser.engine.step(CONV)).kind, "not-leader");
-
-    // Leader dies silently; after expiry the other tab takes over and continues.
-    w.clock.advance(15_001);
-    assert.equal((await loser.engine.step(CONV)).kind, "sent");
-    assert.equal(w.dispatcher.log.length, 2);
-    assert.notEqual(w.dispatcher.log[0].request.itemId, w.dispatcher.log[1].request.itemId);
-    // A revived stale leader is fenced out and cannot send.
-    w.dispatcher.finishGeneration();
-    assert.equal((await winner.engine.step(CONV)).kind, "not-leader");
-  });
-
-  it("fences a sender whose lease was taken over between its lease check and its claim", async () => {
-    // Defect: a stale tab claiming and sending an item after another tab took the lease.
-    const w = new World();
-    const a = await w.tab("A");
-    const b = await w.tab("B");
-    await a.engine.enqueue(CONV, { text: "a" });
-    const readState = w.dispatcher.readState.bind(w.dispatcher);
-    w.dispatcher.readState = async () => {
-      const state = await readState();
-      w.clock.advance(15_001); // A stalls past its lease; B takes over
-      assert.equal(await b.engine.heartbeat(CONV), true);
-      return state;
-    };
-    assert.equal((await a.engine.step(CONV)).kind, "not-leader");
-    assert.deepEqual(w.dispatcher.log, []);
-    assert.equal((await a.engine.list(CONV)).items[0].status, "pending");
-  });
-});
-
-describe("Interrupt & Send Next", () => {
-  const setup = async () => {
-    const w = new World();
-    const { engine } = await w.tab("A");
-    const a = await engine.enqueue(CONV, { text: "a" });
-    const b = await engine.enqueue(CONV, { text: "b" });
-    w.dispatcher.state = "generating";
-    return { w, engine, a, b };
-  };
-
-  it("submits exactly the next item, and only after the stop is confirmed", async () => {
-    // Defect: sending before the stop lands, or sending more than one item.
-    const { w, engine, a } = await setup();
-    const out = await engine.interruptAndSendNext(CONV);
-    assert.deepEqual(out, { kind: "sent", itemId: a.id });
-    assert.deepEqual(w.dispatcher.actions(), ["stop", `submit:${a.id}`]);
-    assert.deepEqual(await texts({ engine }), ["a:sent", "b:pending"]);
-  });
-
-  it("without a running response just sends the next item, no stop", async () => {
-    // Defect: stopping when there is nothing to stop.
-    const { w, engine, a } = await setup();
-    w.dispatcher.state = "idle";
-    await engine.interruptAndSendNext(CONV);
-    assert.deepEqual(w.dispatcher.actions(), [`submit:${a.id}`]);
-  });
-
-  for (const [name, stop, code] of [
-    ["fails", { kind: "failed", code: "stop-rejected", message: "button missing" }, "stop-rejected"],
-    ["is ambiguous", { kind: "ambiguous", code: "stop-unclear", message: "?" }, "stop-unclear"],
-    ["throws", new Error("boom"), "stop-threw"],
-  ]) {
-    it(`leaves the item pending with an actionable error when the stop ${name}`, async () => {
-      // Defect: sending after an unconfirmed interrupt.
-      const { w, engine, a } = await setup();
-      w.dispatcher.stopScript = [stop];
-      const out = await engine.interruptAndSendNext(CONV);
-      assert.equal(out.kind, "interrupt-failed");
-      assert.equal(out.error.code, code);
-      assert.deepEqual(w.dispatcher.actions(), ["stop"]);
-      const item = (await engine.list(CONV)).items[0];
-      assert.equal(item.id, a.id);
-      assert.equal(item.status, "pending");
-      assert.ok(item.lastError.action.length > 0);
-    });
+test("Enter A, B, C while generating: ONE pending prompt `A\\n\\nB\\n\\nC` with a stable id, and nothing is sent", async () => {
+  // Defect: one row per contribution, or contributions separated by anything but exactly one blank line.
+  const w = new World();
+  const { engine } = await w.tab("t1");
+  w.dispatcher.state = "generating";
+  const first = await engine.append(A, { text: "A" });
+  assert.equal(first.created, true);
+  const ids = new Set([first.record.id]);
+  const versions = [first.record.version];
+  for (const part of ["B", "C"]) {
+    const next = await engine.append(A, { text: part });
+    assert.equal(next.created, false);
+    ids.add(next.record.id);
+    versions.push(next.record.version);
   }
-
-  it("leaves the item pending when the stop times out", async () => {
-    // Defect: an unacknowledged stop treated as success.
-    const { w, engine } = await setup();
-    w.dispatcher.stopScript = ["hang"];
-    const pending = engine.interruptAndSendNext(CONV);
-    await until(() => w.dispatcher.log.length === 1);
-    w.clock.advance(10_000);
-    const out = await pending;
-    assert.equal(out.kind, "interrupt-failed");
-    assert.equal(out.error.code, "stop-timeout");
-    assert.deepEqual(w.dispatcher.actions(), ["stop"]);
-  });
-
-  it("does not send when a confirmed stop still reads as generating", async () => {
-    // Defect: trusting the stop acknowledgment without confirming the conversation is idle.
-    const { w, engine } = await setup();
-    w.dispatcher.overrideState("generating", "generating"); // pre-check, post-stop check
-    const out = await engine.interruptAndSendNext(CONV);
-    assert.equal(out.kind, "interrupt-failed");
-    assert.equal(out.error.code, "stop-not-idle");
-    assert.deepEqual(w.dispatcher.actions(), ["stop"]);
-  });
-
-  it("refuses to send when the state cannot be read", async () => {
-    // Defect: assuming idle when ChatGPT state is unknown.
-    const { w, engine } = await setup();
-    w.dispatcher.stateError = new Error("no composer");
-    const out = await engine.interruptAndSendNext(CONV);
-    assert.equal(out.kind, "interrupt-failed");
-    assert.deepEqual(w.dispatcher.log, []);
-  });
-
-  for (const change of ["edit", "remove"]) {
-    it(`sends nothing if the head is ${change === "edit" ? "edited" : "removed"} after the stop is confirmed`, async () => {
-      // Defect: submitting an item other than the one the user chose, or text they just changed.
-      const { w, engine, a } = await setup();
-      const original = w.dispatcher.stop.bind(w.dispatcher);
-      w.dispatcher.stop = async (req) => {
-        const result = await original(req);
-        if (change === "edit") await engine.edit(a.id, { text: "changed" });
-        else await engine.remove(a.id);
-        return result;
-      };
-      const out = await engine.interruptAndSendNext(CONV);
-      assert.deepEqual(out, { kind: "interrupt-aborted", reason: "head-changed" });
-      assert.deepEqual(w.dispatcher.actions(), ["stop"]);
-    });
-  }
-
-  it("renews the lease after a slow stop instead of losing the send", async () => {
-    // Defect: a stop that outlives the lease TTL making the confirmed interrupt unsendable.
-    const w = new World();
-    const { engine } = await w.tab("A", { leaseTtlMs: 5_000 });
-    const a = await engine.enqueue(CONV, { text: "a" });
-    w.dispatcher.state = "generating";
-    const original = w.dispatcher.stop.bind(w.dispatcher);
-    w.dispatcher.stop = async (req) => {
-      w.clock.advance(9_000);
-      return original(req);
-    };
-    assert.deepEqual(await engine.interruptAndSendNext(CONV), { kind: "sent", itemId: a.id });
-  });
-
-  it("halts instead of skipping an item that needs attention", async () => {
-    // Defect: jumping past a failed head to send a later item.
-    const { w, engine, a } = await setup();
-    w.dispatcher.state = "idle";
-    w.dispatcher.submitScript = [{ kind: "rejected", code: "x", message: "m", retryable: false }];
-    assert.equal((await engine.step(CONV)).kind, "failed");
-    assert.deepEqual(await engine.interruptAndSendNext(CONV), { kind: "halted", itemId: a.id, status: "failed" });
-    assert.equal(w.dispatcher.log.length, 1);
-  });
+  assert.equal(ids.size, 1, "the identity is stable");
+  assert.deepEqual(versions, [1, 2, 3]);
+  assert.equal(await textOf(engine, A), "A\n\nB\n\nC");
+  for (let i = 0; i < 5; i++) assert.deepEqual(await engine.step(A), { kind: "waiting", reason: "generating" });
+  assert.deepEqual(w.dispatcher.log, [], "zero native sends and zero stops while busy");
+  assert.equal((await engine.view(A)).inflight, null);
 });
 
-describe("races", () => {
-  it("serializes concurrent steps in one tab into a single send", async () => {
-    // Defect: double submit of the head when two triggers fire at once.
-    const w = new World();
-    const { engine } = await w.tab("A");
-    await engine.enqueue(CONV, { text: "a" });
-    await engine.enqueue(CONV, { text: "b" });
-    const outs = await Promise.all([engine.step(CONV), engine.step(CONV), engine.step(CONV)]);
-    assert.equal(outs.filter((o) => o.kind === "sent").length, 1);
-    assert.equal(w.dispatcher.log.length, 1);
-    assert.equal(w.dispatcher.state, "generating");
-  });
-
-  it("waits, without sending, while a response runs or the state is unknown", async () => {
-    // Defect: draining into a response the user started natively.
-    const w = new World();
-    const { engine } = await w.tab("A");
-    await engine.enqueue(CONV, { text: "a" });
-    w.dispatcher.state = "generating";
-    assert.deepEqual(await engine.step(CONV), { kind: "waiting", reason: "generating" });
-    w.dispatcher.state = "unknown";
-    assert.deepEqual(await engine.step(CONV), { kind: "waiting", reason: "unknown-state" });
-    assert.deepEqual(w.dispatcher.log, []);
-  });
+test("contributions: internal newlines, indentation and code are kept; empty and whitespace-only input is ignored", async () => {
+  // Defect: trimming away intentional formatting, or queueing blanks.
+  const w = new World();
+  const { engine } = await w.tab("t1");
+  assert.deepEqual(await engine.append(A, { text: "   \n\t " }), { kind: "ignored" });
+  assert.deepEqual(await engine.append(A, { text: "" }), { kind: "ignored" });
+  assert.equal(await pendingOf(engine, A), null);
+  await engine.append(A, { text: "\n\n  indented first\nsecond line\n\n```js\nconst a = 1;\n\n\nconst b = 2;\n```\n\n\n" });
+  await engine.append(A, { text: "line one\r\nline two\r\n" });
+  assert.equal(await textOf(engine, A), "  indented first\nsecond line\n\n```js\nconst a = 1;\n\n\nconst b = 2;\n```\n\nline one\nline two");
+  assert.equal(normalizeContribution("a \n"), "a");
 });
 
-describe("bounded retries", () => {
-  it("retries a definite non-delivery with backoff, then fails after maxAttempts", async () => {
-    // Defect: runaway or immediate retry loops.
-    const w = new World();
-    const { engine } = await w.tab("A", { maxAttempts: 3, retryBackoffMs: [1_000, 5_000] });
-    const a = await engine.enqueue(CONV, { text: "a" });
-    const reject = { kind: "rejected", code: "composer-busy", message: "m", retryable: true };
-    w.dispatcher.submitScript = [reject, reject, reject, reject];
+test("a repeated delivery of the same operation id is a no-op (double keydown + form submit)", async () => {
+  // Defect: the same Enter counted twice and the text doubled.
+  const w = new World();
+  const { engine } = await w.tab("t1");
+  await engine.append(A, { text: "once", opId: "op-1" });
+  assert.equal((await engine.append(A, { text: "once", opId: "op-1" })).kind, "duplicate");
+  assert.equal(await textOf(engine, A), "once");
+  assert.equal((await pendingOf(engine, A)).version, 1);
+});
 
-    let out = await engine.step(CONV);
-    assert.deepEqual(out, { kind: "retry-scheduled", itemId: a.id, notBefore: w.clock.t + 1_000 });
-    assert.equal((await engine.step(CONV)).kind, "waiting"); // backoff not elapsed
-    assert.equal(w.dispatcher.log.length, 1);
+test("two tabs appending concurrently serialize: every contribution lands exactly once", async () => {
+  // Defect: a read-modify-write race losing one tab's text.
+  const w = new World();
+  const [t1, t2] = [await w.tab("t1"), await w.tab("t2")];
+  const writes = [];
+  for (let i = 0; i < 12; i++) writes.push(t1.engine.append(A, { text: `one-${i}` }), t2.engine.append(A, { text: `two-${i}` }));
+  await Promise.all(writes);
+  const record = await pendingOf(t1.engine, A);
+  const parts = record.text.split("\n\n");
+  assert.equal(parts.length, 24);
+  assert.equal(new Set(parts).size, 24, "no duplicates");
+  for (let i = 0; i < 12; i++) assert.ok(parts.includes(`one-${i}`) && parts.includes(`two-${i}`));
+  assert.ok(parts.indexOf("one-3") < parts.indexOf("one-4"), "each tab's order is kept");
+  assert.equal(record.version, 24);
+});
+
+test("Edit: the whole text is replaced under the same id with a higher version; cancel leaves state intact", async () => {
+  // Defect: edit creating a second prompt, appending instead of replacing, or losing the original on cancel.
+  const w = new World();
+  const { engine } = await w.tab("t1");
+  const created = (await engine.append(A, { text: "A" })).record;
+  await engine.append(A, { text: "B" });
+  const begun = await engine.beginEdit(A);
+  assert.equal(begun.record.text, "A\n\nB");
+  await engine.endEdit(A); // cancel: nothing written
+  assert.equal(await textOf(engine, A), "A\n\nB");
+  assert.equal((await pendingOf(engine, A)).version, 2);
+
+  const again = await engine.beginEdit(A);
+  const saved = await engine.saveEdit(A, { baseVersion: again.record.version, baseText: again.record.text, text: "A\n\nB changed\n\nC" });
+  assert.equal(saved.kind, "saved");
+  const record = await pendingOf(engine, A);
+  assert.equal(record.id, created.id);
+  assert.equal(record.text, "A\n\nB changed\n\nC", "replaced, not duplicated");
+  assert.equal(record.version, 3);
+  assert.equal((await engine.view(A)).editing, false, "the edit session is released");
+});
+
+test("Edit: an empty save is refused, and a prompt deleted meanwhile reports `gone`", async () => {
+  // Defect: saving an empty prompt, or resurrecting a deleted one.
+  const w = new World();
+  const { engine } = await w.tab("t1");
+  await engine.append(A, { text: "keep me" });
+  const begun = await engine.beginEdit(A);
+  assert.equal((await engine.saveEdit(A, { baseVersion: 1, baseText: begun.record.text, text: "  \n " })).kind, "empty");
+  assert.equal(await textOf(engine, A), "keep me");
+  await engine.remove(A);
+  assert.equal((await engine.saveEdit(A, { baseVersion: 1, baseText: "keep me", text: "late" })).kind, "gone");
+  assert.equal(await pendingOf(engine, A), null);
+});
+
+test("Edit versus another tab: its appended text is rebased after the edit, any other divergence is a conflict, one editor at a time", async () => {
+  // Defect: the edit silently overwriting text another tab queued meanwhile.
+  const w = new World();
+  const [t1, t2] = [await w.tab("t1"), await w.tab("t2")];
+  await t1.engine.append(A, { text: "A" });
+  const begun = await t1.engine.beginEdit(A);
+  assert.equal((await t2.engine.beginEdit(A)).kind, "busy");
+  await t2.engine.append(A, { text: "from the other tab" });
+  const saved = await t1.engine.saveEdit(A, { baseVersion: begun.record.version, baseText: begun.record.text, text: "A edited" });
+  assert.equal(saved.kind, "rebased");
+  assert.equal(await textOf(t1.engine, A), "A edited\n\nfrom the other tab");
+
+  const second = await t1.engine.beginEdit(A);
+  await t1.engine.endEdit(A); // this tab's session lapses; the other tab rewrites the text wholesale
+  const other = await t2.engine.beginEdit(A);
+  await t2.engine.saveEdit(A, { baseVersion: other.record.version, baseText: other.record.text, text: "rewritten" });
+  const conflict = await t1.engine.saveEdit(A, { baseVersion: second.record.version, baseText: second.record.text, text: "mine" });
+  assert.equal(conflict.kind, "conflict");
+  assert.equal(await textOf(t1.engine, A), "rewritten", "nothing was overwritten");
+});
+
+test("automatic dispatch stands aside while an edit is open, then sends the saved text", async () => {
+  // Defect: dispatch racing a deliberate Edit and sending the old text.
+  const w = new World();
+  const { engine } = await w.tab("t1");
+  await engine.append(A, { text: "old" });
+  const begun = await engine.beginEdit(A);
+  assert.deepEqual(await engine.step(A), { kind: "waiting", reason: "editing" });
+  assert.equal(w.dispatcher.log.length, 0);
+  await engine.saveEdit(A, { baseVersion: begun.record.version, baseText: begun.record.text, text: "new" });
+  assert.equal((await engine.step(A)).kind, "sent");
+  assert.equal(submits(w)[0].request.text, "new");
+});
+
+test("an abandoned edit session expires, so a closed tab cannot freeze the queue", async () => {
+  // Defect: a crashed editor holding the queue forever.
+  const w = new World();
+  const { engine } = await w.tab("t1", { editTtlMs: 5_000 });
+  await engine.append(A, { text: "x" });
+  await engine.beginEdit(A);
+  assert.equal((await engine.step(A)).kind, "waiting");
+  w.clock.advance(6_000);
+  assert.equal((await engine.step(A)).kind, "sent");
+});
+
+test("Delete removes the whole prompt and nothing is sent; Pause holds automatic dispatch but not an explicit Steer", async () => {
+  // Defect: delete leaving text behind; pause ignored; pause also blocking the user's own Steer.
+  const w = new World();
+  const { engine } = await w.tab("t1");
+  await engine.append(A, { text: "a" });
+  await engine.append(A, { text: "b" });
+  await engine.pause(A);
+  assert.deepEqual(await engine.step(A), { kind: "paused" });
+  assert.equal(w.dispatcher.log.length, 0);
+  assert.equal((await engine.remove(A)).kind, "removed");
+  assert.equal(await pendingOf(engine, A), null);
+  assert.equal((await engine.remove(A)).kind, "none");
+  await engine.resume(A);
+  assert.equal((await engine.step(A)).kind, "idle");
+  assert.equal(w.dispatcher.log.length, 0);
+
+  await engine.append(A, { text: "c" });
+  await engine.pause(A);
+  assert.equal((await engine.steer(A, { native: false })).kind, "sent", "an explicit action works while paused");
+  assert.equal(submits(w).length, 1);
+});
+
+test("passive completion sends the whole merged text once, only when native Send is available", async () => {
+  // Defect: sending while the response runs, while Send is unavailable, or sending twice.
+  const w = new World();
+  const { engine } = await w.tab("t1");
+  for (const part of ["A", "B", "C"]) await engine.append(A, { text: part });
+  w.dispatcher.state = "generating";
+  assert.equal((await engine.step(A)).reason, "generating");
+  w.dispatcher.finishGeneration();
+  w.dispatcher.sendReady = false;
+  for (let i = 0; i < 4; i++) assert.deepEqual(await engine.step(A), { kind: "waiting", reason: "send-unavailable" });
+  assert.equal(w.dispatcher.log.length, 0);
+  w.dispatcher.sendReady = true;
+  const outcome = await engine.step(A);
+  assert.equal(outcome.kind, "sent");
+  assert.equal(submits(w).length, 1);
+  assert.equal(submits(w)[0].request.text, "A\n\nB\n\nC");
+  assert.equal(await pendingOf(engine, A), null);
+  assert.equal((await engine.view(A)).inflight, null, "acknowledged");
+  w.dispatcher.finishGeneration();
+  assert.equal((await engine.step(A)).kind, "idle");
+  assert.equal(submits(w).length, 1, "never sent twice");
+});
+
+test("waiting is not an attempt: a long wait for Stop to clear changes no state and writes nothing", async () => {
+  // Defect: the shipped queue burned its retries on `Send not found` while Stop was showing.
+  const w = new World();
+  const { engine, store } = await w.tab("t1");
+  await engine.append(A, { text: "a" });
+  w.dispatcher.state = "generating";
+  const before = JSON.stringify(await store.read((tx) => tx.getPending("acct-1:conv-A")));
+  for (let i = 0; i < 80; i++) {
     w.clock.advance(1_000);
-    out = await engine.step(CONV);
-    assert.deepEqual(out, { kind: "retry-scheduled", itemId: a.id, notBefore: w.clock.t + 5_000 });
-    w.clock.advance(5_000);
-    assert.deepEqual(await engine.step(CONV), { kind: "failed", itemId: a.id });
-    w.clock.advance(60_000);
-    assert.deepEqual(await engine.step(CONV), { kind: "halted", itemId: a.id, status: "failed" });
-    assert.equal(w.dispatcher.log.length, 3);
-
-    // The user, not the loop, restarts a failed item.
-    await engine.retry(a.id);
-    const restarted = await engine.step(CONV); // fresh budget: a new retryable rejection is scheduled, not failed
-    assert.equal(restarted.kind, "retry-scheduled");
-    assert.equal((await engine.list(CONV)).items[0].attempts, 1);
-  });
-
-  it("does not retry a non-retryable rejection", async () => {
-    // Defect: retrying something that can never succeed.
-    const w = new World();
-    const { engine } = await w.tab("A");
-    const a = await engine.enqueue(CONV, { text: "a" });
-    w.dispatcher.submitScript = [{ kind: "rejected", code: "too-long", message: "m", retryable: false }];
-    assert.deepEqual(await engine.step(CONV), { kind: "failed", itemId: a.id });
-    assert.equal(w.dispatcher.log.length, 1);
-  });
-});
-
-describe("ambiguous delivery", () => {
-  for (const [name, script] of [
-    ["an uncertain result", [{ kind: "uncertain", code: "no-ack", message: "m" }]],
-    ["a thrown error", [new Error("net down")]],
-  ]) {
-    it(`sends ${name} to manual review and never blindly retries it`, async () => {
-      // Defect: re-sending a message that may already have been delivered.
-      const w = new World();
-      const { engine } = await w.tab("A");
-      const a = await engine.enqueue(CONV, { text: "a" });
-      await engine.enqueue(CONV, { text: "b" });
-      w.dispatcher.submitScript = [...script];
-      assert.deepEqual(await engine.step(CONV), { kind: "manual-review", itemId: a.id });
-      w.dispatcher.finishGeneration();
-      w.clock.advance(1_000_000);
-      assert.deepEqual(await engine.step(CONV), { kind: "halted", itemId: a.id, status: "manual-review" });
-      assert.deepEqual(await engine.interruptAndSendNext(CONV), {
-        kind: "halted",
-        itemId: a.id,
-        status: "manual-review",
-      });
-      assert.equal(w.dispatcher.log.length, 1);
-      await assert.rejects(engine.edit(a.id, { text: "z" }), { code: "item-locked" });
-    });
+    assert.equal((await engine.step(A)).kind, "waiting");
   }
-
-  it("treats a submit timeout as uncertain, and lets the user resolve it either way", async () => {
-    // Defect: timeout read as failure (and resent); no way out of manual review.
-    const w = new World();
-    const { engine } = await w.tab("A");
-    const a = await engine.enqueue(CONV, { text: "a" });
-    const b = await engine.enqueue(CONV, { text: "b" });
-    w.dispatcher.submitScript = ["hang"];
-    const pending = engine.step(CONV);
-    await until(() => w.dispatcher.log.length === 1);
-    w.clock.advance(10_000);
-    assert.deepEqual(await pending, { kind: "manual-review", itemId: a.id });
-    assert.equal((await engine.list(CONV)).items[0].lastError?.code, "submit-timeout");
-
-    await engine.markDelivered(a.id);
-    w.dispatcher.finishGeneration();
-    assert.deepEqual(await engine.step(CONV), { kind: "sent", itemId: b.id });
-
-    w.dispatcher.finishGeneration();
-    const c = await engine.enqueue(CONV, { text: "c" });
-    w.dispatcher.submitScript = [{ kind: "uncertain", code: "no-ack", message: "m" }];
-    await engine.step(CONV);
-    await engine.retry(c.id);
-    w.dispatcher.finishGeneration();
-    assert.deepEqual(await engine.step(CONV), { kind: "sent", itemId: c.id });
-  });
-
-  it("drops a late result for a superseded attempt", async () => {
-    // Defect: a stale submit result overwriting a newer decision.
-    const w = new World();
-    const { engine } = await w.tab("A");
-    const a = await engine.enqueue(CONV, { text: "a" });
-    let resolveLate;
-    w.dispatcher.submit = async (req) => {
-      w.dispatcher.log.push({ type: "submit", request: req });
-      return new Promise((resolve) => (resolveLate = resolve));
-    };
-    const pending = engine.step(CONV);
-    await until(() => w.dispatcher.log.length === 1);
-    w.clock.advance(10_000);
-    assert.equal((await pending).kind, "manual-review");
-    await engine.retry(a.id); // user chose to retry; new attempt will get a new attemptId
-    resolveLate({ kind: "accepted" });
-    await settle();
-    assert.equal((await engine.list(CONV)).items[0].status, "pending");
-  });
+  assert.equal(JSON.stringify(await store.read((tx) => tx.getPending("acct-1:conv-A"))), before);
+  assert.equal(await store.read((tx) => tx.getLease("acct-1:conv-A")), undefined, "no lease taken just to wait");
+  assert.equal(w.dispatcher.log.length, 0);
+  w.dispatcher.finishGeneration();
+  assert.equal((await engine.step(A)).kind, "sent");
+  assert.equal(submits(w).length, 1);
 });
 
-describe("clear", () => {
-  it("removes everything except a message whose send is still in flight", async () => {
-    // Defect: clearing the queue deletes an item mid-send, losing track of an uncertain delivery.
+test("a late contribution never changes what is in flight: it becomes the next single pending prompt, sent separately", async () => {
+  // Defect: mutating a message that may already have left, or merging a new thought into a delivered one.
+  const w = new World();
+  const { engine } = await w.tab("t1");
+  await engine.append(A, { text: "A" });
+  await engine.append(A, { text: "B" });
+  w.dispatcher.submitScript = ["hang"];
+  const sending = engine.step(A);
+  await until(() => submits(w).length === 1);
+  const view = await engine.view(A);
+  assert.equal(view.inflight.text, "A\n\nB");
+  assert.equal(view.pending, null);
+
+  await engine.append(A, { text: "late" });
+  await engine.append(A, { text: "later" });
+  const after = await engine.view(A);
+  assert.equal(after.inflight.text, "A\n\nB", "the snapshot is immutable");
+  assert.equal(after.pending.text, "late\n\nlater");
+  assert.equal((await engine.view(A)).inflight.id, view.inflight.id);
+  w.clock.advance(10_000);
+  assert.equal((await sending).kind, "manual-review", "an unanswered submit is uncertain, never retried");
+});
+
+test("append versus dispatch: whichever commits first, every contribution is sent or pending exactly once", async () => {
+  // Defect: a late append lost at the claim boundary.
+  for (let delay = 0; delay < 6; delay++) {
     const w = new World();
-    const { engine } = await w.tab("A");
-    await engine.enqueue(CONV, { text: "a" });
-    await engine.enqueue(CONV, { text: "b" });
-    w.dispatcher.submitScript = ["hang"];
-    const sending = engine.step(CONV);
-    await until(() => w.dispatcher.log.length === 1);
-    assert.equal(await engine.clear(CONV), 1);
-    assert.deepEqual(await texts({ engine }), ["a:sending"]);
+    const [t1, t2] = [await w.tab("t1"), await w.tab("t2")];
+    await t1.engine.append(A, { text: "A" });
+    const step = t1.engine.step(A);
+    for (let i = 0; i < delay; i++) await Promise.resolve();
+    const append = t2.engine.append(A, { text: "late" });
+    const [outcome] = await Promise.all([step, append]);
+    const rest = (await pendingOf(t1.engine, A))?.text;
+    const sentText = submits(w)[0]?.request.text;
+    assert.ok(outcome.kind === "sent" || outcome.kind === "waiting", `delay ${delay}: ${outcome.kind}`);
+    const seen = [sentText, rest].filter(Boolean).join("\n\n").split("\n\n").sort();
+    assert.deepEqual(seen, ["A", "late"], `delay ${delay}: nothing lost, nothing doubled`);
+    if (sentText?.includes("late")) assert.equal(rest, undefined, "joined the snapshot atomically");
+    assert.ok(submits(w).length <= 1);
+  }
+});
+
+for (const [name, script] of [
+  ["thrown error", [new Error("socket closed")]],
+  ["no answer", ["hang"]],
+  ["explicit uncertain result", [{ kind: "uncertain", code: "no-ack", message: "?" }]],
+]) {
+  test(`ambiguous submit (${name}): quarantined, never resent, later text accumulates but automatic dispatch halts`, async () => {
+    // Defect: blind retry of a message that may have been delivered, or mixing new text into it.
+    const w = new World();
+    const { engine } = await w.tab("t1");
+    await engine.append(A, { text: "first" });
+    w.dispatcher.submitScript = script;
+    const first = engine.step(A);
+    await until(() => submits(w).length === 1);
     w.clock.advance(10_000);
-    await sending;
-    assert.equal(await engine.clear(CONV), 1);
-    assert.deepEqual(await texts({ engine }), []);
+    assert.equal((await first).kind, "manual-review");
+    await engine.append(A, { text: "second" });
+    for (let i = 0; i < 4; i++) {
+      w.clock.advance(60_000);
+      w.dispatcher.finishGeneration();
+      assert.equal((await engine.step(A)).kind, "halted");
+    }
+    assert.equal(submits(w).length, 1);
+    const view = await engine.view(A);
+    assert.equal(view.inflight.status, "manual-review");
+    assert.equal(view.inflight.text, "first");
+    assert.equal(view.pending.text, "second", "kept apart from the uncertain message");
+
+    // The user checks ChatGPT: it did go out.
+    await engine.markDelivered(A);
+    assert.equal((await engine.step(A)).kind, "sent");
+    assert.deepEqual(submits(w).map((e) => e.request.text), ["first", "second"]);
   });
+}
+
+test("ambiguous send the user finds undelivered: Restore puts its text back in front of the new pending text", async () => {
+  // Defect: losing the uncertain message, or reordering it behind later text.
+  const w = new World();
+  const { engine } = await w.tab("t1");
+  await engine.append(A, { text: "first" });
+  w.dispatcher.submitScript = [{ kind: "uncertain", code: "no-ack", message: "?" }];
+  await engine.step(A);
+  await engine.append(A, { text: "second" });
+  const restored = await engine.restoreInflight(A);
+  assert.equal(restored.record.text, "first\n\nsecond");
+  assert.equal((await engine.view(A)).inflight, null);
+  w.dispatcher.finishGeneration();
+  assert.equal((await engine.step(A)).kind, "sent");
+  assert.equal(submits(w).at(-1).request.text, "first\n\nsecond");
+});
+
+test("a send that definitely did not leave returns its text to the front of the queue, held until the user acts", async () => {
+  // Defect: dropping the text on a rejected send, or retrying a rejection on its own.
+  const w = new World();
+  const { engine } = await w.tab("t1");
+  await engine.append(A, { text: "first" });
+  w.dispatcher.submitScript = [{ kind: "rejected", code: "send-unavailable", message: "Send never enabled.", action: "Check the page." }];
+  const outcome = await engine.step(A);
+  assert.equal(outcome.kind, "rejected");
+  await engine.append(A, { text: "typed meanwhile" });
+  const view = await engine.view(A);
+  assert.equal(view.pending.text, "first\n\ntyped meanwhile");
+  assert.equal(view.pending.status, "blocked");
+  assert.equal(view.inflight, null);
+  for (let i = 0; i < 3; i++) assert.equal((await engine.step(A)).kind, "halted");
+  assert.equal(submits(w).length, 1, "no automatic retry");
+  await engine.unblock(A);
+  assert.equal((await engine.step(A)).kind, "sent");
+  assert.equal(submits(w).length, 2);
+});
+
+test("a page that turns out not ready after the claim (wait) restores the prompt without a hold or an attempt", async () => {
+  // Defect: a state race converting into an error and a stuck queue.
+  const w = new World();
+  const { engine } = await w.tab("t1");
+  const created = (await engine.append(A, { text: "a" })).record;
+  w.dispatcher.submitScript = [{ kind: "wait", reason: "generating" }];
+  assert.deepEqual(await engine.step(A), { kind: "waiting", reason: "generating" });
+  const view = await engine.view(A);
+  assert.equal(view.pending.status, "pending");
+  assert.equal(view.pending.id, created.id);
+  assert.equal(view.pending.text, "a");
+  assert.equal(view.inflight, null);
+  assert.equal((await engine.step(A)).kind, "sent");
+});
+
+test("duplicate tabs: three tabs racing a drain submit the prompt exactly once", async () => {
+  // Defect: split-brain senders.
+  const w = new World();
+  const tabs = [await w.tab("t1"), await w.tab("t2"), await w.tab("t3")];
+  await tabs[0].engine.append(A, { text: "once" });
+  for (let round = 0; round < 6; round++) {
+    await Promise.all(tabs.map((t) => t.engine.step(A)));
+    w.dispatcher.finishGeneration();
+  }
+  assert.equal(submits(w).length, 1);
+});
+
+test("reload mid-send: the restarted tab quarantines the unreported send and resends nothing", async () => {
+  // Defect: a reloaded page re-sending what the previous page was in the middle of sending.
+  const w = new World();
+  const first = await w.tab("t1");
+  await first.engine.append(A, { text: "a" });
+  w.dispatcher.submitScript = ["hang"];
+  void first.engine.step(A); // this tab dies here
+  await until(() => submits(w).length === 1);
+  const reloaded = await w.tab("t1-reloaded");
+  assert.equal((await reloaded.engine.step(A)).kind, "not-leader", "the dead tab's lease still holds");
+  w.clock.advance(60_000);
+  w.dispatcher.finishGeneration();
+  await reloaded.engine.append(A, { text: "new thought" });
+  assert.equal((await reloaded.engine.step(A)).kind, "halted");
+  const view = await reloaded.engine.view(A);
+  assert.equal(view.inflight.status, "manual-review");
+  assert.equal(view.pending.text, "new thought");
+  assert.equal(submits(w).length, 1);
+});
+
+test("each account + conversation has its own prompt, paused flag and edit session; a send carries its own destination", async () => {
+  // Defect: A's text showing up in, or being sent to, B (or to the same conversation id of another account).
+  const w = new World();
+  const { engine } = await w.tab("t1");
+  await engine.append(A, { text: "for A" });
+  await engine.append(B, { text: "for B" });
+  await engine.append(OTHER_ACCOUNT, { text: "for the other account" });
+  await engine.pause(B);
+  await engine.beginEdit(OTHER_ACCOUNT);
+  assert.equal(await textOf(engine, A), "for A");
+  assert.equal(await textOf(engine, B), "for B");
+  assert.equal((await engine.step(B)).kind, "paused");
+  assert.equal((await engine.step(OTHER_ACCOUNT)).kind, "waiting");
+  assert.equal((await engine.step(A)).kind, "sent");
+  assert.deepEqual(submits(w).map((e) => [e.request.accountId, e.request.conversationId, e.request.text]), [["acct-1", "conv-A", "for A"]]);
+  assert.equal(await textOf(engine, B), "for B", "B untouched");
+  await engine.append(A, { text: "A again" });
+  assert.equal(await textOf(engine, A), "A again", "A's next prompt starts fresh and never mixes with B's");
+});
+
+test("an unsaved new chat is never a destination", async () => {
+  // Defect: queueing into a conversation that does not exist yet and sending it elsewhere.
+  const w = new World();
+  const { engine } = await w.tab("t1");
+  const fresh = { accountId: "acct-1", conversationId: "new" };
+  await engine.append(fresh, { text: "x" });
+  assert.deepEqual(await engine.step(fresh), { kind: "waiting", reason: "unresolved-conversation" });
+  assert.deepEqual(await engine.steer(fresh), { kind: "waiting", reason: "unresolved-conversation" });
+  assert.equal(w.dispatcher.log.length, 0);
+});
+
+test("attachments that cannot be restored hold the prompt; the text is kept, never silently dropped", async () => {
+  // Defect: sending without the files, or discarding them when contributions are combined.
+  const w = new World();
+  const { engine } = await w.tab("t1");
+  const file = { name: "f.png", size: 1, type: "image/png", restorable: false };
+  const first = await engine.append(A, { text: "see file", attachments: [file] });
+  assert.equal(first.record.status, "blocked");
+  await engine.append(A, { text: "and more" });
+  const record = await pendingOf(engine, A);
+  assert.equal(record.status, "blocked");
+  assert.deepEqual(record.attachments, [file]);
+  assert.equal(record.text, "see file\n\nand more");
+  for (let i = 0; i < 3; i++) assert.equal((await engine.step(A)).kind, "halted");
+  assert.equal((await engine.steer(A, { native: false })).kind, "halted");
+  assert.equal(w.dispatcher.log.length, 0);
+  assert.equal((await engine.unblock(A, { dropAttachments: true })).record.attachments.length, 0);
+  assert.equal((await engine.step(A)).kind, "sent");
+});
+
+test("Steer with a positively detected native path sends the whole text once and never presses Stop", async () => {
+  // Defect: stopping a response when ChatGPT could steer it, or sending only part of the accumulated text.
+  const w = new World();
+  w.dispatcher.state = "generating";
+  w.dispatcher.steerAvailable = true;
+  const { engine } = await w.tab("t1");
+  for (const part of ["A", "B", "C"]) await engine.append(A, { text: part });
+  const outcome = await engine.steer(A);
+  assert.equal(outcome.kind, "sent");
+  assert.deepEqual(w.dispatcher.actions().map((a) => a.split(":")[0]), ["steer"]);
+  assert.equal(w.dispatcher.log[0].request.text, "A\n\nB\n\nC");
+  assert.equal(await pendingOf(engine, A), null);
+});
+
+test("Steer without a native path falls back to a confirmed stop, then exactly one combined message", async () => {
+  // Defect: sending before the stop took effect, or sending twice.
+  const w = new World();
+  w.dispatcher.state = "generating";
+  const { engine } = await w.tab("t1");
+  for (const part of ["A", "B"]) await engine.append(A, { text: part });
+  const outcome = await engine.steer(A);
+  assert.equal(outcome.kind, "sent");
+  assert.deepEqual(w.dispatcher.actions().map((a) => a.split(":")[0]), ["stop", "submit"]);
+  assert.equal(submits(w)[0].request.text, "A\n\nB");
+});
+
+test("Interrupt & Send Next: stop failures leave the prompt pending with an actionable error and send nothing", async () => {
+  // Defect: pressing Send into a response that is still running.
+  const w = new World();
+  w.dispatcher.state = "generating";
+  const { engine } = await w.tab("t1");
+  await engine.append(A, { text: "urgent" });
+
+  w.dispatcher.stopScript = ["hang"];
+  const hung = engine.steer(A, { native: false });
+  await until(() => w.dispatcher.log.length === 1);
+  w.clock.advance(10_000);
+  const timedOut = await hung;
+  assert.equal(timedOut.kind, "interrupt-failed");
+  assert.equal(timedOut.error.code, "stop-timeout");
+
+  w.dispatcher.stopScript = [{ kind: "confirmed" }];
+  w.dispatcher.overrideState("generating", "generating"); // acknowledged, yet the page still reads busy
+  const stillBusy = await engine.steer(A, { native: false });
+  assert.equal(stillBusy.error.code, "stop-not-idle");
+
+  w.dispatcher.stateError = new Error("no composer");
+  assert.equal((await engine.steer(A, { native: false })).error.code, "state-unknown");
+  assert.equal(submits(w).length, 0);
+  const view = await engine.view(A);
+  assert.equal(view.pending.status, "pending");
+  assert.ok(view.pending.lastError.action.length > 0);
+  w.dispatcher.stateError = null;
+  assert.equal((await engine.steer(A, { native: false })).kind, "sent");
+  assert.equal(submits(w).length, 1);
+});
+
+test("Delete or edit during the stop: nothing is sent", async () => {
+  // Defect: sending a prompt the user just deleted or began editing while the stop was in progress.
+  for (const interfere of ["delete", "edit"]) {
+    const w = new World();
+    w.dispatcher.state = "generating";
+    const { engine } = await w.tab("t1");
+    await engine.append(A, { text: "x" });
+    w.dispatcher.stopScript = ["hang"];
+    const pending = engine.steer(A, { native: false });
+    await until(() => w.dispatcher.log.length === 1);
+    if (interfere === "delete") await engine.remove(A);
+    else await engine.beginEdit(A);
+    w.dispatcher.stopScript = [];
+    w.dispatcher.state = "idle";
+    w.clock.advance(10_000);
+    await pending;
+    assert.equal(submits(w).length, 0, interfere);
+  }
+});
+
+test("two tabs racing Interrupt & Send Next stop once and submit once", async () => {
+  // Defect: a double stop or a double send from two tabs.
+  const w = new World();
+  const [a, b] = [await w.tab("t1"), await w.tab("t2")];
+  w.dispatcher.state = "generating";
+  await a.engine.append(A, { text: "next" });
+  const [x, y] = await Promise.all([a.engine.steer(A, { native: false }), b.engine.steer(A, { native: false })]);
+  assert.deepEqual([x.kind, y.kind].sort(), ["not-leader", "sent"]);
+  assert.equal(w.dispatcher.actions().filter((s) => s === "stop").length, 1);
+  assert.equal(submits(w).length, 1);
+});
+
+test("a legacy record from before accounts is taken over once by the first account that opens the conversation", async () => {
+  // Defect: stranding migrated text under an account key nobody opens, or copying it to two accounts.
+  const w = new World();
+  const { engine } = await w.tab("t1");
+  const legacy = { accountId: "unknown", conversationId: "conv-A" };
+  await engine.append(legacy, { text: "migrated" });
+  assert.equal(await engine.adoptLegacy(A), 1);
+  assert.equal(await textOf(engine, A), "migrated");
+  assert.equal(await pendingOf(engine, legacy), null);
+  assert.equal(await engine.adoptLegacy(OTHER_ACCOUNT), 0);
+  assert.equal(await engine.adoptLegacy(A), 0);
 });
