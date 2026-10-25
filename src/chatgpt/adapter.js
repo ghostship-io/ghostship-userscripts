@@ -13,6 +13,16 @@ const REPLY = "[data-conversation-role]";
 const COMPOSER = '#prompt-textarea, [data-chatgpt-composer] [contenteditable="true"], form [contenteditable="true"][role="textbox"]';
 const SEND = 'button[data-testid="send-button"]';
 const STOP = 'button[data-testid="stop-button"]';
+// ChatGPT's Stop control is not always the same testid. Inside the composer form any "Stop ..." button
+// counts, and so does a reply that is still marked as streaming; missing one signal never reads as idle.
+const STOP_FALLBACK = 'button[aria-label^="Stop" i]';
+const STREAMING = ".result-streaming, [data-is-streaming='true']";
+// The native steer path (Send while a response runs), only when a button says so; never guessed.
+const STEER = 'button[data-testid="steer-button"], button[aria-label^="Steer" i]';
+// Account identity is only ever hashed: the profile button's label never leaves the page or the store.
+const PROFILE = '[data-testid="accounts-profile-button"], [data-testid="profile-button"]';
+// Files attached to the message being composed, best effort. Unrestorable by the queue.
+const ATTACHMENT = '[data-testid*="attachment" i], [data-testid*="file-thumbnail" i]';
 const SCROLLER = "[data-scroll-root], [data-app-action-timeline-scroll]";
 const HEADER = "#page-header";
 const ASSISTANT = '[data-message-author-role="assistant"], [data-conversation-role="assistant"]';
@@ -32,7 +42,41 @@ export const chatgptAdapter = {
   // Queue transport (live dispatcher): the editable composer input and its Send/Stop buttons.
   composerInput: (doc) => scope(doc).querySelector(COMPOSER),
   sendButton: (doc) => scope(doc).querySelector(SEND),
-  stopButton: (doc) => scope(doc).querySelector(STOP),
+  // Inside the composer form only: the queue card has its own Steer button, which must never be mistaken for it.
+  steerButton: (doc) => scope(doc).querySelector(COMPOSER)?.closest("form")?.querySelector(STEER) ?? null,
+  stopButton(doc) {
+    const page = scope(doc);
+    return page.querySelector(STOP) ?? page.querySelector(COMPOSER)?.closest("form")?.querySelector(STOP_FALLBACK) ?? null;
+  },
+  /** A response is being produced: a Stop control is shown or the reply is still streaming. */
+  generating(doc) {
+    return this.stopButton(doc) !== null || scope(doc).querySelector(STREAMING) !== null;
+  },
+  /** Opaque, stable per signed-in profile ("unknown" when the page does not say); no label is kept. */
+  accountId(doc) {
+    const label = scope(doc).querySelector(PROFILE)?.textContent?.trim();
+    if (!label) return "unknown";
+    let h1 = 0xdeadbeef;
+    let h2 = 0x41c6ce57;
+    for (let i = 0; i < label.length; i++) {
+      const c = label.charCodeAt(i);
+      h1 = Math.imul(h1 ^ c, 2654435761);
+      h2 = Math.imul(h2 ^ c, 1597334677);
+    }
+    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    return `acct-${(h2 >>> 0).toString(16).padStart(8, "0")}${(h1 >>> 0).toString(16).padStart(8, "0")}`;
+  },
+  /** Files on the message being composed; the queue cannot restore them, so it flags them. */
+  composerAttachments(doc) {
+    const form = scope(doc).querySelector(COMPOSER)?.closest("form");
+    return [...(form?.querySelectorAll(ATTACHMENT) ?? [])].map((node) => ({
+      name: node.getAttribute("aria-label")?.slice(0, 80) || "attachment",
+      size: 0,
+      type: "",
+      restorable: false,
+    }));
+  },
   userTurnCount: (doc) => scope(doc).querySelectorAll(USER).length,
   userMessage: (turn) => turn.querySelector(USER),
   turnId: (turn, index) => turn.getAttribute("data-turn-key") ?? turn.getAttribute("data-testid") ?? `turn-${index}`,

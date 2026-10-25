@@ -55,4 +55,8 @@ export class World {
   }
 }
 
-export const CONV = "conv-1";
+/** Two conversations of one account, and the same conversation id under another account. */
+export const A = { accountId: "acct-1", conversationId: "conv-A" };
+export const B = { accountId: "acct-1", conversationId: "conv-B" };
+export const OTHER_ACCOUNT = { accountId: "acct-2", conversationId: "conv-A" };
+export const keyOf = (t) => `${t.accountId}:${t.conversationId}`;
