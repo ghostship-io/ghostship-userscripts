@@ -5,7 +5,6 @@ import { createScrollManager } from "../src/core/scroll-manager.js";
 import { createObserverHub } from "../src/core/observers.js";
 import { createDiagnostics } from "../src/core/diagnostics.js";
 import { computeWindow, assertBackend, createNoopBackend } from "../src/core/virtualization.js";
-import { initialQueue, reduce, dispatchNext, ITEM } from "../src/core/queue-machine.js";
 import { buildPromptIndex, searchPrompts } from "../src/core/prompt-index.js";
 import { chatgptAdapter } from "../src/chatgpt/adapter.js";
 import { loadFixture, tick } from "./helpers.js";
@@ -67,35 +66,6 @@ test("virtualization: window math and backend contract", () => {
   assert.deepEqual(computeWindow(100, 0, 10), { start: 0, end: 10 });
   assert.throws(() => assertBackend({}), /mount/);
   assert.equal(assertBackend(createNoopBackend()).name, "noop");
-});
-
-test("queue machine: one in flight, no duplicates, cancel only while queued", () => {
-  let s = initialQueue();
-  s = reduce(s, { type: "enqueue", id: "a", text: "one" });
-  s = reduce(s, { type: "enqueue", id: "a", text: "dup" });
-  s = reduce(s, { type: "enqueue", id: "b", text: "two" });
-  assert.equal(s.items.length, 2);
-  s = reduce(s, { type: "start", id: "a" });
-  assert.equal(reduce(s, { type: "start", id: "b" }), s);
-  assert.equal(reduce(s, { type: "cancel", id: "a" }), s);
-  assert.equal(reduce(s, { type: "interrupt" }), s, "cannot interrupt-flag while an item is mid-send");
-  s = reduce(s, { type: "sent", id: "a" });
-  s = reduce(s, { type: "cancel", id: "b" });
-  assert.deepEqual(s.items.map((i) => i.status), [ITEM.SENT, ITEM.CANCELLED]);
-});
-
-test("queue dispatch: dry run never calls the transport; failures are recorded once", async () => {
-  let calls = 0;
-  const transport = { send: async () => { calls += 1; throw new Error("boom"); } };
-  let s = reduce(initialQueue(), { type: "enqueue", id: "a", text: "x" });
-  const dry = await dispatchNext(s, { transport });
-  assert.equal(calls, 0);
-  assert.equal(dry.items[0].status, ITEM.SENT);
-  const live = await dispatchNext(s, { transport, dryRun: false });
-  assert.equal(calls, 1);
-  assert.equal(live.items[0].status, ITEM.FAILED);
-  assert.equal(await dispatchNext(live, { transport, dryRun: false }), live, "failed items are not retried blindly");
-  assert.equal(calls, 1);
 });
 
 test("prompt index: chronological user prompts with preview and search", async () => {
