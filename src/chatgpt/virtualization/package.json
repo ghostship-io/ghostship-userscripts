@@ -1,0 +1,11 @@
+{
+  "name": "ghostship-chatgpt-virtualization",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/virtualization.test.js"
+  },
+  "devDependencies": {
+    "jsdom": "^26.1.0"
+  }
+}
