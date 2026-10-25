@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GhostShip ChatGPT
 // @namespace    https://github.com/ghostship-io/ghostship-userscripts
-// @version      0.5.1
+// @version      0.6.0
 // @description  Fast, queue-aware ChatGPT interface for the owner browser.
 // @match        https://chatgpt.com/*
 // @grant        none
@@ -15,7 +15,8 @@
   var CONFIG_KEY = "ghostship:userscripts:config";
   var DEFAULTS = Object.freeze({
     enabled: true,
-    dryRun: true,
+    dryRun: false,
+    // opt-in for testing only: the queue then talks to a no-side-effect dispatcher
     windowTurns: 10,
     prefetchTurns: 2,
     maxObservers: 4,
@@ -515,11 +516,18 @@
   var BLOCKS = "h1,h2,h3,h4,h5,h6,p,li,pre,table,img,blockquote";
   var USER = '[data-message-author-role="user"]';
   var COMPOSER = "#prompt-textarea";
+  var SEND = 'button[data-testid="send-button"]';
+  var STOP = 'button[data-testid="stop-button"]';
   var chatgptAdapter = {
     turns: (root) => [...root.querySelectorAll(TURN)],
     role: (turn) => (turn.matches(ROLE) ? turn : turn.querySelector(ROLE))?.getAttribute("data-message-author-role") || null,
     blocks: (turnEls) => turnEls.flatMap((el2) => [...el2.querySelectorAll(BLOCKS)]),
     composer: (doc) => doc.querySelector(COMPOSER)?.closest("form") ?? doc.querySelector(COMPOSER),
+    // Queue transport (live dispatcher): the editable composer input and its Send/Stop buttons.
+    composerInput: (doc) => doc.querySelector(COMPOSER),
+    sendButton: (doc) => doc.querySelector(SEND),
+    stopButton: (doc) => doc.querySelector(STOP),
+    userTurnCount: (doc) => doc.querySelectorAll(USER).length,
     userMessage: (turn) => turn.querySelector(USER),
     turnId: (turn, index) => turn.getAttribute("data-testid") ?? `turn-${index}`,
     /** The element the queue panel is inserted directly before: the composer form, else the input itself. */
@@ -650,6 +658,93 @@
     if (outcome === "hang") return new Promise(() => void 0);
     if (outcome instanceof Error) throw outcome;
     return outcome;
+  }
+
+  // src/chatgpt/queue/live-dispatcher.js
+  var norm = (text) => text.replace(/\s+/g, " ").trim();
+  function createLiveDispatcher({ win, adapter, pollMs = 50, buttonWaitMs = 2e3, ackMs = 5e3, stopWaitMs = 5e3 }) {
+    const doc = win.document;
+    const clicked = /* @__PURE__ */ new Set();
+    const waitFor = (probe, ms) => new Promise((resolve) => {
+      const started = Date.now();
+      const poll = () => {
+        const hit = probe();
+        if (hit) return resolve(hit);
+        if (Date.now() - started >= ms) return resolve(null);
+        win.setTimeout(poll, pollMs);
+      };
+      poll();
+    });
+    const isField = (el2) => el2.tagName === "TEXTAREA" || el2.tagName === "INPUT";
+    const read = (el2) => norm(isField(el2) ? el2.value : el2.textContent ?? "");
+    function write(el2, text) {
+      el2.focus?.();
+      if (isField(el2)) {
+        const proto = el2.tagName === "TEXTAREA" ? win.HTMLTextAreaElement.prototype : win.HTMLInputElement.prototype;
+        Object.getOwnPropertyDescriptor(proto, "value").set.call(el2, text);
+        el2.dispatchEvent(new win.Event("input", { bubbles: true }));
+        return true;
+      }
+      const selection = win.getSelection();
+      const range = doc.createRange();
+      range.selectNodeContents(el2);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      return text === "" ? doc.execCommand("delete") : doc.execCommand("insertText", false, text);
+    }
+    const reject = (code, message, retryable = true) => ({ kind: "rejected", code, message, retryable });
+    const generating = () => Boolean(adapter.stopButton(doc));
+    return {
+      async readState() {
+        if (!adapter.composerInput(doc)) return "unknown";
+        return generating() ? "generating" : "idle";
+      },
+      async submit({ itemId, text, attachments }) {
+        if (clicked.has(itemId)) {
+          return { kind: "uncertain", code: "already-attempted", message: "This message was already submitted from this page." };
+        }
+        if (attachments.length) {
+          return reject("attachments-unsupported", "Messages with attachments cannot be sent by the queue yet.", false);
+        }
+        const input = adapter.composerInput(doc);
+        if (!input) return reject("composer-missing", "The ChatGPT composer was not found; nothing was sent.");
+        if (generating()) return reject("busy", "A response is still streaming; nothing was sent.");
+        if (read(input) !== "") return reject("composer-not-empty", "The composer holds a draft; it was left untouched and nothing was sent.");
+        const abandon = (code, message) => {
+          write(input, "");
+          return reject(code, message);
+        };
+        if (!write(input, text) || read(input) !== norm(text)) {
+          return abandon("composer-fill-failed", "The text could not be placed in the composer; nothing was sent.");
+        }
+        const send = await waitFor(() => {
+          const button2 = adapter.sendButton(doc);
+          return button2 && !button2.disabled ? button2 : null;
+        }, buttonWaitMs);
+        if (!send) return abandon("send-button-missing", "The Send button was not found or stayed disabled; nothing was sent.");
+        if (generating()) return abandon("busy", "A response started streaming; nothing was sent.");
+        const turnsBefore = adapter.userTurnCount(doc);
+        clicked.add(itemId);
+        send.click();
+        const evidence = await waitFor(
+          () => adapter.userTurnCount(doc) > turnsBefore || generating() || read(input) === "",
+          ackMs
+        );
+        return evidence ? { kind: "accepted" } : { kind: "uncertain", code: "submit-unacknowledged", message: "Send was clicked but ChatGPT showed no sign of accepting it." };
+      },
+      async stop() {
+        const button2 = adapter.stopButton(doc);
+        if (!button2) return { kind: "failed", code: "stop-button-missing", message: "The Stop control was not found." };
+        button2.click();
+        const gone = await waitFor(() => !adapter.stopButton(doc), stopWaitMs);
+        return gone ? { kind: "confirmed" } : { kind: "ambiguous", code: "stop-unconfirmed", message: "Stop was clicked but the response did not end." };
+      }
+    };
+  }
+
+  // src/chatgpt/queue/select.js
+  function selectDispatcher({ config, win, adapter }) {
+    return config.dryRun ? new DryRunDispatcher() : createLiveDispatcher({ win, adapter });
   }
 
   // src/chatgpt/queue/types.js
@@ -2444,11 +2539,8 @@
   }
 
   // src/chatgpt/main.js
-  var queueUi = ({ win, adapter, diagnostics, config }) => {
-    if (!config.dryRun) diagnostics.warnOnce("queue-live", "live queue transport is not available; running the queue in dry-run mode");
-    return createQueueUi({ win, adapter, diagnostics, dispatcher: new DryRunDispatcher() });
-  };
+  var queueUi = ({ win, adapter, diagnostics, config }) => createQueueUi({ win, adapter, diagnostics, dispatcher: selectDispatcher({ config, win, adapter }) });
   var runtime = createRuntime({ win: window, adapter: chatgptAdapter, backend: createTurnBackend(), queueUi });
   if (runtime.mode === "active") createRail({ win: window, adapter: chatgptAdapter, runtime });
-  window.__ghostshipUserscripts = { version: "0.5.1", mode: runtime.mode, diagnostics: () => runtime.diagnostics.snapshot() };
+  window.__ghostshipUserscripts = { version: "0.6.0", mode: runtime.mode, diagnostics: () => runtime.diagnostics.snapshot() };
 })();

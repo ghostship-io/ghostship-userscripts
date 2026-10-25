@@ -14,7 +14,8 @@ test("config: defaults, invalid JSON and wrong types fall back", () => {
   assert.deepEqual(parseConfig(null), DEFAULTS);
   assert.deepEqual(parseConfig("{nope"), DEFAULTS);
   assert.equal(parseConfig('{"windowTurns":"x","dryRun":false}').windowTurns, 10);
-  assert.equal(parseConfig('{"dryRun":false}').dryRun, false);
+  assert.equal(DEFAULTS.dryRun, false, "the published script is live; dry run is opt-in");
+  assert.equal(parseConfig('{"dryRun":true}').dryRun, true);
   assert.equal(parseConfig('{"windowTurns":0}').windowTurns, 10);
 });
 

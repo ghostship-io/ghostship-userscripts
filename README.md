@@ -6,7 +6,7 @@ GitHub-managed Chrome userscripts for the GhostShip owner browser (ChatGPT inter
 
 - **Manager: Violentmonkey** (Chrome Web Store build 2.49.0, Manifest V3). It installs and runs on current Chrome once its "Allow User Scripts" toggle is on, is open source with no telemetry, and honours `@updateURL`/`@downloadURL` version checks. Tampermonkey is the fallback.
 - **Source of truth:** `manifest.json` (id, version, `@match`, `@grant`) and `src/`. `npm run build` bundles each script into `dist/` with its metadata header, plus `dist/manifest.json` carrying every artifact's version and sha256.
-- **Shared runtime** (`src/core/`): one scroll manager (only explicit user or navigation sources may move the viewport), a bounded observer hub (one shared `MutationObserver` per root, capped, batched), a pure queue state machine with an injected, dry-run-by-default transport, a prompt index, and a virtualization backend contract. `src/chatgpt/adapter.js` holds every ChatGPT selector; if its self-check fails the runtime stays in safe mode and leaves the page untouched.
+- **Shared runtime** (`src/core/`): one scroll manager (only explicit user or navigation sources may move the viewport), a bounded observer hub (one shared `MutationObserver` per root, capped, batched), a durable queue state machine with an injected transport (the live dispatcher by default), a prompt index, and a virtualization backend contract. `src/chatgpt/adapter.js` holds every ChatGPT selector; if its self-check fails the runtime stays in safe mode and leaves the page untouched.
 - **Reserved:** `src/chatgpt/queue/` (#630) and `src/chatgpt/virtualization/` (#629); the right rail (#628) plugs into the prompt index and scroll manager.
 - **Configuration:** non-secret preferences in the browser's `localStorage` (`ghostship:userscripts:config`, see `src/core/config.js`). No tokens or session data in code, URLs or logs.
 
@@ -19,7 +19,7 @@ GitHub-managed Chrome userscripts for the GhostShip owner browser (ChatGPT inter
 
 3. Reload chatgpt.com and check `window.__ghostshipUserscripts` in the page: `version` is the running build and `mode` is `active` (or `safe` when ChatGPT's markup is not recognised; the script then changes nothing).
 
-The script is dry-run only: it never sends a message or clicks Send/Stop.
+The queue is live: queued messages are sent through ChatGPT's own composer, and Interrupt & Send Next clicks Stop and then sends the next message. Set `{"dryRun":true}` in the config (`ghostship:userscripts:config` in localStorage) to test without sending; the panel then shows a "Dry run" badge.
 
 ## Update
 

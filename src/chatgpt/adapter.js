@@ -5,12 +5,19 @@ const ROLE = "[data-message-author-role]";
 const BLOCKS = "h1,h2,h3,h4,h5,h6,p,li,pre,table,img,blockquote";
 const USER = '[data-message-author-role="user"]';
 const COMPOSER = "#prompt-textarea";
+const SEND = 'button[data-testid="send-button"]';
+const STOP = 'button[data-testid="stop-button"]';
 
 export const chatgptAdapter = {
   turns: (root) => [...root.querySelectorAll(TURN)],
   role: (turn) => (turn.matches(ROLE) ? turn : turn.querySelector(ROLE))?.getAttribute("data-message-author-role") || null,
   blocks: (turnEls) => turnEls.flatMap((el) => [...el.querySelectorAll(BLOCKS)]),
   composer: (doc) => doc.querySelector(COMPOSER)?.closest("form") ?? doc.querySelector(COMPOSER),
+  // Queue transport (live dispatcher): the editable composer input and its Send/Stop buttons.
+  composerInput: (doc) => doc.querySelector(COMPOSER),
+  sendButton: (doc) => doc.querySelector(SEND),
+  stopButton: (doc) => doc.querySelector(STOP),
+  userTurnCount: (doc) => doc.querySelectorAll(USER).length,
   userMessage: (turn) => turn.querySelector(USER),
   turnId: (turn, index) => turn.getAttribute("data-testid") ?? `turn-${index}`,
   /** The element the queue panel is inserted directly before: the composer form, else the input itself. */
