@@ -45,6 +45,7 @@ export function createRuntime({ win, adapter, backend = createNoopBackend(), que
       onLayoutChange: none,
       isTurnActive: () => true,
       navigateTo: () => false,
+      open: () => false,
       dispose: () => queue.dispose(),
     });
     diagnostics.count("runtime.composer-only");
@@ -71,7 +72,7 @@ export function createRuntime({ win, adapter, backend = createNoopBackend(), que
     backend.unmount();
     observers.disposeAll();
     scroll.dispose();
-    Object.assign(runtime, { mode: "safe", scroll: undefined, observers: undefined, navigateTo: undefined, onIndexChange: undefined, onLayoutChange: undefined, isTurnActive: undefined, dispose: () => queue.dispose() });
+    Object.assign(runtime, { mode: "safe", scroll: undefined, observers: undefined, navigateTo: undefined, open: undefined, onIndexChange: undefined, onLayoutChange: undefined, isTurnActive: undefined, dispose: () => queue.dispose() });
     diagnostics.count("virtualization.fallback");
     diagnostics.warnOnce("virtualization", `virtualization disabled (${reason}); running in safe mode`);
   };
@@ -112,6 +113,16 @@ export function createRuntime({ win, adapter, backend = createNoopBackend(), que
     /** The one explicit navigation entry: activates a virtualized-out turn, then scrolls to it. */
     navigateTo(el, options) {
       return backend.navigateToElement?.(el, options) || scroll.navigateTo(el, options);
+    },
+    /**
+     * The one programmatic scroll on opening a conversation (the top of its latest prompt to the top of the
+     * viewport): only while the user has not scrolled, so it yields to any user scroll. The caller makes it once.
+     */
+    open(el, options) {
+      if (!scroll.mayOpen()) return false;
+      const moved = runtime.navigateTo(el, options);
+      if (moved) diagnostics.count("scroll.moved.open");
+      return moved;
     },
     observers,
     queue,

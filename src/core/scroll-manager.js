@@ -229,6 +229,15 @@ export function createScrollManager({ scroller, diagnostics, clock, intentMs = 3
       return true;
     },
     scrollTop: rawGet,
+    /**
+     * Whether the one scroll that positions a freshly opened conversation may still happen: false once the
+     * user scrolled (or is scrolling), so that scroll always yields to the user.
+     */
+    mayOpen() {
+      const ok = !disposed && !intentActive() && stats.userScrolls === 0;
+      if (!ok) diagnostics?.count("scroll.open.yielded");
+      return ok;
+    },
     setAnchors(candidates, resolve) {
       anchors = candidates;
       resolveAnchor = resolve ?? null;

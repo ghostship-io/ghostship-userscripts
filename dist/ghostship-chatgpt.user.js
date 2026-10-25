@@ -485,6 +485,15 @@
         return true;
       },
       scrollTop: rawGet,
+      /**
+       * Whether the one scroll that positions a freshly opened conversation may still happen: false once the
+       * user scrolled (or is scrolling), so that scroll always yields to the user.
+       */
+      mayOpen() {
+        const ok = !disposed && !intentActive() && stats.userScrolls === 0;
+        if (!ok) diagnostics?.count("scroll.open.yielded");
+        return ok;
+      },
       setAnchors(candidates, resolve) {
         anchors = candidates;
         resolveAnchor = resolve ?? null;
@@ -643,6 +652,7 @@
         onLayoutChange: none,
         isTurnActive: () => true,
         navigateTo: () => false,
+        open: () => false,
         dispose: () => queue2.dispose()
       });
       diagnostics.count("runtime.composer-only");
@@ -666,7 +676,7 @@
       backend.unmount();
       observers.disposeAll();
       scroll.dispose();
-      Object.assign(runtime, { mode: "safe", scroll: void 0, observers: void 0, navigateTo: void 0, onIndexChange: void 0, onLayoutChange: void 0, isTurnActive: void 0, dispose: () => queue.dispose() });
+      Object.assign(runtime, { mode: "safe", scroll: void 0, observers: void 0, navigateTo: void 0, open: void 0, onIndexChange: void 0, onLayoutChange: void 0, isTurnActive: void 0, dispose: () => queue.dispose() });
       diagnostics.count("virtualization.fallback");
       diagnostics.warnOnce("virtualization", `virtualization disabled (${reason}); running in safe mode`);
     };
@@ -706,6 +716,16 @@
       navigateTo(el2, options) {
         return backend.navigateToElement?.(el2, options) || scroll.navigateTo(el2, options);
       },
+      /**
+       * The one programmatic scroll on opening a conversation (the top of its latest prompt to the top of the
+       * viewport): only while the user has not scrolled, so it yields to any user scroll. The caller makes it once.
+       */
+      open(el2, options) {
+        if (!scroll.mayOpen()) return false;
+        const moved = runtime.navigateTo(el2, options);
+        if (moved) diagnostics.count("scroll.moved.open");
+        return moved;
+      },
       observers,
       queue,
       dispose() {
@@ -743,6 +763,23 @@
   var ABSOLUTE = /* @__PURE__ */ new Set(["absolute", "fixed"]);
   var ACTIVE_PAGE = '[data-app-shell-active-page="true"]';
   var scope = (root) => root.nodeType === 9 ? root.querySelector(ACTIVE_PAGE) ?? root : root;
+  var SUMMARY_TITLE = /^(outputs?|sources?)$/i;
+  var HEADINGS = 'h1,h2,h3,h4,h5,h6,[role="heading"]';
+  var SUMMARY_REGION = 'aside,[role="complementary"],[role="region"],[aria-label*="summary" i],[data-testid*="summary" i]';
+  var BUTTONS = 'button,[role="button"]';
+  var BUTTON_REGION = 'aside,[role="complementary"],[role="region"]';
+  var OWN_UI = "[data-gs-ui]";
+  var commonAncestor = (a, b) => {
+    for (let el2 = a; el2; el2 = el2.parentElement) if (el2.contains(b)) return el2;
+    return null;
+  };
+  var nativeChildren = (el2) => [...el2.children].filter((c) => !c.matches(OWN_UI)).length;
+  function summarySection(title, pane2) {
+    let head = title;
+    while (head.parentElement && head.parentElement !== pane2 && nativeChildren(head.parentElement) < 2) head = head.parentElement;
+    const section = head.parentElement;
+    return !section || section === pane2 || section === head ? null : { section, head };
+  }
   var LOAD_ERROR = /could not load this chatgpt conversation/i;
   var RETRY_LABEL = /^try again$/i;
   var nonEmptyRole = (el2, sel, attr) => (el2.matches(sel) ? el2 : el2.querySelector(sel))?.getAttribute(attr) || null;
@@ -836,6 +873,49 @@
         if (column.contains(el2) && ABSOLUTE.has(win.getComputedStyle(el2).position)) return [column, el2];
       }
       return [column];
+    },
+    /**
+     * ChatGPT's mounted, visible summary pane, or null (the script then shows its one fallback pane).
+     * `container` is where the script's own section is appended (a child of the pane's sections, after
+     * Sources); `outputs` is the native Outputs section and its title row when its list can be collapsed
+     * by hiding the section's other children, else null. Nothing here changes the page.
+     */
+    nativeSummary(doc) {
+      const page = scope(doc);
+      const win = doc.defaultView;
+      const found = [];
+      let outputs = null;
+      const candidates = [...page.querySelectorAll(HEADINGS)];
+      for (const region2 of page.querySelectorAll(BUTTON_REGION)) if (!region2.matches(TURN) && !region2.closest(TURN)) candidates.push(...region2.querySelectorAll(BUTTONS));
+      for (const title of new Set(candidates)) {
+        const name = title.textContent.trim();
+        if (name.length > 12 || !SUMMARY_TITLE.test(name) || title.closest(TURN) || title.closest(ROLE) || title.closest(OWN_UI)) continue;
+        const rect2 = title.getBoundingClientRect();
+        if (!rect2.width || !rect2.height || rect2.right <= win.innerWidth / 2) continue;
+        found.push(title);
+        if (/^outputs?$/i.test(name) && !outputs) outputs = title;
+      }
+      if (!found.length) return null;
+      const apart = (el2) => !el2.contains(this.composer(doc)) && !el2.querySelector(TURN) && !el2.matches(TURN);
+      let lca = found[0];
+      for (const t of found.slice(1)) lca = commonAncestor(lca, t) ?? lca;
+      if (lca === found[0]) lca = found[0].parentElement;
+      const region = lca?.closest(SUMMARY_REGION);
+      const pane2 = region && apart(region) ? region : lca;
+      if (!pane2 || !apart(pane2)) return null;
+      const rect = pane2.getBoundingClientRect();
+      if (!rect.width || !rect.height) return null;
+      const sections = found.map((t) => summarySection(t, pane2)).filter(Boolean);
+      let container = sections[0]?.section.parentElement ?? pane2;
+      for (const s of sections.slice(1)) container = commonAncestor(container, s.section.parentElement) ?? container;
+      const own = outputs && summarySection(outputs, pane2);
+      const others = found.filter((t) => t !== outputs);
+      const collapsible = !!own && nativeChildren(own.section) > 1 && !others.some((t) => own.section.contains(t));
+      return { pane: pane2, container, left: rect.left, outputs: collapsible ? own : null };
+    },
+    /** Bottom edge of the page header (0 without one): the fallback pane docks below it. */
+    headerBottom(doc) {
+      return scope(doc).querySelector(HEADER)?.getBoundingClientRect().bottom ?? 0;
     },
     /** The assistant reply of turn `index` of `turns`: inside the turn element, else the next message element. */
     reply(turns, index) {
@@ -2784,15 +2864,18 @@
     }
   }
   var textLength = (el2) => (el2.textContent ?? "").trim().length;
+  function blockKind(el2) {
+    if (el2.parentElement?.closest("pre,table")) return null;
+    if (el2.tagName === "LI" && el2.querySelector("p")) return null;
+    const kind = classify(el2);
+    return kind === "text" && textLength(el2) === 0 ? null : kind;
+  }
   function buildTurnModel(blocks) {
     const model = [];
     for (const el2 of blocks) {
-      const nested = el2.parentElement?.closest("pre,table");
-      if (nested) continue;
-      if (el2.tagName === "LI" && el2.querySelector("p")) continue;
-      const kind = classify(el2);
+      const kind = blockKind(el2);
+      if (!kind) continue;
       const len = textLength(el2);
-      if (kind === "text" && len === 0) continue;
       let lines;
       let width;
       if (kind === "code") {
@@ -2831,8 +2914,36 @@
     return merged.map((b) => {
       const top = cursor / total;
       cursor += b.lines + 0.5;
-      return { kind: b.kind, top, height: b.lines / total, width: b.width };
+      const width = b.width * 0.76;
+      return { kind: b.kind, top, height: b.lines / total, left: 0.12, width };
     });
+  }
+  function silhouette(boxes, extent, maxItems = 120) {
+    const span = extent.bottom - extent.top;
+    const live = boxes.filter((b) => b.bottom > b.top && b.right > b.left).sort((a, b) => a.top - b.top);
+    if (span <= 0 || !live.length) return [];
+    const chunk = Math.ceil(live.length / maxItems);
+    const merged = [];
+    for (let i = 0; i < live.length; i += chunk) {
+      const group = live.slice(i, i + chunk);
+      merged.push({
+        kind: group.length === 1 ? group[0].kind : ["prompt", ...PRIORITY].find((k) => group.some((g) => g.kind === k)),
+        top: Math.min(...group.map((g) => g.top)),
+        bottom: Math.max(...group.map((g) => g.bottom)),
+        left: Math.min(...group.map((g) => g.left)),
+        right: Math.max(...group.map((g) => g.right))
+      });
+    }
+    const x0 = Math.min(...merged.map((b) => b.left));
+    const w = Math.max(...merged.map((b) => b.right)) - x0;
+    const clamp01 = (n) => Math.max(0, Math.min(1, n));
+    return merged.map((b) => ({
+      kind: b.kind,
+      top: clamp01((b.top - extent.top) / span),
+      height: clamp01((b.bottom - b.top) / span),
+      left: w > 0 ? clamp01((b.left - x0) / w) : 0,
+      width: w > 0 ? clamp01((b.right - b.left) / w) : 1
+    }));
   }
   function viewportIndicator({ turnTop, turnBottom, viewTop, viewBottom }) {
     const span = turnBottom - turnTop;
@@ -2848,8 +2959,8 @@
   }
 
   // src/chatgpt/rail/rail-layout.js
-  var RAIL_WIDTH = 296;
-  var RAIL_EDGE = 12;
+  var RAIL_WIDTH = 320;
+  var RAIL_EDGE = 0;
   var RAIL_RESERVE = RAIL_WIDTH + 2 * RAIL_EDGE;
   var DOCK_MIN_VIEWPORT = 1024;
   var MIN_CONTENT = 560;
@@ -2887,25 +2998,27 @@
       written = [];
       applied = 0;
     }
-    function signature() {
+    function signature(paneLeft) {
       const cols = findColumns();
       if (!cols.length) return "none";
       const r = cols[0].getBoundingClientRect();
-      return `${win.innerWidth}|${Math.round(r.left)}|${Math.round(r.right + (written.includes(cols[0]) ? applied : 0))}|${cols.length}`;
+      return `${win.innerWidth}|${Math.round(r.left)}|${Math.round(r.right + (written.includes(cols[0]) ? applied : 0))}|${cols.length}|${paneLeft == null ? "-" : Math.round(paneLeft)}`;
     }
-    function evaluate() {
+    function evaluate(paneLeft) {
+      const native = paneLeft != null;
       const cols = findColumns();
       const el2 = target() ?? adapter.composer(doc);
       const edge = () => Math.max(el2.getBoundingClientRect().right, adapter.composer(doc)?.getBoundingClientRect().right ?? 0);
-      if (!cols.length || !el2 || win.innerWidth < DOCK_MIN_VIEWPORT) {
+      if (!cols.length || !el2 || !native && win.innerWidth < DOCK_MIN_VIEWPORT) {
         if (cols.length) setReserve(cols, 0);
         else clear();
-        return { docked: false, reserve: 0 };
+        return { docked: native && !!cols.length, reserve: 0 };
       }
       setReserve(cols, 0);
+      const limit = native ? paneLeft : win.innerWidth - RAIL_RESERVE;
+      const need = Math.max(0, win.innerWidth - limit);
       const room = Math.max(0, win.innerWidth - cols[0].getBoundingClientRect().right);
-      const cap = Math.max(0, RAIL_RESERVE - room);
-      const limit = win.innerWidth - RAIL_RESERVE;
+      const cap = Math.max(0, need - room);
       let right = edge();
       let reserve = 0;
       if (right > limit && cap > 0) {
@@ -2921,7 +3034,7 @@
       const fits = right <= limit + 0.5 && (reserve === 0 || el2.getBoundingClientRect().width >= MIN_CONTENT);
       if (!fits) {
         setReserve(cols, 0);
-        return { docked: false, reserve: 0 };
+        return { docked: native, reserve: 0 };
       }
       return { docked: true, reserve };
     }
@@ -2966,55 +3079,99 @@
       size: () => slots.size
     };
   }
+  function createPanePrefs(storage, { max = 50, key = "gs.pane.prefs" } = {}) {
+    const read = () => {
+      try {
+        const data = JSON.parse(storage?.getItem(key) ?? "{}");
+        return data && typeof data === "object" && !Array.isArray(data) ? data : {};
+      } catch {
+        return {};
+      }
+    };
+    return {
+      get(id) {
+        const p = id === NEW_CHAT ? null : read()[id];
+        return p && typeof p === "object" ? { outputs: !!p.outputs, overview: !!p.overview, prompts: !!p.prompts } : null;
+      },
+      set(id, prefs) {
+        if (id === NEW_CHAT) return;
+        const data = read();
+        delete data[id];
+        data[id] = { outputs: !!prefs.outputs, overview: !!prefs.overview, prompts: !!prefs.prompts };
+        for (const old of Object.keys(data).slice(0, Math.max(0, Object.keys(data).length - max))) delete data[old];
+        try {
+          storage?.setItem(key, JSON.stringify(data));
+        } catch {
+        }
+      }
+    };
+  }
 
   // src/chatgpt/rail/rail.js
-  var STYLE_ID2 = "gs-rail-style";
-  var ACCENT = "#19c37d";
+  var STYLE_ID2 = "gs-pane-style";
+  var LINE = "var(--border-light,color-mix(in srgb,currentColor 14%,transparent))";
+  var HOVER = "var(--surface-hover,color-mix(in srgb,currentColor 7%,transparent))";
+  var SELECTED = "var(--interactive-bg-secondary-selected,color-mix(in srgb,currentColor 12%,transparent))";
+  var CODE = "var(--bg-elevated-secondary,color-mix(in srgb,currentColor 12%,transparent))";
+  var BUBBLE = "var(--message-surface,color-mix(in srgb,currentColor 10%,transparent))";
+  var INK = "color-mix(in srgb,currentColor 38%,transparent)";
+  var INK_FAINT = "color-mix(in srgb,currentColor 22%,transparent)";
+  var ACCENT = "var(--interactive-bg-accent-default,AccentColor)";
+  var MUTED = "var(--text-secondary,color-mix(in srgb,currentColor 65%,transparent))";
+  var FOCUS = "outline:2px solid var(--border-heavy,currentColor);outline-offset:-2px";
+  var CHEVRON = '<svg class="gs-chevron" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>';
+  var MENU = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>';
   var CSS2 = `
-.gs-rail{position:fixed;right:${RAIL_EDGE}px;bottom:16px;z-index:40;display:flex;flex-direction:column;align-items:flex-end;gap:8px;max-width:calc(100vw - 24px);box-sizing:border-box;font:13px/1.35 system-ui,sans-serif;color:var(--text-primary,#ececec)}
-.gs-rail *{box-sizing:border-box}
-.gs-rail[data-gs-mode="collapsed"]{bottom:var(--gs-rail-bottom,96px)}
-.gs-rail-panel{display:flex;flex-direction:column;gap:12px;width:${RAIL_WIDTH}px;max-width:calc(100vw - 24px);max-height:min(calc(100vh - 72px),calc(100vh - var(--gs-rail-bottom,16px) - 72px));min-height:0}
-.gs-rail[data-gs-mode="docked"] .gs-rail-panel{max-height:calc(100vh - 72px)}
-.gs-rail[data-gs-open="false"] .gs-rail-panel{display:none}
-.gs-card{display:flex;flex-direction:column;min-height:0;border:1px solid var(--border-light,rgba(128,128,128,.35));border-radius:12px;background:var(--main-surface-primary,#212121)}
-.gs-card-prompts{flex:1 1 auto}
-.gs-card-head{display:flex;align-items:center;justify-content:space-between;width:100%;min-height:44px;padding:8px 14px;border:0;background:transparent;color:inherit;font:inherit;font-weight:600;font-size:14px;cursor:pointer}
-.gs-card-prompts .gs-card-title{color:#6aa9ff;text-decoration:underline;text-underline-offset:3px}
-.gs-chevron{display:inline-block;width:8px;height:8px;border:solid currentColor;border-width:2px 0 0 2px;transform:rotate(45deg) translate(2px,2px);transition:transform .15s}
-.gs-card[data-gs-collapsed="true"] .gs-chevron{transform:rotate(225deg) translate(2px,2px)}
-.gs-card-body{display:flex;flex-direction:column;min-height:0;padding:0 12px 12px}
-.gs-card-prompts .gs-card-body{flex:1 1 auto}
-.gs-card[data-gs-collapsed="true"] .gs-card-body{display:none}
-.gs-minimap{position:relative;flex:0 0 auto;height:min(250px,32vh);border:1px solid var(--border-light,rgba(128,128,128,.35));border-radius:8px;background:rgba(128,128,128,.08);cursor:pointer;touch-action:none;overflow:hidden}
-.gs-minimap:focus-visible,.gs-search input:focus-visible,.gs-prompt:focus-visible,.gs-rail-toggle:focus-visible,.gs-card-head:focus-visible,.gs-filter:focus-visible{outline:2px solid ${ACCENT};outline-offset:1px}
-.gs-bar{position:absolute;left:12%;min-height:2px;border-radius:2px;background:rgba(160,160,160,.5)}
-.gs-bar[data-kind="heading"]{background:rgba(220,220,220,.8)}
-.gs-bar[data-kind="code"]{background:rgba(106,169,255,.55)}
-.gs-bar[data-kind="table"]{background:rgba(25,195,125,.45)}
-.gs-bar[data-kind="image"]{background:rgba(255,160,90,.55)}
-.gs-view{position:absolute;left:4px;right:4px;border:2px solid ${ACCENT};border-radius:3px;background:rgba(25,195,125,.2);pointer-events:none}
-.gs-view::before,.gs-view::after{content:"";position:absolute;top:50%;width:6px;height:6px;margin-top:-3px;border-radius:50%;background:#fff;border:1px solid ${ACCENT}}
-.gs-view::before{left:-5px}.gs-view::after{right:-5px}
-.gs-caption{margin-top:8px;font-size:12px;opacity:.7}
+.gs-pane{position:fixed;right:0;top:var(--gs-pane-top,0px);bottom:0;z-index:30;display:flex;flex-direction:column;width:${RAIL_WIDTH}px;max-width:100vw;box-sizing:border-box;border-left:1px solid ${LINE};background:var(--main-surface-primary,Canvas);color:var(--text-primary,CanvasText);font:inherit;font-size:14px;line-height:20px}
+.gs-pane[hidden]{display:none}
+.gs-pane *,.gs-pane-slot *{box-sizing:border-box}
+.gs-pane[data-gs-mode="collapsed"]{top:auto;right:8px;bottom:var(--gs-pane-bottom,96px);width:min(${RAIL_WIDTH}px,calc(100vw - 16px));height:min(520px,calc(100vh - var(--gs-pane-bottom,96px) - 16px));border:1px solid ${LINE};border-radius:16px;overflow:hidden}
+.gs-pane[data-gs-mode="collapsed"][data-gs-open="false"]{display:none}
+.gs-pane-slot{display:flex;flex:1 1 auto;flex-direction:column;min-height:min(360px,60vh);max-height:100%;border-top:1px solid ${LINE};font-size:14px;line-height:20px}
+.gs-pane-body{display:flex;flex:1 1 auto;flex-direction:column;min-height:0;overflow:hidden}
+.gs-sec{display:flex;flex:0 0 auto;flex-direction:column;min-height:0}
+.gs-sec-prompts{flex:1 1 auto}
+.gs-sec-head{display:flex;align-items:center;justify-content:space-between;width:100%;min-height:40px;padding:8px 16px;border:0;background:transparent;color:inherit;font:inherit;font-weight:600;text-align:left;cursor:pointer}
+.gs-sec-head:hover,.gs-outputs-toggle:hover{background:${HOVER}}
+.gs-chevron{flex:0 0 auto;transition:transform .15s}
+.gs-sec[data-gs-collapsed="true"] .gs-chevron,[data-gs-outputs][data-gs-collapsed="true"] .gs-chevron{transform:rotate(-90deg)}
+.gs-sec-body{display:flex;flex-direction:column;min-height:0;padding:0 16px 12px}
+.gs-sec-prompts .gs-sec-body{flex:1 1 auto}
+.gs-sec[data-gs-collapsed="true"] .gs-sec-body{display:none}
+.gs-minimap{position:relative;flex:0 0 auto;height:min(220px,28vh);border:1px solid ${LINE};border-radius:8px;background:transparent;cursor:pointer;touch-action:none;overflow:hidden}
+.gs-minimap:focus-visible,.gs-search input:focus-visible,.gs-prompt:focus-visible,.gs-pane-toggle:focus-visible,.gs-sec-head:focus-visible,.gs-filter:focus-visible,.gs-outputs-toggle:focus-visible{${FOCUS}}
+.gs-bars{position:absolute;inset:0;--gs-lh:4px}
+.gs-bar{position:absolute;min-height:2px;border-radius:2px;pointer-events:none}
+.gs-bar[data-kind="text"]{background-image:linear-gradient(${INK_FAINT} 0 50%,transparent 50%);background-size:100% var(--gs-lh)}
+.gs-bar[data-kind="heading"]{background-image:linear-gradient(${INK} 0 60%,transparent 60%);background-size:100% var(--gs-lh)}
+.gs-bar[data-kind="code"]{border-radius:3px;background-color:${CODE};background-image:linear-gradient(${INK_FAINT} 0 40%,transparent 40%);background-size:100% var(--gs-lh)}
+.gs-bar[data-kind="table"]{border:1px solid ${INK};background-image:linear-gradient(${INK_FAINT} 0 1px,transparent 1px);background-size:100% calc(var(--gs-lh) * 2)}
+.gs-bar[data-kind="image"]{border:1px solid ${INK};background-color:${INK_FAINT}}
+.gs-bar[data-kind="prompt"]{border-radius:6px;background-color:${BUBBLE}}
+.gs-view{position:absolute;left:0;right:0;border:1px solid ${ACCENT};border-radius:4px;background:color-mix(in srgb,${ACCENT} 16%,transparent);pointer-events:none}
+.gs-caption{margin-top:8px;font-size:12px;line-height:16px;color:${MUTED}}
 .gs-search{display:flex;flex:0 0 auto;gap:6px;align-items:center;margin-bottom:8px}
 .gs-search-field{position:relative;flex:1 1 auto;min-width:0}
-.gs-search-field::before{content:"";position:absolute;left:10px;top:50%;width:9px;height:9px;margin-top:-6px;border:2px solid currentColor;border-radius:50%;opacity:.6;pointer-events:none}
-.gs-search input{width:100%;min-height:36px;padding:4px 8px 4px 30px;border:1px solid var(--border-light,rgba(128,128,128,.35));border-radius:10px;background:rgba(128,128,128,.1);color:inherit;font:inherit}
-.gs-filter{flex:0 0 auto;width:36px;height:36px;border:1px solid var(--border-light,rgba(128,128,128,.35));border-radius:10px;background:rgba(128,128,128,.1);color:inherit;cursor:pointer}
-.gs-filter[aria-pressed="true"]{border-color:${ACCENT};color:${ACCENT}}
+.gs-search-field::before{content:"";position:absolute;left:10px;top:50%;width:9px;height:9px;margin-top:-6px;border:2px solid currentColor;border-radius:50%;opacity:.55;pointer-events:none}
+.gs-search input{width:100%;min-height:36px;padding:4px 8px 4px 30px;border:1px solid ${LINE};border-radius:10px;background:transparent;color:inherit;font:inherit}
+.gs-filter{flex:0 0 auto;display:flex;align-items:center;justify-content:center;width:36px;height:36px;border:1px solid ${LINE};border-radius:10px;background:transparent;color:${MUTED};cursor:pointer}
+.gs-filter:hover{background:${HOVER}}
+.gs-filter[aria-pressed="true"]{background:${SELECTED};color:inherit}
 .gs-prompts{flex:1 1 auto;min-height:60px;margin:0;padding:0;list-style:none;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
-.gs-prompt{position:relative;display:flex;gap:10px;width:100%;min-height:48px;padding:6px 26px 6px 10px;border:0;border-left:3px solid transparent;border-radius:8px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
-.gs-prompt:hover{background:rgba(128,128,128,.12)}
-.gs-prompt[aria-current="true"]{background:rgba(25,195,125,.16);border-left-color:${ACCENT}}
-.gs-prompt[data-in-view="true"]::after{content:"";position:absolute;right:10px;top:50%;width:6px;height:6px;margin-top:-3px;border-radius:50%;background:${ACCENT}}
-.gs-n{flex:0 0 auto;min-width:3ch;opacity:.75}
+.gs-prompt{position:relative;display:flex;gap:10px;width:100%;min-height:48px;padding:6px 24px 6px 10px;border:0;border-radius:8px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.gs-prompt:hover{background:${HOVER}}
+.gs-prompt[aria-current="true"]{background:${SELECTED}}
+.gs-prompt[data-in-view="true"]::after{content:"";position:absolute;right:10px;top:50%;width:6px;height:6px;margin-top:-3px;border-radius:50%;background:currentColor;opacity:.5}
+.gs-n{flex:0 0 auto;min-width:3ch;color:${MUTED}}
 .gs-copy{display:flex;flex:1 1 auto;flex-direction:column;min-width:0}
-.gs-title{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.gs-preview{font-size:12px;opacity:.65;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.gs-empty{padding:8px;opacity:.6}
-.gs-rail-toggle{display:none;min-width:44px;min-height:44px;border:1px solid var(--border-light,rgba(128,128,128,.35));border-radius:22px;background:var(--main-surface-primary,#212121);color:inherit;cursor:pointer}
-.gs-rail[data-gs-mode="collapsed"] .gs-rail-toggle{display:block}
+.gs-title{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gs-preview{font-size:12px;line-height:16px;color:${MUTED};white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gs-empty{padding:8px;color:${MUTED}}
+.gs-pane-toggle{display:none;position:fixed;right:8px;bottom:var(--gs-pane-bottom,96px);z-index:30;align-items:center;justify-content:center;min-width:44px;min-height:44px;border:1px solid ${LINE};border-radius:22px;background:var(--main-surface-primary,Canvas);color:inherit;cursor:pointer}
+.gs-pane-toggle[data-gs-mode="collapsed"]{display:flex}
+.gs-pane-toggle[hidden]{display:none}
+.gs-outputs-toggle{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:28px;height:28px;margin-left:auto;padding:0;border:0;border-radius:8px;background:transparent;color:inherit;cursor:pointer}
+[data-gs-outputs][data-gs-collapsed="true"]>:not([data-gs-outputs-head]){display:none}
 ${LAYOUT_CSS}`;
   function describePrompt(text, reply = "") {
     const clean = text.replace(/\s+/g, " ").trim();
@@ -3026,7 +3183,9 @@ ${LAYOUT_CSS}`;
   }
   var clamp2 = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
   var PREVIEW_MAX = 100;
-  function createRail({ win, adapter, runtime, store = createRailStateStore() }) {
+  var SCAN_MS = 400;
+  var BLOCK_CAP = 800;
+  function createRail({ win, adapter, runtime, store = createRailStateStore(), prefs = createPanePrefs(win.localStorage) }) {
     const doc = win.document;
     const scroll = runtime.scroll;
     const scroller = scroll.element ?? adapter.scroller(doc);
@@ -3047,6 +3206,7 @@ ${LAYOUT_CSS}`;
     let trailing = null;
     let scheduled = false;
     let layoutQueued = false;
+    let forceScan = false;
     let layoutSig = null;
     let disposed = false;
     let drag = false;
@@ -3057,46 +3217,69 @@ ${LAYOUT_CSS}`;
     let viewBox = "";
     let bookmarkToRestore = null;
     let listTopToRestore = null;
+    let outputsCollapsed = false;
+    let openPending = convId !== "new";
+    let lastHost = null;
+    let scannedAt = -Infinity;
+    let scanTimer = null;
+    let outputsHost = null;
+    let slot = null;
     const described = /* @__PURE__ */ new Map();
     const style = doc.createElement("style");
     style.id = STYLE_ID2;
     style.textContent = CSS2;
     doc.head.appendChild(style);
     const root = doc.createElement("aside");
-    root.className = "gs-rail";
-    root.setAttribute("aria-label", "Conversation navigator");
+    root.className = "gs-pane";
+    root.dataset.gsUi = "";
+    root.setAttribute("aria-label", "Conversation summary");
+    root.dataset.gsHost = "fallback";
     root.dataset.gsMode = "docked";
     root.dataset.gsOpen = "true";
-    root.innerHTML = `
-    <div class="gs-rail-panel" id="gs-rail-panel">
-      <section class="gs-card gs-card-overview" data-gs-collapsed="false">
-        <button type="button" class="gs-card-head" aria-expanded="true" aria-controls="gs-overview-body"><span class="gs-card-title">Conversation overview</span><span class="gs-chevron" aria-hidden="true"></span></button>
-        <div class="gs-card-body" id="gs-overview-body">
+    const body = doc.createElement("div");
+    body.className = "gs-pane-body";
+    body.dataset.gsUi = "";
+    body.innerHTML = `
+      <section class="gs-sec gs-sec-overview" data-gs-collapsed="false">
+        <button type="button" class="gs-sec-head" aria-expanded="true" aria-controls="gs-overview-body"><span class="gs-sec-title">Overview</span>${CHEVRON}</button>
+        <div class="gs-sec-body" id="gs-overview-body">
           <div class="gs-minimap" tabindex="0" role="slider" aria-orientation="vertical" aria-label="Current turn overview" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="gs-bars"></div><div class="gs-view" hidden></div></div>
           <div class="gs-caption" aria-live="off">Drag to navigate \u2022 0% visible</div>
         </div>
       </section>
-      <section class="gs-card gs-card-prompts" data-gs-collapsed="false">
-        <button type="button" class="gs-card-head" aria-expanded="true" aria-controls="gs-prompts-body"><span class="gs-card-title">Prompts</span><span class="gs-chevron" aria-hidden="true"></span></button>
-        <div class="gs-card-body" id="gs-prompts-body">
-          <div class="gs-search"><div class="gs-search-field"><input type="search" placeholder="Search prompts..." aria-label="Search prompts"></div><button type="button" class="gs-filter" aria-pressed="false" aria-label="Only prompts in view" title="Only prompts in view">&#9776;</button></div>
+      <section class="gs-sec gs-sec-prompts" data-gs-collapsed="false">
+        <button type="button" class="gs-sec-head" aria-expanded="true" aria-controls="gs-prompts-body"><span class="gs-sec-title">Prompts</span>${CHEVRON}</button>
+        <div class="gs-sec-body" id="gs-prompts-body">
+          <div class="gs-search"><div class="gs-search-field"><input type="search" placeholder="Search prompts..." aria-label="Search prompts"></div><button type="button" class="gs-filter" aria-pressed="false" aria-label="Only prompts in view" title="Only prompts in view">${MENU}</button></div>
           <ol class="gs-prompts" aria-label="Prompts, oldest first"></ol>
         </div>
-      </section>
-    </div>
-    <button type="button" class="gs-rail-toggle" aria-controls="gs-rail-panel" aria-expanded="false" aria-label="Conversation navigator">&#9776;</button>`;
-    doc.body.appendChild(root);
-    const $ = (sel) => root.querySelector(sel);
+      </section>`;
+    root.append(body);
+    const toggle = doc.createElement("button");
+    toggle.type = "button";
+    toggle.className = "gs-pane-toggle";
+    toggle.dataset.gsUi = "";
+    toggle.setAttribute("aria-expanded", "false");
+    toggle.setAttribute("aria-label", "Conversation summary");
+    toggle.innerHTML = MENU;
+    toggle.dataset.gsMode = "docked";
+    doc.body.append(root, toggle);
+    const outputsBtn = doc.createElement("button");
+    outputsBtn.type = "button";
+    outputsBtn.className = "gs-outputs-toggle";
+    outputsBtn.dataset.gsUi = "";
+    outputsBtn.setAttribute("aria-label", "Outputs");
+    outputsBtn.innerHTML = CHEVRON;
+    const $ = (sel) => body.querySelector(sel);
     const minimap = $(".gs-minimap");
     const bars = $(".gs-bars");
     const view = $(".gs-view");
-    const overviewCard = $(".gs-card-overview");
-    const promptsCard = $(".gs-card-prompts");
+    const overviewCard = $(".gs-sec-overview");
+    const promptsCard = $(".gs-sec-prompts");
     const caption = $(".gs-caption");
     const filterBtn = $(".gs-filter");
     const input = $(".gs-search input");
     const list = $(".gs-prompts");
-    const toggle = $(".gs-rail-toggle");
     const railLayout = createRailLayout({ win, adapter, target: () => els[0] });
     const cleanups = [];
     const on = (target, type, fn, opts) => {
@@ -3105,14 +3288,22 @@ ${LAYOUT_CSS}`;
     };
     const setCollapsed = (card, collapsed) => {
       card.dataset.gsCollapsed = String(collapsed);
-      card.querySelector(".gs-card-head").setAttribute("aria-expanded", String(!collapsed));
+      card.querySelector(".gs-sec-head").setAttribute("aria-expanded", String(!collapsed));
     };
+    const savePrefs = () => prefs.set(convId, { outputs: outputsCollapsed, overview: overviewCard.dataset.gsCollapsed === "true", prompts: promptsCard.dataset.gsCollapsed === "true" });
     function setOpen(next) {
       open = next;
       if (root.dataset.gsOpen !== String(next)) root.dataset.gsOpen = String(next);
       if (toggle.getAttribute("aria-expanded") !== String(next)) toggle.setAttribute("aria-expanded", String(next));
     }
+    const stored = prefs.get(convId);
+    if (stored) {
+      outputsCollapsed = stored.outputs;
+      setCollapsed(overviewCard, stored.overview);
+      setCollapsed(promptsCard, stored.prompts);
+    }
     if (restore) {
+      outputsCollapsed = restore.ui.outputsCollapsed ?? outputsCollapsed;
       query = restore.ui.query;
       input.value = query;
       inViewOnly = restore.ui.inViewOnly;
@@ -3132,7 +3323,7 @@ ${LAYOUT_CSS}`;
       const prev = store.get(convId);
       store.save(convId, {
         sig,
-        ui: { query, inViewOnly, open, overviewCollapsed: overviewCard.dataset.gsCollapsed === "true", promptsCollapsed: promptsCard.dataset.gsCollapsed === "true" },
+        ui: { query, inViewOnly, open, outputsCollapsed, overviewCollapsed: overviewCard.dataset.gsCollapsed === "true", promptsCollapsed: promptsCard.dataset.gsCollapsed === "true" },
         activeId,
         list: { top: list.scrollTop, pinned: listPinned },
         bookmark: bookmark ?? prev?.bookmark ?? null
@@ -3167,20 +3358,95 @@ ${LAYOUT_CSS}`;
       const el2 = els.find((e, i) => adapter.turnId(e, i) === mark.id);
       if (el2) runtime.navigateTo(el2, { offset: mark.offset });
     }
-    function layout() {
-      const now = railLayout.signature();
+    function openAtLatest() {
+      if (!openPending || disposed) return;
+      if (didRestore || userScrolled) {
+        openPending = false;
+        return;
+      }
+      const last = prompts.at(-1);
+      const el2 = last && els[last.turnIndex];
+      if (restore || !el2 || !runtime.isTurnActive(el2) || !el2.getBoundingClientRect().height) return;
+      openPending = false;
+      runtime.open(el2, { offset: 0 });
+    }
+    function setVar(name, value) {
+      for (const el2 of [root, toggle]) if (el2.style.getPropertyValue(name) !== value) el2.style.setProperty(name, value);
+    }
+    function setMode(mode) {
+      if (root.dataset.gsMode !== mode) root.dataset.gsMode = mode;
+      if (toggle.dataset.gsMode !== mode) toggle.dataset.gsMode = mode;
+    }
+    function releaseOutputs() {
+      if (outputsHost) {
+        outputsHost.section.removeAttribute("data-gs-outputs");
+        outputsHost.section.removeAttribute("data-gs-collapsed");
+        outputsHost.head.removeAttribute("data-gs-outputs-head");
+      }
+      outputsBtn.remove();
+      outputsHost = null;
+    }
+    function syncOutputs(host) {
+      const o = host?.outputs ?? null;
+      if (outputsHost && (!o || o.section !== outputsHost.section || o.head !== outputsHost.head)) releaseOutputs();
+      if (!o) return;
+      outputsHost = o;
+      if (!o.section.hasAttribute("data-gs-outputs")) o.section.setAttribute("data-gs-outputs", "");
+      if (!o.head.hasAttribute("data-gs-outputs-head")) o.head.setAttribute("data-gs-outputs-head", "");
+      if (outputsBtn.parentElement !== o.head) o.head.append(outputsBtn);
+      const collapsed = String(outputsCollapsed);
+      if (o.section.getAttribute("data-gs-collapsed") !== collapsed) o.section.setAttribute("data-gs-collapsed", collapsed);
+      const expanded = String(!outputsCollapsed);
+      if (outputsBtn.getAttribute("aria-expanded") !== expanded) outputsBtn.setAttribute("aria-expanded", expanded);
+    }
+    function place(host) {
+      const hostKind = host ? "native" : "fallback";
+      if (host) {
+        slot ??= Object.assign(doc.createElement("div"), { className: "gs-pane-slot" });
+        slot.dataset.gsUi = "";
+        if (slot.parentElement !== host.container) host.container.append(slot);
+        if (body.parentElement !== slot) slot.append(body);
+      } else {
+        if (body.parentElement !== root) root.append(body);
+        slot?.remove();
+      }
+      if (root.dataset.gsHost !== hostKind) root.dataset.gsHost = hostKind;
+      if (root.hidden !== !!host) root.hidden = !!host;
+      if (toggle.hidden !== !!host) toggle.hidden = !!host;
+      syncOutputs(host);
+    }
+    function layout(rescan = false) {
+      let host = lastHost;
+      if (!host || !host.pane.isConnected || !host.container.isConnected || host.outputs && !(host.outputs.section.isConnected && host.outputs.head.isConnected) || !host.pane.getBoundingClientRect().width) {
+        const t = win.performance.now();
+        if (rescan || t - scannedAt >= SCAN_MS) {
+          host = adapter.nativeSummary(doc);
+          scannedAt = t;
+        } else {
+          host = null;
+          if (!scanTimer) {
+            scanTimer = win.setTimeout(() => {
+              scanTimer = null;
+              if (!disposed) layout(true);
+            }, SCAN_MS);
+          }
+        }
+      }
+      lastHost = host;
+      place(host);
+      const now = railLayout.signature(host?.left);
       if (now !== layoutSig) {
-        const { docked } = railLayout.evaluate();
+        const { docked } = railLayout.evaluate(host?.left);
         const was = root.dataset.gsMode;
-        if (was !== (docked ? "docked" : "collapsed")) root.dataset.gsMode = docked ? "docked" : "collapsed";
+        setMode(docked ? "docked" : "collapsed");
         if (docked) setOpen(true);
         else if (was === "docked") setOpen(false);
-        layoutSig = railLayout.signature();
+        layoutSig = railLayout.signature(host?.left);
+        if (!host) setVar("--gs-pane-top", `${Math.max(0, Math.round(adapter.headerBottom(doc)))}px`);
       }
-      if (root.dataset.gsMode === "collapsed") {
+      if (!host && root.dataset.gsMode === "collapsed") {
         const rect = adapter.composer(doc)?.getBoundingClientRect();
-        const bottom = rect?.height ? `${Math.max(16, Math.round(win.innerHeight - rect.top + 8))}px` : "96px";
-        if (root.style.getPropertyValue("--gs-rail-bottom") !== bottom) root.style.setProperty("--gs-rail-bottom", bottom);
+        setVar("--gs-pane-bottom", rect?.height ? `${Math.max(16, Math.round(win.innerHeight - rect.top + 8))}px` : "96px");
       }
     }
     function promptEnd(i) {
@@ -3299,10 +3565,31 @@ ${LAYOUT_CSS}`;
       if (!a || !z) return null;
       return { i, a, z };
     }
+    function silhouetteItems(ext, slice, top, height) {
+      if (slice.every((e) => runtime.isTurnActive(e))) {
+        const users = slice.map((t) => adapter.userMessage(t)).filter(Boolean);
+        const boxes = [];
+        const add = (kind, el2) => {
+          const r = el2.getBoundingClientRect();
+          boxes.push({ kind, top: r.top, bottom: r.bottom, left: r.left, right: r.right });
+        };
+        for (const u of users) add("prompt", u);
+        for (const el2 of adapter.blocks(slice).slice(0, BLOCK_CAP)) {
+          const kind = !users.some((u) => u.contains(el2)) && blockKind(el2);
+          if (kind) add(kind, el2);
+        }
+        const items = silhouette(boxes, { top, bottom: top + height });
+        if (items.length) return items;
+      }
+      return layoutBars(buildTurnModel(adapter.blocks(slice)));
+    }
     function renderMinimap(m) {
       const ext = turnExtent();
       if (!ext || overviewCard.dataset.gsCollapsed === "true") return;
-      const key = `${activeId}:${els.slice(prompts[ext.i].turnIndex, promptEnd(ext.i) + 1).map((e) => e.textContent.length).join(",")}`;
+      const slice = els.slice(prompts[ext.i].turnIndex, promptEnd(ext.i) + 1);
+      const turnBox = ext.a.getBoundingClientRect();
+      const turnPx = ext.z.getBoundingClientRect().bottom - turnBox.top;
+      const key = `${activeId}:${slice.map((e) => e.textContent.length).join(",")}:${slice.every((e) => runtime.isTurnActive(e))}:${Math.round(turnPx / 20)}:${Math.round(turnBox.width / 8)}`;
       const now = win.performance.now();
       const throttled = key !== modelKey && modelKey !== "" && modelKey.startsWith(`${activeId}:`) && now - modelBuiltAt < 500 && !forceModel;
       if (throttled && !trailing) {
@@ -3316,13 +3603,14 @@ ${LAYOUT_CSS}`;
         forceModel = false;
         modelKey = key;
         modelBuiltAt = now;
-        const model = buildTurnModel(adapter.blocks(els.slice(prompts[ext.i].turnIndex, promptEnd(ext.i) + 1)));
         bars.textContent = "";
-        for (const b of layoutBars(model)) {
+        const scale = (minimap.getBoundingClientRect().height || 220) / Math.max(turnPx, 1);
+        bars.style.setProperty("--gs-lh", `${Math.max(3, Math.min(8, 24 * scale)).toFixed(1)}px`);
+        for (const b of silhouetteItems(ext, slice, turnBox.top, turnPx)) {
           const d = doc.createElement("div");
           d.className = "gs-bar";
           d.dataset.kind = b.kind;
-          d.style.cssText = `top:${(b.top * 100).toFixed(2)}%;height:${(b.height * 100).toFixed(2)}%;width:${(b.width * 76).toFixed(1)}%`;
+          d.style.cssText = `top:${(b.top * 100).toFixed(2)}%;height:${(b.height * 100).toFixed(2)}%;left:${(b.left * 100).toFixed(2)}%;width:${(b.width * 100).toFixed(2)}%`;
           bars.append(d);
         }
       }
@@ -3381,12 +3669,15 @@ ${LAYOUT_CSS}`;
       scheduled = true;
       win.requestAnimationFrame(update);
     }
-    function scheduleLayout() {
+    function scheduleLayout(rescan = false) {
+      if (rescan === true) forceScan = true;
       if (layoutQueued || disposed) return;
       layoutQueued = true;
       win.requestAnimationFrame(() => {
         layoutQueued = false;
-        if (!disposed) layout();
+        const force = forceScan;
+        forceScan = false;
+        if (!disposed) layout(force);
       });
     }
     function refresh(index) {
@@ -3405,6 +3696,7 @@ ${LAYOUT_CSS}`;
         finishRestore();
         markActive();
       }
+      openAtLatest();
       schedule();
     }
     function select(p) {
@@ -3497,9 +3789,16 @@ ${LAYOUT_CSS}`;
       setOpen(!open);
       persist();
     });
-    for (const head of root.querySelectorAll(".gs-card-head")) {
+    on(outputsBtn, "click", (e) => {
+      e.stopPropagation();
+      outputsCollapsed = !outputsCollapsed;
+      syncOutputs(lastHost);
+      persist();
+      savePrefs();
+    });
+    for (const head of body.querySelectorAll(".gs-sec-head")) {
       on(head, "click", () => {
-        const card = head.closest(".gs-card");
+        const card = head.closest(".gs-sec");
         const collapsed = card.dataset.gsCollapsed !== "true";
         setCollapsed(card, collapsed);
         if (!collapsed) {
@@ -3508,6 +3807,7 @@ ${LAYOUT_CSS}`;
           if (card === promptsCard && listPinned) list.scrollTop = list.scrollHeight;
         }
         persist();
+        savePrefs();
       });
     }
     on(filterBtn, "click", () => {
@@ -3522,8 +3822,8 @@ ${LAYOUT_CSS}`;
         toggle.focus();
       }
     });
-    on(win, "resize", scheduleLayout);
-    on(doc, "transitionend", (e) => !root.contains(e.target) && /width|margin|padding|left|right|transform/.test(e.propertyName ?? "") && scheduleLayout(), { capture: true, passive: true });
+    on(win, "resize", () => scheduleLayout(true));
+    on(doc, "transitionend", (e) => !root.contains(e.target) && !body.contains(e.target) && /width|margin|padding|left|right|transform/.test(e.propertyName ?? "") && scheduleLayout(true), { capture: true, passive: true });
     cleanups.push(scroll.onScroll((kind) => {
       if (kind === "user") userScrolled = true;
       schedule();
@@ -3539,7 +3839,9 @@ ${LAYOUT_CSS}`;
     update();
     const api = {
       element: root,
-      state: () => ({ activeId, open, mode: root.dataset.gsMode, listPinned, query, reserve: railLayout.reserve() }),
+      state: () => ({ activeId, open, mode: root.dataset.gsMode, host: root.dataset.gsHost, outputsCollapsed, listPinned, query, reserve: railLayout.reserve() }),
+      /** Structure only, safe to expose: no ids, search text or prompts. */
+      shape: () => ({ host: root.dataset.gsHost, mode: root.dataset.gsMode, open, outputsCollapsible: !!outputsHost, outputsCollapsed, reserve: railLayout.reserve() }),
       select: (id) => {
         const p = prompts.find((x) => x.id === id);
         if (p) select(p);
@@ -3549,9 +3851,13 @@ ${LAYOUT_CSS}`;
       dispose() {
         disposed = true;
         if (trailing) win.clearTimeout(trailing);
+        if (scanTimer) win.clearTimeout(scanTimer);
         cleanups.forEach((fn) => fn());
         railLayout.dispose();
+        releaseOutputs();
+        slot?.remove();
         root.remove();
+        toggle.remove();
         style.remove();
       }
     };
@@ -3803,6 +4109,7 @@ ${LAYOUT_CSS}`;
     ({ win, adapter, diagnostics, config: config2 }) => createQueueUi({ win, adapter, diagnostics, dispatcher: selectDispatcher({ config: config2, win, adapter }) })
   );
   var railState = createRailStateStore();
+  var pane = null;
   var config = loadConfig(window.localStorage);
   var recoveryDiagnostics = createDiagnostics(window.console);
   var recovery = config.enabled && config.recovery ? createRecovery({ win: window, adapter: chatgptAdapter, diagnostics: recoveryDiagnostics }) : null;
@@ -3818,14 +4125,17 @@ ${LAYOUT_CSS}`;
     mount() {
       const runtime = createRuntime({ win: window, adapter: chatgptAdapter, backend: createTurnBackend(), queueUi });
       const rail = runtime.mode === "active" || runtime.mode === "composer-only" ? createRail({ win: window, adapter: chatgptAdapter, runtime, store: railState }) : null;
+      pane = rail;
       return {
         runtime,
         dispose() {
           rail?.dispose();
+          if (pane === rail) pane = null;
           runtime.dispose();
         }
       };
     }
   });
+  Object.defineProperty(boot.health, "pane", { enumerable: true, get: () => pane?.shape() ?? null });
   window.__ghostshipUserscripts = boot.health;
 })();

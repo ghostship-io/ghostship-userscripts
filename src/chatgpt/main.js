@@ -20,6 +20,9 @@ const queueUi = persistentQueueUi(({ win, adapter, diagnostics, config }) =>
 // Per-conversation rail state outlives each mount, so A -> B -> A restores A.
 const railState = createRailStateStore();
 
+// The mounted pane (see `health.pane`).
+let pane = null;
+
 // ChatGPT's "Could not load this conversation" card has no turns and no layout for the boot controller to wait
 // for, so recovery runs for the page's lifetime beside it (one bounded observer, a cheap check per batch).
 const config = loadConfig(window.localStorage);
@@ -40,10 +43,12 @@ const boot = createBoot({
   mount() {
     const runtime = createRuntime({ win: window, adapter: chatgptAdapter, backend: createTurnBackend(), queueUi });
     const rail = runtime.mode === "active" || runtime.mode === "composer-only" ? createRail({ win: window, adapter: chatgptAdapter, runtime, store: railState }) : null;
+    pane = rail;
     return {
       runtime,
       dispose() {
         rail?.dispose();
+        if (pane === rail) pane = null;
         runtime.dispose();
       },
     };
@@ -51,4 +56,6 @@ const boot = createBoot({
 });
 // Non-sensitive health only: build version, mode, missing selectors, counters. No conversation ids or text.
 // __GS_VERSION__ is replaced with the manifest version at build time (scripts/build.mjs).
+// Structure only (host kind, mode, whether Outputs is collapsible): lets a read-only live session check the pane without any content.
+Object.defineProperty(boot.health, "pane", { enumerable: true, get: () => pane?.shape() ?? null });
 window.__ghostshipUserscripts = boot.health;

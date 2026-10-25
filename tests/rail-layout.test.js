@@ -34,7 +34,7 @@ test("the rail's column is reserved in the page: conversation and composer never
     await fx.settle();
     const label = `${width}px wide, ${nav}px navigation`;
     const { turn, composer } = rects(fx);
-    assert.equal(q(".gs-rail").dataset.gsMode, "docked", label);
+    assert.equal(q(".gs-pane").dataset.gsMode, "docked", label);
     assert.ok(turn.right <= railLeft(fx), `${label}: conversation ends at ${turn.right}, rail starts at ${railLeft(fx)}`);
     assert.ok(composer.right <= railLeft(fx), `${label}: composer ends at ${composer.right}`);
     assert.ok(turn.width >= MIN_CONTENT, `${label}: conversation keeps ${turn.width}px`);
@@ -56,7 +56,7 @@ test("the page shifts only by what the rail needs; a wide window is left alone",
   const reserve = tight.reserve();
   assert.ok(reserve > 0 && reserve < RAIL_RESERVE, `shifted by ${reserve}px, less than the full ${RAIL_RESERVE}px`);
   assert.equal(tight.doc.body.hasAttribute("data-gs-column"), true);
-  assert.match(tight.doc.getElementById("gs-rail-style").textContent, /\[data-gs-column\]\[data-gs-column\]\{[^}]*padding-right:var\(--gs-reserve/);
+  assert.match(tight.doc.getElementById("gs-pane-style").textContent, /\[data-gs-column\]\[data-gs-column\]\{[^}]*padding-right:var\(--gs-reserve/);
 });
 
 test("narrow windows and split windows collapse the rail and leave the page untouched", async () => {
@@ -64,8 +64,8 @@ test("narrow windows and split windows collapse the rail and leave the page unto
     const fx = createFixture({ turns: 12, width, markup: "real" });
     const { q } = mount(fx);
     await fx.settle();
-    assert.equal(q(".gs-rail").dataset.gsMode, "collapsed", `${width}px`);
-    assert.equal(q(".gs-rail").dataset.gsOpen, "false", `${width}px: opens only on request`);
+    assert.equal(q(".gs-pane").dataset.gsMode, "collapsed", `${width}px`);
+    assert.equal(q(".gs-pane").dataset.gsOpen, "false", `${width}px: opens only on request`);
     assert.equal(fx.reserve(), 0);
     assert.equal(fx.doc.body.hasAttribute("data-gs-column"), false, "the page column is untouched");
     assert.equal(fx.doc.body.getAttribute("style"), null);
@@ -74,7 +74,7 @@ test("narrow windows and split windows collapse the rail and leave the page unto
   const split = createFixture({ turns: 12, width: 1100, nav: 260, markup: "real" });
   const { q } = mount(split);
   await split.settle();
-  assert.equal(q(".gs-rail").dataset.gsMode, "collapsed");
+  assert.equal(q(".gs-pane").dataset.gsMode, "collapsed");
   assert.equal(split.reserve(), 0);
   assert.ok(rects(split).turn.width >= MIN_CONTENT || split.reserve() === 0);
 });
@@ -83,21 +83,21 @@ test("opening and closing ChatGPT's sidebar, or resizing the window, re-measures
   const fx = createFixture({ turns: 20, width: 1100, markup: "real" });
   const { q } = mount(fx);
   await fx.settle();
-  assert.equal(q(".gs-rail").dataset.gsMode, "docked");
+  assert.equal(q(".gs-pane").dataset.gsMode, "docked");
   assert.ok(fx.reserve() > 0);
 
   const transition = () => Object.assign(new fx.win.Event("transitionend", { bubbles: true }), { propertyName: "width" });
   fx.setNav(260); // the sidebar opens: not enough room left for both
   fx.doc.body.dispatchEvent(transition());
   await fx.settle();
-  assert.equal(q(".gs-rail").dataset.gsMode, "collapsed");
+  assert.equal(q(".gs-pane").dataset.gsMode, "collapsed");
   assert.equal(fx.reserve(), 0);
-  assert.equal(q(".gs-rail").dataset.gsOpen, "false");
+  assert.equal(q(".gs-pane").dataset.gsOpen, "false");
 
   fx.setNav(0); // and closes again
   fx.doc.body.dispatchEvent(transition());
   await fx.settle();
-  assert.equal(q(".gs-rail").dataset.gsMode, "docked");
+  assert.equal(q(".gs-pane").dataset.gsMode, "docked");
   const settled = fx.reserve();
   assert.ok(settled > 0);
 
@@ -219,7 +219,7 @@ test("each conversation keeps its own rail state: A -> B -> A restores A, B stay
   const input = ui.q(".gs-search input");
   input.value = "about";
   input.dispatchEvent(new fx.win.Event("input"));
-  ui.q(".gs-card-overview .gs-card-head").click();
+  ui.q(".gs-sec-overview .gs-sec-head").click();
   items(fx)[10].click();
   await fx.settle();
   fx.wheel(300);
@@ -248,13 +248,13 @@ test("each conversation keeps its own rail state: A -> B -> A restores A, B stay
   ui = mount(fx, store);
   await fx.settle();
   assert.equal(items(fx).length, 12);
-  assert.doesNotMatch(ui.q(".gs-rail").textContent, /Prompt \d/, "no prompt preview of A in B");
+  assert.doesNotMatch(ui.q(".gs-pane").textContent, /Prompt \d/, "no prompt preview of A in B");
   assert.equal(ui.q(".gs-search input").value, "");
-  assert.equal(ui.q(".gs-card-overview").dataset.gsCollapsed, "false");
+  assert.equal(ui.q(".gs-sec-overview").dataset.gsCollapsed, "false");
   assert.equal(items(fx).at(-1).getAttribute("aria-current"), "true");
   ui.q(".gs-search input").value = "pears";
   ui.q(".gs-search input").dispatchEvent(new fx.win.Event("input"));
-  ui.q(".gs-card-prompts .gs-card-head").click();
+  ui.q(".gs-sec-prompts .gs-sec-head").click();
   ui.stop();
 
   // Back to A: everything is where the user left it.
@@ -264,8 +264,8 @@ test("each conversation keeps its own rail state: A -> B -> A restores A, B stay
   ui = mount(fx, store);
   await fx.settle();
   assert.equal(ui.q(".gs-search input").value, "about");
-  assert.equal(ui.q(".gs-card-overview").dataset.gsCollapsed, "true");
-  assert.equal(ui.q(".gs-card-prompts").dataset.gsCollapsed, "false");
+  assert.equal(ui.q(".gs-sec-overview").dataset.gsCollapsed, "true");
+  assert.equal(ui.q(".gs-sec-prompts").dataset.gsCollapsed, "false");
   assert.equal(items(fx).find((b) => b.getAttribute("aria-current") === "true").dataset.id, a.active);
   assert.equal(ui.q(".gs-prompts").scrollTop, a.list);
   assert.equal(fx.rawTop(), a.top, "the conversation is back at the exact scroll position");
@@ -279,10 +279,10 @@ test("each conversation keeps its own rail state: A -> B -> A restores A, B stay
   ui = mount(fx, store);
   await fx.settle();
   assert.equal(ui.q(".gs-search input").value, "pears");
-  assert.equal(ui.q(".gs-card-prompts").dataset.gsCollapsed, "true");
-  assert.equal(ui.q(".gs-card-overview").dataset.gsCollapsed, "false");
+  assert.equal(ui.q(".gs-sec-prompts").dataset.gsCollapsed, "true");
+  assert.equal(ui.q(".gs-sec-overview").dataset.gsCollapsed, "false");
   assert.equal(items(fx).length, 3, "B filters by its own search (pears), not A's");
-  assert.doesNotMatch(ui.q(".gs-rail").textContent, /Prompt \d/);
+  assert.doesNotMatch(ui.q(".gs-pane").textContent, /Prompt \d/);
   ui.stop();
 });
 
@@ -326,7 +326,7 @@ test("the composer clears the rail when it sits in an overlay inside the scrolli
     await fx.settle();
     const label = `${width}px wide, ${nav}px navigation`;
     const { turn, composer } = rects(fx);
-    assert.equal(q(".gs-rail").dataset.gsMode, "docked", label);
+    assert.equal(q(".gs-pane").dataset.gsMode, "docked", label);
     assert.ok(turn.right <= railLeft(fx), `${label}: conversation ends at ${turn.right}, rail starts at ${railLeft(fx)}`);
     assert.ok(composer.right <= railLeft(fx), `${label}: composer ends at ${composer.right}, rail starts at ${railLeft(fx)}`);
     assert.equal(composer.left, turn.left, `${label}: composer and conversation shift together`);

@@ -1,11 +1,12 @@
-// Gate (c), right rail (#628): the built userscript against fixtures. The rail's column is reserved in the
+// Gate (c), right pane (#628): the built userscript against fixtures. ChatGPT's own summary pane hosts the
+// sections when it is mounted, else one fallback pane stands in; the column is reserved once in the
 // page (never overlapping the conversation or composer), the minimap and prompt list move the real
 // scroller, each conversation keeps its own state, and none of it sends, clicks or touches the network.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createFixture, installPageGuards, runBundle } from "./harness.js";
 
-const RAIL_LEFT = (fx) => fx.win.innerWidth - 12 - 296;
+const RAIL_LEFT = (fx) => fx.win.innerWidth - 320;
 const boot = async (options = {}) => {
   const fx = createFixture({ turns: 40, markup: "real", ...options });
   const guards = installPageGuards(fx);
@@ -19,13 +20,13 @@ const dispatch = (fx, el, type, extra = {}) => el.dispatchEvent(Object.assign(ne
 
 test("layout: minimap above the prompt list, oldest first and newest last, no first/last buttons", async () => {
   const { fx, guards } = await boot({ width: 1600 });
-  const cards = [...q(fx, ".gs-rail-panel").children].map((c) => c.className.split(" ")[1]);
-  assert.deepEqual(cards, ["gs-card-overview", "gs-card-prompts"]);
+  const cards = [...q(fx, ".gs-pane-body").children].map((c) => c.className.split(" ")[1]);
+  assert.deepEqual(cards, ["gs-sec-overview", "gs-sec-prompts"]);
   const numbers = rows(fx).map((b) => +b.querySelector(".gs-n").textContent.slice(1));
   assert.deepEqual(numbers, Array.from({ length: 40 }, (_, i) => i + 1));
   assert.equal(rows(fx).at(-1).getAttribute("aria-current"), "true", "the newest prompt is active when viewing the latest");
   assert.equal(q(fx, ".gs-prompts").scrollTop, q(fx, ".gs-prompts").scrollHeight - 200, "the list rests at the newest prompt");
-  assert.doesNotMatch(q(fx, ".gs-rail").textContent, /First prompt|Last prompt/);
+  assert.doesNotMatch(q(fx, ".gs-pane").textContent, /First prompt|Last prompt/);
   assert.equal(guards.isClean(), true, JSON.stringify(guards.report()));
 });
 
@@ -35,13 +36,13 @@ test("desktop, split and mobile widths: the reserved rail column never intersect
     const turn = fx.doc.querySelector("[data-turn-key]").getBoundingClientRect();
     const composer = fx.doc.getElementById("composer").getBoundingClientRect();
     const label = `${width}px, navigation ${nav}px`;
-    assert.equal(q(fx, ".gs-rail").dataset.gsMode, mode, label);
+    assert.equal(q(fx, ".gs-pane").dataset.gsMode, mode, label);
     if (mode === "docked") {
       assert.ok(turn.right <= RAIL_LEFT(fx) && composer.right <= RAIL_LEFT(fx), `${label}: content ends at ${Math.max(turn.right, composer.right)}, rail starts at ${RAIL_LEFT(fx)}`);
       assert.ok(turn.width >= 560, `${label}: conversation keeps ${turn.width}px`);
     } else {
       assert.equal(fx.reserve(), 0, `${label}: a collapsed rail leaves the page alone`);
-      assert.equal(q(fx, ".gs-rail").dataset.gsOpen, "false");
+      assert.equal(q(fx, ".gs-pane").dataset.gsOpen, "false");
     }
     assert.equal(fx.scrollEvents.length, 0, "starting the rail does not scroll");
     assert.equal(guards.isClean(), true, JSON.stringify(guards.report()));
@@ -87,7 +88,7 @@ test("A -> B -> A: each conversation restores its own search, panel state and sc
   const input = q(fx, ".gs-search input");
   input.value = "about";
   dispatch(fx, input, "input");
-  q(fx, ".gs-card-overview .gs-card-head").click();
+  q(fx, ".gs-sec-overview .gs-sec-head").click();
   rows(fx)[12].click();
   await fx.settle();
   fx.wheel(250);
@@ -101,8 +102,8 @@ test("A -> B -> A: each conversation restores its own search, panel state and sc
   await fx.settle();
   assert.equal(rows(fx).length, 9, "B shows its own prompts");
   assert.equal(q(fx, ".gs-search input").value, "");
-  assert.equal(q(fx, ".gs-card-overview").dataset.gsCollapsed, "false");
-  assert.doesNotMatch(q(fx, ".gs-rail").textContent, /Prompt \d/, "nothing of A leaks into B");
+  assert.equal(q(fx, ".gs-sec-overview").dataset.gsCollapsed, "false");
+  assert.doesNotMatch(q(fx, ".gs-pane").textContent, /Prompt \d/, "nothing of A leaks into B");
 
   visit("/c/fixture");
   await fx.settle();
@@ -110,7 +111,7 @@ test("A -> B -> A: each conversation restores its own search, panel state and sc
   fx.setTop(fx.maxTop());
   await fx.settle();
   assert.equal(q(fx, ".gs-search input").value, "about");
-  assert.equal(q(fx, ".gs-card-overview").dataset.gsCollapsed, "true");
+  assert.equal(q(fx, ".gs-sec-overview").dataset.gsCollapsed, "true");
   assert.equal(rows(fx).find((b) => b.getAttribute("aria-current") === "true").dataset.id, a.active);
   assert.equal(fx.rawTop(), a.top, "A is back at the exact scroll position");
   assert.equal(guards.isClean(), true, JSON.stringify(guards.report()));
@@ -130,5 +131,51 @@ test("streaming and idle: the rail adds no scroll movement and no layout writes"
   assert.equal(fx.rawTop(), top);
   assert.equal(fx.scrollEvents.length, events);
   assert.equal(fx.reserve(), reserve, "the reserved column does not oscillate");
+  assert.equal(guards.isClean(), true, JSON.stringify(guards.report()));
+});
+
+test("native summary pane: one pinned pane, Outputs collapses, Sources stays, the width is reserved once; no host: one fallback that yields", async () => {
+  for (const width of [1920, 1448, 1180]) {
+    const { fx, guards, health } = await boot({ width, pane: {} });
+    const label = `${width}px`;
+    const hosts = () => [...fx.doc.querySelectorAll(".gs-pane-body")].filter((b) => !b.closest("[hidden]"));
+    assert.equal(hosts().length, 1, `${label}: exactly one pane`);
+    assert.ok(fx.pane.contains(hosts()[0]), `${label}: inside ChatGPT's own pane`);
+    assert.equal(fx.reserve(), 0, `${label}: the native pane already reserves its width`);
+    assert.deepEqual({ host: health.pane.host, outputsCollapsible: health.pane.outputsCollapsible, reserve: health.pane.reserve }, { host: "native", outputsCollapsible: true, reserve: 0 }, "the live health shows the structure only");
+    const turn = fx.doc.querySelector("[data-turn-key]").getBoundingClientRect();
+    assert.ok(turn.right <= fx.win.innerWidth - fx.paneWidth(), `${label}: the conversation clears the pane`);
+    const outputs = fx.doc.getElementById("native-outputs");
+    const toggle = q(fx, ".gs-outputs-toggle");
+    for (let i = 0; i < 3; i++) {
+      toggle.click();
+      await fx.settle();
+      assert.equal(outputs.dataset.gsCollapsed, String(i % 2 === 0), label);
+      assert.equal(fx.doc.getElementById("native-sources").hasAttribute("data-gs-collapsed"), false, "Sources is never collapsed");
+      assert.equal(hosts().length, 1);
+      assert.equal(rows(fx).at(-1).getAttribute("aria-current"), "true", "the newest prompt stays active and bottom-aligned");
+    }
+    fx.unmountPane();
+    fx.win.dispatchEvent(new fx.win.Event("resize"));
+    await fx.settle();
+    assert.equal(hosts().length, 1, `${label}: the fallback takes over, never a second pane`);
+    assert.equal(q(fx, ".gs-pane").dataset.gsHost, "fallback");
+    assert.equal(guards.isClean(), true, JSON.stringify(guards.report()));
+  }
+});
+
+test("opening a conversation: one scroll to the start of the latest prompt, then streaming never moves it; a minimap silhouette is drawn", async () => {
+  const { fx, guards, health } = await boot({ width: 1600, turns: 39 });
+  const last = fx.elements().at(-1);
+  assert.equal(fx.rawTop(), fx.topOf(last), "the start of the latest prompt is at the top of the viewport");
+  const events = fx.scrollEvents.length;
+  for (let i = 0; i < 10; i++) {
+    fx.stream(last.firstElementChild, 25);
+    fx.pageAutoscroll();
+    await fx.settle();
+  }
+  assert.equal(fx.scrollEvents.length, events, "no repeat while streaming");
+  assert.equal(health.diagnostics()["scroll.moved.open"], 1);
+  assert.ok(fx.doc.querySelectorAll(".gs-bar").length > 0, "the overview is drawn");
   assert.equal(guards.isClean(), true, JSON.stringify(guards.report()));
 });
