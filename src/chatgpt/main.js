@@ -1,16 +1,13 @@
 import { createRuntime } from "../core/runtime.js";
 import { chatgptAdapter } from "./adapter.js";
-import { DryRunDispatcher } from "./queue/dispatch.js";
+import { selectDispatcher } from "./queue/select.js";
 import { createQueueUi } from "./queue/controller.js";
 import { createRail } from "./rail/rail.js";
 import { createTurnBackend } from "./virtualization/backend.js";
 
-// No live transport exists yet: the queue always runs against the dry-run
-// dispatcher, whatever `config.dryRun` says, and the panel is labelled as such.
-const queueUi = ({ win, adapter, diagnostics, config }) => {
-  if (!config.dryRun) diagnostics.warnOnce("queue-live", "live queue transport is not available; running the queue in dry-run mode");
-  return createQueueUi({ win, adapter, diagnostics, dispatcher: new DryRunDispatcher() });
-};
+// Live by default; `config.dryRun` is an opt-in for testing (panel then shows "Dry run").
+const queueUi = ({ win, adapter, diagnostics, config }) =>
+  createQueueUi({ win, adapter, diagnostics, dispatcher: selectDispatcher({ config, win, adapter }) });
 
 const runtime = createRuntime({ win: window, adapter: chatgptAdapter, backend: createTurnBackend(), queueUi });
 if (runtime.mode === "active") createRail({ win: window, adapter: chatgptAdapter, runtime });
