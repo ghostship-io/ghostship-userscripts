@@ -189,8 +189,14 @@ export function createQueueUi({
       if (!engine || model.interrupting) return;
       const current = adapter.conversationId(win);
       if (current !== conversationId) {
-        await engine.release(conversationId).catch(() => undefined);
+        const previous = conversationId;
+        await engine.release(previous).catch(() => undefined);
         conversationId = current;
+        // A new chat's first send creates its conversation: the rest of the draft queue follows it.
+        if (previous === "new" && current !== "new") {
+          const moved = await engine.adoptAfterFirstSend(previous, current).catch(() => 0);
+          if (moved) diagnostics?.count("queue.adopted");
+        }
         model.edit = null;
       }
       const home = adapter.composer(doc);

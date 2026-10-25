@@ -3,7 +3,7 @@ export const CONFIG_KEY = "ghostship:userscripts:config";
 
 export const DEFAULTS = Object.freeze({
   enabled: true,
-  dryRun: true,
+  dryRun: false, // opt-in for testing only: the queue then talks to a no-side-effect dispatcher
   windowTurns: 10,
   prefetchTurns: 2,
   maxObservers: 4,

@@ -235,6 +235,34 @@ export class QueueEngine {
     return (await this.#acquire(conversationId)).ok;
   }
 
+  /**
+   * A new chat has no conversation id until its first send creates one. Once that send happened
+   * (an item of the draft conversation is sending, sent or awaiting review), the rest of the draft
+   * queue belongs to the conversation that send created. Moves every item and the paused flag in
+   * one transaction and returns how many items moved; 0 when no send happened (the queue then stays put).
+   */
+  adoptAfterFirstSend(from, to) {
+    return this.#serial(from, () =>
+      this.#store.transact(async (tx) => {
+        const moving = await tx.itemsOf(from);
+        const created = moving.some((i) => i.status === "sending" || i.status === "sent" || i.status === "manual-review");
+        if (!created || from === to) return 0;
+        const existing = await tx.itemsOf(to);
+        const base = existing.length ? existing[existing.length - 1].position + 1 : 0;
+        const first = moving[0].position;
+        for (const item of moving) {
+          await tx.putItem({ ...item, conversationId: to, position: base + (item.position - first), version: item.version + 1, updatedAt: this.#clock.now() });
+        }
+        const draft = await tx.getQueue(from);
+        if (draft?.paused) {
+          await tx.putQueue({ conversationId: to, paused: true });
+          await tx.putQueue({ conversationId: from, paused: false });
+        }
+        return moving.length;
+      }),
+    );
+  }
+
   release(conversationId) {
     return this.#store.transact(async (tx) => {
       const lease = await tx.getLease(conversationId);

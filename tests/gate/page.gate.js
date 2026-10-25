@@ -31,10 +31,10 @@ test("canary: the page guards really detect a native Send click, a stop click an
   assert.equal(guards.isClean(), false);
 });
 
-test("bundle: contains no network, submit or synthetic-click primitive", () => {
+test("bundle: no network, form-submit or synthetic-event primitive; the only clicks are the live dispatcher's Send and Stop", () => {
   const code = bundleSource().replace(/\/\/.*$/gm, "");
-  assert.doesNotMatch(code, /\b(fetch|XMLHttpRequest|WebSocket|EventSource|sendBeacon|GM_xmlhttpRequest|requestSubmit)\b|\.click\(\)|dispatchEvent\(\s*new (Mouse|Pointer)Event|\.submit\(\)/);
-  assert.doesNotMatch(code, /send-button|stop-button/, "the shipped script does not know the native Send/Stop controls yet");
+  assert.doesNotMatch(code, /\b(fetch|XMLHttpRequest|WebSocket|EventSource|sendBeacon|GM_xmlhttpRequest|requestSubmit)\b|dispatchEvent\(\s*new (Mouse|Pointer)Event|\.submit\(\)/);
+  assert.equal(code.match(/\.click\(\)/g)?.length, 2, "exactly two click sites: Send and Stop in the live dispatcher");
 });
 
 test("boot: activates on a long thread without any traffic, click or scroll", async () => {

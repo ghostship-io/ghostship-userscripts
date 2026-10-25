@@ -14,9 +14,10 @@ export const BOOT_DEFAULTS = Object.freeze({ maxWaitMs: 30000, settleMs: 100 });
  * @param {object} o.adapter selfCheck(doc), layout(doc, win)
  * @param {() => { runtime: object, dispose(): void }} o.mount builds one feature set; a throw is contained
  * @param {string} o.version
+ * @param {() => void} [o.onDispose] page-lifetime resources that survive restarts (the queue)
  * @param {{ setTimeout: Function, clearTimeout: Function, now(): number }} [o.timers]
  */
-export function createBoot({ win, adapter, mount, version, maxWaitMs = BOOT_DEFAULTS.maxWaitMs, settleMs = BOOT_DEFAULTS.settleMs, timers }) {
+export function createBoot({ win, adapter, mount, version, onDispose, maxWaitMs = BOOT_DEFAULTS.maxWaitMs, settleMs = BOOT_DEFAULTS.settleMs, timers }) {
   const doc = win.document;
   const t = timers ?? {
     setTimeout: (fn, ms) => win.setTimeout(fn, ms),
@@ -203,6 +204,7 @@ export function createBoot({ win, adapter, mount, version, maxWaitMs = BOOT_DEFA
       win.removeEventListener("hashchange", onRoute);
       for (const name of ["pushState", "replaceState"]) if (history[name] === originals[name + "Wrapped"]) history[name] = originals[name];
       teardown();
+      onDispose?.();
     },
   };
 }

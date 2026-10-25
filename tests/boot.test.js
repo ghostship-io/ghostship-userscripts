@@ -6,6 +6,11 @@ import { createRuntime } from "../src/core/runtime.js";
 import { chatgptAdapter } from "../src/chatgpt/adapter.js";
 import { createTurnBackend } from "../src/chatgpt/virtualization/backend.js";
 import { createRail } from "../src/chatgpt/rail/rail.js";
+import { IDBFactory } from "fake-indexeddb";
+import { DryRunDispatcher } from "../src/chatgpt/queue/dispatch.js";
+import { createQueueUi } from "../src/chatgpt/queue/controller.js";
+import { persistentQueueUi } from "../src/chatgpt/queue/persistent.js";
+import { ManualClock, until } from "./queue-helpers.js";
 
 /** Manual timers so the debounce and the give-up cap are deterministic. */
 function manualTimers() {
@@ -34,7 +39,7 @@ function manualTimers() {
   };
 }
 
-function setup(fx, { maxWaitMs = 30000 } = {}) {
+function setup(fx, { maxWaitMs = 30000, queueUi: customQueueUi } = {}) {
   const timers = manualTimers();
   const log = { mounts: 0, queue: 0, queueDisposed: 0, warnings: [] };
   fx.win.console.warn = (m) => log.warnings.push(m);
@@ -51,10 +56,12 @@ function setup(fx, { maxWaitMs = 30000 } = {}) {
       return super.disconnect();
     }
   };
-  const queueUi = () => {
-    log.queue++;
-    return { dispose: () => log.queueDisposed++ };
-  };
+  const queueUi =
+    customQueueUi ??
+    (() => {
+      log.queue++;
+      return { dispose: () => log.queueDisposed++ };
+    });
   const layoutCalls = { n: 0 };
   const adapter = Object.create(chatgptAdapter);
   adapter.layout = (...a) => (layoutCalls.n++, chatgptAdapter.layout.call(adapter, ...a));
@@ -276,4 +283,115 @@ test("health reports version, mode and missing selectors without conversation id
   assert.doesNotMatch(text, /dddddddd/);
   assert.equal(health.version, "9.9.9");
   assert.ok(["active", "composer-only", "waiting", "safe", "off"].includes(health.mode));
+});
+
+test("queue survives the new-chat first send: route change and turns remount the page features, not the queue", async () => {
+  const fx = createFixture({ turns: 0, width: 1600 });
+  fx.win.history.replaceState(null, "", "/");
+  const clock = new ManualClock();
+  const dispatcher = new DryRunDispatcher();
+  const submitted = [];
+  const realSubmit = dispatcher.submit.bind(dispatcher);
+  dispatcher.submit = async (request) => {
+    submitted.push(request.text);
+    if (submitted.length === 1) {
+      // What ChatGPT does on the first send of a new chat: the URL gains an id and turns render.
+      fx.win.history.pushState({}, "", "/c/eeeeeeee-0000-0000-0000-000000000005");
+      fx.addTurn();
+    }
+    const result = await realSubmit(request);
+    dispatcher.state = "idle"; // the reply finished
+    return result;
+  };
+  let created = 0;
+  let queueDiagnostics = null;
+  const queueUi = persistentQueueUi((ctx) => {
+    created++;
+    queueDiagnostics = ctx.diagnostics;
+    return createQueueUi({ win: ctx.win, adapter: ctx.adapter, diagnostics: ctx.diagnostics, dispatcher, indexedDB: new IDBFactory(), clock, tabId: "tab-1", pollMs: 0 });
+  });
+  const { boot, health, flush, log } = setup(fx, { queueUi });
+  assert.equal(health.mode, "composer-only");
+  const panel = fx.doc.querySelector("[data-gs-queue]");
+  assert.ok(panel, "queue panel mounted in the new chat");
+
+  const add = async (text) => {
+    const input = panel.querySelector('[data-gs-key="add:input"]');
+    input.value = text;
+    input.dispatchEvent(new fx.win.Event("input", { bubbles: true }));
+    panel.querySelector('[data-gs-key="add:submit"]').click();
+    await boot.runtime().queue.settled();
+  };
+  const step = async () => {
+    const { queue } = boot.runtime();
+    await queue.tick();
+    await queue.settled();
+  };
+  await boot.runtime().queue.ready;
+  await boot.runtime().queue.settled();
+  const names = () => [...panel.querySelectorAll(".gs-q-item")].map((li) => li.querySelector(".gs-q-name")?.textContent ?? "");
+  await add("first");
+  await add("second");
+  assert.deepEqual(names(), ["first", "second"]);
+
+  // First pass sends "first"; the page navigates to the new conversation and renders its turns.
+  await step();
+  assert.deepEqual(submitted, ["first"]);
+  await flush(); // boot notices the route change and the new turns and rebuilds the page features
+  assert.equal(health.mode, "active");
+  assert.ok(log.mounts >= 2, "page features were re-initialized");
+  assert.equal(created, 1, "the queue was not re-created");
+  assert.equal(fx.doc.querySelector("[data-gs-queue]"), panel, "same panel, not rebuilt");
+  assert.equal(panel.nextElementSibling, chatgptAdapter.composer(fx.doc));
+
+  // Next passes follow the navigation, adopt the draft queue and send the second message exactly once.
+  clock.advance(5000);
+  await step();
+  await until(() => submitted.length >= 2);
+  for (let i = 0; i < 3; i++) {
+    clock.advance(5000);
+    await step();
+  }
+  assert.deepEqual(submitted, ["first", "second"], "each message dispatched exactly once");
+  assert.equal(dispatcher.log.filter((e) => e.type === "submit").length, 2);
+  assert.equal(queueDiagnostics.snapshot()["queue.adopted"], 1, "the draft queue followed the new conversation");
+  boot.dispose();
+});
+
+test("while running, streaming mutations cost no script DOM writes and a bounded number of cheap layout checks", async () => {
+  const fx = createFixture({ turns: 25, width: 1600 });
+  const { health, flush, layoutCalls } = setup(fx);
+  await flush();
+  assert.equal(health.mode, "active");
+
+  // Count selector work the boot tick performs.
+  const Doc = fx.win.Document.prototype;
+  const queries = { n: 0 };
+  const realQ = Doc.querySelector;
+  const realQA = Doc.querySelectorAll;
+  Doc.querySelector = function (...a) { queries.n++; return realQ.apply(this, a); };
+  Doc.querySelectorAll = function (...a) { queries.n++; return realQA.apply(this, a); };
+
+  const own = [];
+  const mo = new fx.win.MutationObserver((records) => own.push(...records));
+  mo.observe(fx.doc.documentElement, { childList: true, subtree: true, attributes: true, characterData: true });
+  const target = fx.thread.lastElementChild.firstElementChild;
+  const BURST = 300;
+  const before = layoutCalls.n;
+  for (let i = 0; i < BURST; i++) target.append(fx.doc.createTextNode("tok "));
+  await fx.settle();
+  // Everything recorded so far is the test's own writes; let the debounced tick and the page features react.
+  await flush();
+  await fx.settle();
+  Doc.querySelector = realQ;
+  Doc.querySelectorAll = realQA;
+  // Boot itself writes nothing. The rail may refresh the minimap of the growing turn (its visible job), but only there and rarely.
+  const outside = own.filter((r) => !(r.type === "childList" && r.target === target) && !r.target.closest?.(".gs-minimap") && !r.target.closest?.(".gs-caption") && !r.target.classList?.contains("gs-caption"));
+  assert.deepEqual(outside.map((r) => `${r.type}:${r.target.className || r.target.tagName}`), [], "no script writes outside the minimap");
+  assert.equal(health.diagnostics()["boot.restart"], undefined, "streaming never restarts the page features");
+  const rebuilds = own.filter((r) => r.target.classList?.contains("gs-bars") && r.removedNodes.length > 0).length;
+  assert.ok(rebuilds <= 2, `minimap rebuilds during the burst: ${rebuilds}`);
+  assert.ok(layoutCalls.n - before <= 3, `layout checks: ${layoutCalls.n - before}`);
+  assert.ok(queries.n < 400, `selector calls during the whole burst: ${queries.n}`);
+  mo.disconnect();
 });

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GhostShip ChatGPT
 // @namespace    https://github.com/ghostship-io/ghostship-userscripts
-// @version      0.5.2
+// @version      0.6.1
 // @description  Fast, queue-aware ChatGPT interface for the owner browser.
 // @match        https://chatgpt.com/*
 // @grant        none
@@ -32,7 +32,7 @@
 
   // src/core/boot.js
   var BOOT_DEFAULTS = Object.freeze({ maxWaitMs: 3e4, settleMs: 100 });
-  function createBoot({ win, adapter, mount, version, maxWaitMs = BOOT_DEFAULTS.maxWaitMs, settleMs = BOOT_DEFAULTS.settleMs, timers }) {
+  function createBoot({ win, adapter, mount, version, onDispose, maxWaitMs = BOOT_DEFAULTS.maxWaitMs, settleMs = BOOT_DEFAULTS.settleMs, timers }) {
     const doc = win.document;
     const t = timers ?? {
       setTimeout: (fn, ms) => win.setTimeout(fn, ms),
@@ -200,6 +200,7 @@
         win.removeEventListener("hashchange", onRoute);
         for (const name of ["pushState", "replaceState"]) if (history[name] === originals[name + "Wrapped"]) history[name] = originals[name];
         teardown();
+        onDispose?.();
       }
     };
   }
@@ -208,7 +209,8 @@
   var CONFIG_KEY = "ghostship:userscripts:config";
   var DEFAULTS = Object.freeze({
     enabled: true,
-    dryRun: true,
+    dryRun: false,
+    // opt-in for testing only: the queue then talks to a no-side-effect dispatcher
     windowTurns: 10,
     prefetchTurns: 2,
     maxObservers: 4,
@@ -711,12 +713,19 @@
   var USER = '[data-message-author-role="user"], [data-user-message-bubble]';
   var REPLY = "[data-conversation-role]";
   var COMPOSER = '#prompt-textarea, [data-chatgpt-composer] [contenteditable="true"], form [contenteditable="true"][role="textbox"]';
+  var SEND = 'button[data-testid="send-button"]';
+  var STOP = 'button[data-testid="stop-button"]';
   var SCROLLER = "[data-scroll-root], [data-app-action-timeline-scroll]";
   var nonEmptyRole = (el2, sel, attr) => (el2.matches(sel) ? el2 : el2.querySelector(sel))?.getAttribute(attr) || null;
   var chatgptAdapter = {
     turns: (root) => [...root.querySelectorAll(TURN)],
     role: (turn) => nonEmptyRole(turn, ROLE, "data-message-author-role") ?? (turn.querySelector("[data-user-message-bubble]") ? "user" : nonEmptyRole(turn, REPLY, "data-conversation-role")),
     blocks: (turnEls) => turnEls.flatMap((el2) => [...el2.querySelectorAll(BLOCKS)]),
+    // Queue transport (live dispatcher): the editable composer input and its Send/Stop buttons.
+    composerInput: (doc) => doc.querySelector(COMPOSER),
+    sendButton: (doc) => doc.querySelector(SEND),
+    stopButton: (doc) => doc.querySelector(STOP),
+    userTurnCount: (doc) => doc.querySelectorAll(USER).length,
     userMessage: (turn) => turn.querySelector(USER),
     turnId: (turn, index) => turn.getAttribute("data-turn-key") ?? turn.getAttribute("data-testid") ?? `turn-${index}`,
     /** The stable element whose subtree contains every turn; observed for new turns. */
@@ -861,6 +870,93 @@
     if (outcome === "hang") return new Promise(() => void 0);
     if (outcome instanceof Error) throw outcome;
     return outcome;
+  }
+
+  // src/chatgpt/queue/live-dispatcher.js
+  var norm = (text) => text.replace(/\s+/g, " ").trim();
+  function createLiveDispatcher({ win, adapter, pollMs = 50, buttonWaitMs = 2e3, ackMs = 5e3, stopWaitMs = 5e3 }) {
+    const doc = win.document;
+    const clicked = /* @__PURE__ */ new Set();
+    const waitFor = (probe, ms) => new Promise((resolve) => {
+      const started = Date.now();
+      const poll = () => {
+        const hit = probe();
+        if (hit) return resolve(hit);
+        if (Date.now() - started >= ms) return resolve(null);
+        win.setTimeout(poll, pollMs);
+      };
+      poll();
+    });
+    const isField = (el2) => el2.tagName === "TEXTAREA" || el2.tagName === "INPUT";
+    const read = (el2) => norm(isField(el2) ? el2.value : el2.textContent ?? "");
+    function write(el2, text) {
+      el2.focus?.();
+      if (isField(el2)) {
+        const proto = el2.tagName === "TEXTAREA" ? win.HTMLTextAreaElement.prototype : win.HTMLInputElement.prototype;
+        Object.getOwnPropertyDescriptor(proto, "value").set.call(el2, text);
+        el2.dispatchEvent(new win.Event("input", { bubbles: true }));
+        return true;
+      }
+      const selection = win.getSelection();
+      const range = doc.createRange();
+      range.selectNodeContents(el2);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      return text === "" ? doc.execCommand("delete") : doc.execCommand("insertText", false, text);
+    }
+    const reject = (code, message, retryable = true) => ({ kind: "rejected", code, message, retryable });
+    const generating = () => Boolean(adapter.stopButton(doc));
+    return {
+      async readState() {
+        if (!adapter.composerInput(doc)) return "unknown";
+        return generating() ? "generating" : "idle";
+      },
+      async submit({ itemId, text, attachments }) {
+        if (clicked.has(itemId)) {
+          return { kind: "uncertain", code: "already-attempted", message: "This message was already submitted from this page." };
+        }
+        if (attachments.length) {
+          return reject("attachments-unsupported", "Messages with attachments cannot be sent by the queue yet.", false);
+        }
+        const input = adapter.composerInput(doc);
+        if (!input) return reject("composer-missing", "The ChatGPT composer was not found; nothing was sent.");
+        if (generating()) return reject("busy", "A response is still streaming; nothing was sent.");
+        if (read(input) !== "") return reject("composer-not-empty", "The composer holds a draft; it was left untouched and nothing was sent.");
+        const abandon = (code, message) => {
+          write(input, "");
+          return reject(code, message);
+        };
+        if (!write(input, text) || read(input) !== norm(text)) {
+          return abandon("composer-fill-failed", "The text could not be placed in the composer; nothing was sent.");
+        }
+        const send = await waitFor(() => {
+          const button2 = adapter.sendButton(doc);
+          return button2 && !button2.disabled ? button2 : null;
+        }, buttonWaitMs);
+        if (!send) return abandon("send-button-missing", "The Send button was not found or stayed disabled; nothing was sent.");
+        if (generating()) return abandon("busy", "A response started streaming; nothing was sent.");
+        const turnsBefore = adapter.userTurnCount(doc);
+        clicked.add(itemId);
+        send.click();
+        const evidence = await waitFor(
+          () => adapter.userTurnCount(doc) > turnsBefore || generating() || read(input) === "",
+          ackMs
+        );
+        return evidence ? { kind: "accepted" } : { kind: "uncertain", code: "submit-unacknowledged", message: "Send was clicked but ChatGPT showed no sign of accepting it." };
+      },
+      async stop() {
+        const button2 = adapter.stopButton(doc);
+        if (!button2) return { kind: "failed", code: "stop-button-missing", message: "The Stop control was not found." };
+        button2.click();
+        const gone = await waitFor(() => !adapter.stopButton(doc), stopWaitMs);
+        return gone ? { kind: "confirmed" } : { kind: "ambiguous", code: "stop-unconfirmed", message: "Stop was clicked but the response did not end." };
+      }
+    };
+  }
+
+  // src/chatgpt/queue/select.js
+  function selectDispatcher({ config, win, adapter }) {
+    return config.dryRun ? new DryRunDispatcher() : createLiveDispatcher({ win, adapter });
   }
 
   // src/chatgpt/queue/types.js
@@ -1093,6 +1189,34 @@
     /** Renews the lease; call periodically while this tab is the active sender. */
     async heartbeat(conversationId) {
       return (await this.#acquire(conversationId)).ok;
+    }
+    /**
+     * A new chat has no conversation id until its first send creates one. Once that send happened
+     * (an item of the draft conversation is sending, sent or awaiting review), the rest of the draft
+     * queue belongs to the conversation that send created. Moves every item and the paused flag in
+     * one transaction and returns how many items moved; 0 when no send happened (the queue then stays put).
+     */
+    adoptAfterFirstSend(from, to) {
+      return this.#serial(
+        from,
+        () => this.#store.transact(async (tx) => {
+          const moving = await tx.itemsOf(from);
+          const created = moving.some((i) => i.status === "sending" || i.status === "sent" || i.status === "manual-review");
+          if (!created || from === to) return 0;
+          const existing = await tx.itemsOf(to);
+          const base = existing.length ? existing[existing.length - 1].position + 1 : 0;
+          const first = moving[0].position;
+          for (const item of moving) {
+            await tx.putItem({ ...item, conversationId: to, position: base + (item.position - first), version: item.version + 1, updatedAt: this.#clock.now() });
+          }
+          const draft = await tx.getQueue(from);
+          if (draft?.paused) {
+            await tx.putQueue({ conversationId: to, paused: true });
+            await tx.putQueue({ conversationId: from, paused: false });
+          }
+          return moving.length;
+        })
+      );
     }
     release(conversationId) {
       return this.#store.transact(async (tx) => {
@@ -1837,8 +1961,13 @@
         if (!engine || model.interrupting) return;
         const current = adapter.conversationId(win);
         if (current !== conversationId) {
-          await engine.release(conversationId).catch(() => void 0);
+          const previous = conversationId;
+          await engine.release(previous).catch(() => void 0);
           conversationId = current;
+          if (previous === "new" && current !== "new") {
+            const moved = await engine.adoptAfterFirstSend(previous, current).catch(() => 0);
+            if (moved) diagnostics?.count("queue.adopted");
+          }
           model.edit = null;
         }
         const home = adapter.composer(doc);
@@ -1896,6 +2025,21 @@
     return message ? { message, action: "" } : null;
   }
   var CSS_ESCAPE = (value) => value.replace(/["\\]/g, "\\$&");
+
+  // src/chatgpt/queue/persistent.js
+  function persistentQueueUi(create) {
+    let shared = null;
+    const mount = (ctx) => {
+      if (!shared?.mounted) shared = create(ctx);
+      return { ...shared, dispose() {
+      } };
+    };
+    mount.shutdown = () => {
+      shared?.dispose();
+      shared = null;
+    };
+    return mount;
+  }
 
   // src/chatgpt/rail/minimap-model.js
   var HEADING = /^H[1-6]$/;
@@ -2055,6 +2199,9 @@
     let listPinned = true;
     let listManual = false;
     let modelKey = "";
+    let modelBuiltAt = -Infinity;
+    let forceModel = false;
+    let trailing = null;
     let scheduled = false;
     let disposed = false;
     let drag = false;
@@ -2105,8 +2252,8 @@
     };
     function setOpen(next) {
       open = next;
-      root.dataset.gsOpen = String(next);
-      toggle.setAttribute("aria-expanded", String(next));
+      if (root.dataset.gsOpen !== String(next)) root.dataset.gsOpen = String(next);
+      if (toggle.getAttribute("aria-expanded") !== String(next)) toggle.setAttribute("aria-expanded", String(next));
     }
     function layout() {
       const first = els[0];
@@ -2118,7 +2265,8 @@
       else if (was === "docked") setOpen(false);
       const composer = adapter.composer(doc);
       const rect = composer?.getBoundingClientRect();
-      root.style.setProperty("--gs-rail-bottom", rect?.height ? `${Math.max(16, Math.round(win.innerHeight - rect.top + 8))}px` : "96px");
+      const bottom = rect?.height ? `${Math.max(16, Math.round(win.innerHeight - rect.top + 8))}px` : "96px";
+      if (root.style.getPropertyValue("--gs-rail-bottom") !== bottom) root.style.setProperty("--gs-rail-bottom", bottom);
     }
     function promptEnd(i) {
       return (prompts[i + 1]?.turnIndex ?? els.length) - 1;
@@ -2214,8 +2362,19 @@
       const ext = turnExtent();
       if (!ext || overviewCard.dataset.gsCollapsed === "true") return;
       const key = `${activeId}:${els.slice(prompts[ext.i].turnIndex, promptEnd(ext.i) + 1).map((e) => e.textContent.length).join(",")}`;
-      if (key !== modelKey) {
+      const now = win.performance.now();
+      const throttled = key !== modelKey && modelKey !== "" && modelKey.startsWith(`${activeId}:`) && now - modelBuiltAt < 500 && !forceModel;
+      if (throttled && !trailing) {
+        trailing = win.setTimeout(() => {
+          trailing = null;
+          forceModel = true;
+          schedule();
+        }, 500);
+      }
+      if (key !== modelKey && !throttled) {
+        forceModel = false;
         modelKey = key;
+        modelBuiltAt = now;
         const model = buildTurnModel(adapter.blocks(els.slice(prompts[ext.i].turnIndex, promptEnd(ext.i) + 1)));
         bars.textContent = "";
         for (const b of layoutBars(model)) {
@@ -2239,8 +2398,8 @@
       if (ind) {
         view.style.top = `${(ind.top * 100).toFixed(2)}%`;
         view.style.height = `${(ind.height * 100).toFixed(2)}%`;
-        const now = String(Math.round(ind.top * 100));
-        if (minimap.getAttribute("aria-valuenow") !== now) minimap.setAttribute("aria-valuenow", now);
+        const now2 = String(Math.round(ind.top * 100));
+        if (minimap.getAttribute("aria-valuenow") !== now2) minimap.setAttribute("aria-valuenow", now2);
       }
     }
     function scrollerHeight() {
@@ -2416,6 +2575,7 @@
       update,
       dispose() {
         disposed = true;
+        if (trailing) win.clearTimeout(trailing);
         cleanups.forEach((fn) => fn());
         root.remove();
         style.remove();
@@ -2662,14 +2822,14 @@
   }
 
   // src/chatgpt/main.js
-  var queueUi = ({ win, adapter, diagnostics, config }) => {
-    if (!config.dryRun) diagnostics.warnOnce("queue-live", "live queue transport is not available; running the queue in dry-run mode");
-    return createQueueUi({ win, adapter, diagnostics, dispatcher: new DryRunDispatcher() });
-  };
+  var queueUi = persistentQueueUi(
+    ({ win, adapter, diagnostics, config }) => createQueueUi({ win, adapter, diagnostics, dispatcher: selectDispatcher({ config, win, adapter }) })
+  );
   var boot = createBoot({
     win: window,
     adapter: chatgptAdapter,
-    version: "0.5.2",
+    version: "0.6.1",
+    onDispose: () => queueUi.shutdown(),
     mount() {
       const runtime = createRuntime({ win: window, adapter: chatgptAdapter, backend: createTurnBackend(), queueUi });
       const rail = runtime.mode === "active" || runtime.mode === "composer-only" ? createRail({ win: window, adapter: chatgptAdapter, runtime }) : null;

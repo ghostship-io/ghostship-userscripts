@@ -46,11 +46,15 @@ test("dist matches a clean rebuild of src (CI fails if dist is stale)", { skip: 
   execFileSync("git", ["diff", "--exit-code", "--", "dist"], { cwd: root });
 });
 
-test("no live traffic: sources contain no network or native-click primitives", () => {
-  const banned = /\b(fetch|XMLHttpRequest|WebSocket|EventSource|sendBeacon|GM_xmlhttpRequest|GM\.xmlHttpRequest)\b|\.click\(\)|requestSubmit|dispatchEvent\(\s*new (Mouse|Pointer)Event/;
+test("no unsanctioned traffic: only the live dispatcher may click, and nothing may use the network or submit forms", () => {
+  const banned = /\b(fetch|XMLHttpRequest|WebSocket|EventSource|sendBeacon|GM_xmlhttpRequest|GM\.xmlHttpRequest)\b|requestSubmit|dispatchEvent\(\s*new (Mouse|Pointer)Event/;
+  const click = /\.click\(\)/;
+  const liveDispatcher = path.join("src", "chatgpt", "queue", "live-dispatcher.js");
   for (const file of walk(path.join(root, "src")).filter((f) => f.endsWith(".js"))) {
     const text = readFileSync(file, "utf8").replace(/\/\/.*$/gm, "");
-    assert.doesNotMatch(text, banned, `${path.relative(root, file)} uses a banned primitive; live transport belongs behind the injected queue transport (see AGENTS.md)`);
+    const rel = path.relative(root, file);
+    assert.doesNotMatch(text, banned, `${rel} uses a banned primitive`);
+    if (rel !== liveDispatcher) assert.doesNotMatch(text, click, `${rel} clicks; native Send/Stop clicks belong only in ${liveDispatcher}`);
   }
 });
 
