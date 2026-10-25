@@ -42,6 +42,8 @@ export class QueueEngine {
         conversationId,
         text: input.text,
         attachments,
+        // The model the message will use, when the page could tell at queue time.
+        model: input.model ?? null,
         status: "pending",
         position: items.length ? items[items.length - 1].position + 1 : 0,
         version: 1,
@@ -154,11 +156,12 @@ export class QueueEngine {
     });
   }
 
-  clearSent(conversationId) {
+  /** Removes every message except one being sent (its outcome is still unrecorded). */
+  clear(conversationId) {
     return this.#store.transact(async (tx) => {
-      const sent = (await tx.itemsOf(conversationId)).filter((i) => i.status === "sent");
-      for (const item of sent) await tx.deleteItem(item.id);
-      return sent.length;
+      const removable = (await tx.itemsOf(conversationId)).filter((i) => i.status !== "sending");
+      for (const item of removable) await tx.deleteItem(item.id);
+      return removable.length;
     });
   }
 

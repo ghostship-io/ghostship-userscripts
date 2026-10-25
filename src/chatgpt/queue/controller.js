@@ -40,7 +40,18 @@ export function createQueueUi({
   }
 
   let conversationId = adapter.conversationId(win);
-  const model = { items: [], paused: false, interrupting: false, error: null, note: null, edit: null, draft: "", dryRun: dispatcher.dryRun === true };
+  const model = {
+    items: [],
+    paused: false,
+    interrupting: false,
+    error: null,
+    note: null,
+    edit: null,
+    draft: "",
+    collapsed: false,
+    confirmClear: false,
+    dryRun: dispatcher.dryRun === true,
+  };
   let engine = null;
   let store = null;
   let disposed = false;
@@ -74,16 +85,16 @@ export function createQueueUi({
   // inputs, so the background poll only repaints when something visible changed.
   let painted = null;
   function render(focusKey) {
-    const { items, paused, interrupting, error, note, edit, dryRun } = model;
-    const signature = JSON.stringify({ items, paused, interrupting, error, note, dryRun, editing: edit?.id ?? null });
+    const { items, paused, interrupting, error, note, edit, dryRun, collapsed, confirmClear } = model;
+    const signature = JSON.stringify({ items, paused, interrupting, error, note, dryRun, collapsed, confirmClear, editing: edit?.id ?? null });
     if (signature === painted && !focusKey) return;
     painted = signature;
     const active = doc.activeElement;
     const key = focusKey ?? (root.contains(active) ? active.getAttribute("data-gs-key") : null);
     renderPanel(doc, root, model, handlers);
     if (!key) return;
-    const target = root.querySelector(`[data-gs-key="${CSS_ESCAPE(key)}"]`) ?? root.querySelector("button:not(:disabled)");
-    target?.focus({ preventScroll: true });
+    const wanted = root.querySelector(`[data-gs-key="${CSS_ESCAPE(key)}"]`);
+    (wanted && !wanted.disabled ? wanted : root.querySelector("button:not(:disabled)"))?.focus({ preventScroll: true });
   }
 
   async function reload() {
@@ -97,6 +108,7 @@ export function createQueueUi({
   const act = (fn, focusKey) =>
     run(async () => {
       model.error = null;
+      model.confirmClear = false;
       await fn();
       await reload();
       if (focusKey) render(focusKey);
@@ -112,7 +124,9 @@ export function createQueueUi({
     add: (text) => {
       if (!text.trim()) return;
       model.draft = "";
-      return act(() => engine.enqueue(conversationId, { text }), "add:input");
+      // The model is stamped when the page can tell; otherwise the row simply shows no chip.
+      const modelName = adapter.currentModel?.(doc) ?? null;
+      return act(() => engine.enqueue(conversationId, { text, model: modelName }), "add:input");
     },
     startEdit: (item) => {
       model.edit = { id: item.id, text: item.text };
@@ -132,11 +146,29 @@ export function createQueueUi({
     remove: (id) => act(() => engine.remove(id), "add:input"),
     retry: (id) => act(() => engine.retry(id)),
     markDelivered: (id) => act(() => engine.markDelivered(id)),
-    clearSent: () => act(() => engine.clearSent(conversationId)),
+    toggleCollapsed: () => {
+      model.collapsed = !model.collapsed;
+      model.confirmClear = false;
+      render("head:toggle");
+    },
+    // Clearing discards drafts, so it takes a second press.
+    clear() {
+      if (!model.confirmClear) {
+        model.confirmClear = true;
+        render("head:clear");
+        return;
+      }
+      return act(() => engine.clear(conversationId), "head:clear");
+    },
+    disarmClear: () => {
+      model.confirmClear = false;
+      render("head:clear");
+    },
     togglePause: () => act(() => (model.paused ? engine.resume(conversationId) : engine.pause(conversationId))),
     interrupt() {
       model.interrupting = true;
       model.error = null;
+      model.confirmClear = false;
       render("head:interrupt");
       return run(async () => {
         try {

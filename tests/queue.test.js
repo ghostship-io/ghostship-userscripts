@@ -436,3 +436,22 @@ describe("ambiguous delivery", () => {
     assert.equal((await engine.list(CONV)).items[0].status, "pending");
   });
 });
+
+describe("clear", () => {
+  it("removes everything except a message whose send is still in flight", async () => {
+    // Defect: clearing the queue deletes an item mid-send, losing track of an uncertain delivery.
+    const w = new World();
+    const { engine } = await w.tab("A");
+    await engine.enqueue(CONV, { text: "a" });
+    await engine.enqueue(CONV, { text: "b" });
+    w.dispatcher.submitScript = ["hang"];
+    const sending = engine.step(CONV);
+    await until(() => w.dispatcher.log.length === 1);
+    assert.equal(await engine.clear(CONV), 1);
+    assert.deepEqual(await texts({ engine }), ["a:sending"]);
+    w.clock.advance(10_000);
+    await sending;
+    assert.equal(await engine.clear(CONV), 1);
+    assert.deepEqual(await texts({ engine }), []);
+  });
+});
