@@ -363,3 +363,40 @@ test("detection is structural: disclosure-button titles and unlabeled regions wo
   assert.equal(flat.doc.querySelectorAll("[data-gs-outputs]").length, 0);
   m.stop();
 });
+
+test("the real pane's markup is found: data-summary-panel hints, plain-element titles, a thread with other sections", async () => {
+  const attrs = { "data-summary-panel-variant": "dynamic-isle", "data-summary-panel-density": "comfortable" };
+  const plain = `<div><div class="card"><div class="t"><span>Scheduled</span></div><div class="b"><a href="#t">Task</a></div></div><section id="native-outputs"><div class="sec-head"><div><span>Outputs</span></div></div><div class="empty">No outputs yet</div></section></div>`;
+  const fx = createFixture({ turns: 12, width: 1700, markup: "real", pane: { tag: "div", attrs, html: plain } });
+  const { q, stop } = mount(fx);
+  await fx.settle();
+  const host = chatgptAdapter.nativeSummary(fx.doc);
+  assert.ok(host && host.pane === fx.pane, "the hinted pane is the native pane");
+  assert.ok(host.outputs, "its Outputs section is found by its plain title");
+  assert.equal(varOf(fx, "minimap", "--gs-right"), fx.paneWidth() + PANEL_GAP, "the minimap sits beside it, not over it");
+  q(".gs-outputs-toggle").click();
+  assert.equal(outputs(fx).dataset.gsCollapsed, "true");
+  stop();
+
+  // Only sections we do not know: the hinted pane still anchors the minimap.
+  const other = createFixture({ turns: 12, width: 1700, markup: "real", pane: { tag: "div", attrs, html: `<div><div class="card"><span>Scheduled</span></div></div>` } });
+  const m = mount(other);
+  await other.settle();
+  const found = chatgptAdapter.nativeSummary(other.doc);
+  assert.ok(found && found.pane === other.pane && found.outputs === null);
+  assert.equal(varOf(other, "minimap", "--gs-right"), other.paneWidth() + PANEL_GAP);
+  m.stop();
+
+  // Without the hint and without a region, unrelated markup is still not a summary pane.
+  const none = createFixture({ turns: 12, width: 1700, markup: "real", pane: { tag: "div", html: plain } });
+  assert.equal(chatgptAdapter.nativeSummary(none.doc), null);
+});
+
+test("a project thread route (/g/<project>/c/<id>) is its own conversation, never 'new'", () => {
+  const at = (pathname) => chatgptAdapter.conversationId({ location: { pathname } });
+  assert.equal(at("/c/abc-123"), "abc-123");
+  assert.equal(at("/g/g-p-123-proj/c/abc-123"), "abc-123");
+  assert.equal(at("/"), "new");
+  assert.equal(at("/g/g-p-123-proj/project"), "new");
+  assert.equal(at("/gpts"), "new");
+});

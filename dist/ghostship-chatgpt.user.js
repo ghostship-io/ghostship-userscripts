@@ -765,9 +765,10 @@
   var scope = (root) => root.nodeType === 9 ? root.querySelector(ACTIVE_PAGE) ?? root : root;
   var SUMMARY_TITLE = /^(outputs?|sources?)$/i;
   var HEADINGS = 'h1,h2,h3,h4,h5,h6,[role="heading"]';
-  var SUMMARY_REGION = 'aside,[role="complementary"],[role="region"],[aria-label*="summary" i],[data-testid*="summary" i]';
+  var SUMMARY_HINT = "[data-summary-panel-variant],[data-summary-panel-density]";
+  var SUMMARY_REGION = `aside,[role="complementary"],[role="region"],[aria-label*="summary" i],[data-testid*="summary" i],${SUMMARY_HINT}`;
   var BUTTONS = 'button,[role="button"]';
-  var BUTTON_REGION = 'aside,[role="complementary"],[role="region"]';
+  var BUTTON_REGION = `aside,[role="complementary"],[role="region"],${SUMMARY_HINT}`;
   var OWN_UI = "[data-gs-ui]";
   var commonAncestor = (a, b) => {
     for (let el2 = a; el2; el2 = el2.parentElement) if (el2.contains(b)) return el2;
@@ -783,6 +784,15 @@
   var LOAD_ERROR = /could not load this chatgpt conversation/i;
   var RETRY_LABEL = /^try again$/i;
   var nonEmptyRole = (el2, sel, attr) => (el2.matches(sel) ? el2 : el2.querySelector(sel))?.getAttribute(attr) || null;
+  function hintedPane(page, win, composer) {
+    for (const pane2 of page.querySelectorAll(SUMMARY_HINT)) {
+      if (pane2.matches(TURN) || pane2.closest(TURN) || pane2.closest(OWN_UI) || pane2.contains(composer) || pane2.querySelector(TURN)) continue;
+      const rect = pane2.getBoundingClientRect();
+      if (!rect.width || !rect.height || rect.right <= win.innerWidth / 2) continue;
+      return { pane: pane2, container: pane2, left: rect.left, outputs: null };
+    }
+    return null;
+  }
   var chatgptAdapter = {
     turns: (root) => [...scope(root).querySelectorAll(TURN)],
     role: (turn) => nonEmptyRole(turn, ROLE, "data-message-author-role") ?? (turn.querySelector("[data-user-message-bubble]") ? "user" : nonEmptyRole(turn, REPLY, "data-conversation-role")),
@@ -832,7 +842,7 @@
     turnRoot: (doc) => scope(doc).querySelector(TURN_ROOT) ?? scope(doc).querySelector(TURN)?.parentElement ?? null,
     /** The element the queue panel is inserted directly before: the composer form, else the input itself. */
     composer: (doc) => scope(doc).querySelector(COMPOSER)?.closest("form") ?? scope(doc).querySelector(COMPOSER),
-    conversationId: (win) => win.location.pathname.match(/^\/c\/([\w-]+)/)?.[1] ?? "new",
+    conversationId: (win) => win.location.pathname.match(/^(?:\/g\/[^/]+)?\/c\/([\w-]+)/)?.[1] ?? "new",
     /**
      * The element that actually scrolls the conversation. The known selector is trusted unless a nearer
      * ancestor of the turns is itself scrollable and overflowing (the markup moved the scroll owner inward).
@@ -890,18 +900,20 @@
       const page = scope(doc);
       const win = doc.defaultView;
       const found = [];
-      let outputs = null;
       const candidates = [...page.querySelectorAll(HEADINGS)];
       for (const region2 of page.querySelectorAll(BUTTON_REGION)) if (!region2.matches(TURN) && !region2.closest(TURN)) candidates.push(...region2.querySelectorAll(BUTTONS));
+      for (const region2 of page.querySelectorAll(SUMMARY_HINT)) if (!region2.matches(TURN) && !region2.closest(TURN)) candidates.push(...[...region2.querySelectorAll("*")].filter((el2) => !el2.firstElementChild));
       for (const title of new Set(candidates)) {
         const name = title.textContent.trim();
         if (name.length > 12 || !SUMMARY_TITLE.test(name) || title.closest(TURN) || title.closest(ROLE) || title.closest(OWN_UI)) continue;
         const rect2 = title.getBoundingClientRect();
         if (!rect2.width || !rect2.height || rect2.right <= win.innerWidth / 2) continue;
+        if (found.some((t) => t.contains(title))) continue;
+        for (let i = found.length - 1; i >= 0; i--) if (title.contains(found[i])) found.splice(i, 1);
         found.push(title);
-        if (/^outputs?$/i.test(name) && !outputs) outputs = title;
       }
-      if (!found.length) return null;
+      const outputs = found.find((t) => /^outputs?$/i.test(t.textContent.trim())) ?? null;
+      if (!found.length) return hintedPane(page, win, this.composer(doc));
       const apart = (el2) => !el2.contains(this.composer(doc)) && !el2.querySelector(TURN) && !el2.matches(TURN);
       let lca = found[0];
       for (const t of found.slice(1)) lca = commonAncestor(lca, t) ?? lca;

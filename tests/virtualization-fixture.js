@@ -158,9 +158,10 @@ export function createFixture({ turns = 40, viewport = 800, markup = "chatgpt", 
 
   const buildPane = () => {
     const { outputs, sources } = paneState.opts;
-    const el = doc.createElement("aside");
+    const el = doc.createElement(paneState.opts.tag ?? "aside");
     el.id = "native-pane";
-    el.setAttribute("aria-label", "Summary");
+    if (!paneState.opts.tag) el.setAttribute("aria-label", "Summary");
+    for (const [name, value] of Object.entries(paneState.opts.attrs ?? {})) el.setAttribute(name, value);
     if (paneState.opts.html) {
       el.innerHTML = paneState.opts.html;
       return el;
