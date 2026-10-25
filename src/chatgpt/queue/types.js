@@ -31,6 +31,7 @@ export const systemClock = {
  * @property {string} conversationId
  * @property {string} text
  * @property {AttachmentRef[]} attachments
+ * @property {string|null} model Model the message will use, when known at queue time.
  * @property {ItemStatus} status
  * @property {number} position Sort key within a conversation.
  * @property {number} version Bumped by every user-visible change; detects edits racing a send.
