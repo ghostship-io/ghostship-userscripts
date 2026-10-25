@@ -46,16 +46,22 @@ test("dist matches a clean rebuild of src (CI fails if dist is stale)", { skip: 
   execFileSync("git", ["diff", "--exit-code", "--", "dist"], { cwd: root });
 });
 
-test("no unsanctioned traffic: only the live dispatcher may click, and nothing may use the network or submit forms", () => {
+test("no unsanctioned traffic: only the live dispatcher and the load-error recovery may click, and nothing may use the network or submit forms", () => {
   const banned = /\b(fetch|XMLHttpRequest|WebSocket|EventSource|sendBeacon|GM_xmlhttpRequest|GM\.xmlHttpRequest)\b|requestSubmit|dispatchEvent\(\s*new (Mouse|Pointer)Event/;
   const click = /\.click\(\)/;
   const liveDispatcher = path.join("src", "chatgpt", "queue", "live-dispatcher.js");
+  const recovery = path.join("src", "chatgpt", "recovery.js");
   for (const file of walk(path.join(root, "src")).filter((f) => f.endsWith(".js"))) {
     const text = readFileSync(file, "utf8").replace(/\/\/.*$/gm, "");
     const rel = path.relative(root, file);
     assert.doesNotMatch(text, banned, `${rel} uses a banned primitive`);
-    if (rel !== liveDispatcher) assert.doesNotMatch(text, click, `${rel} clicks; native Send/Stop clicks belong only in ${liveDispatcher}`);
+    if (rel !== liveDispatcher && rel !== recovery) assert.doesNotMatch(text, click, `${rel} clicks; native Send/Stop clicks belong only in ${liveDispatcher}`);
   }
+  // The recovery's one click is the "Try again" control the adapter found inside the failure card, nothing else.
+  const recoveryCode = readFileSync(path.join(root, recovery), "utf8").replace(/\/\/.*$/gm, "");
+  assert.equal(recoveryCode.match(/\.click\(\)/g)?.length, 1);
+  assert.match(recoveryCode, /found\.control\.click\(\)/);
+  assert.doesNotMatch(recoveryCode, /sendButton|stopButton|steerButton/);
 });
 
 test("public repo hygiene: no emails, home paths or token-shaped strings in tracked files", () => {
