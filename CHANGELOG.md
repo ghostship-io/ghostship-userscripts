@@ -4,6 +4,13 @@ Agents add entries under Unreleased and never touch version fields. After a merg
 
 ## Unreleased
 
+- The panels are one column on the right (#969): the conversation view on top, the prompts at the bottom growing up, both shown by default, in ChatGPT's own card style (its elevated surface, ring and radius), under the page header and left of any pane. ONE button in the header button area shows and hides both; the conversation moves over when they show and back to the center when they hide, at its own width. The old two floating buttons that overlapped the card, the left-hand prompts panel that could sit under ChatGPT's sidebar and the "only prompts in view" button are gone; the search box is now "Filter prompts...". The header is now found on the live page (it is a plain `<header>`), so the button sits beside Share instead of floating over the card, and floats left of a pane that covers the header.
+- The conversation view keeps one fixed width (its track) at one scale; a long turn slides under the frame as you scroll instead of shrinking to a sliver, and it is hidden on a new chat instead of showing an empty frame (#969).
+- Fix the panels vanishing or squeezing the conversation (#969): a new chat now gets its column and room, a native pane that moves with our padding is no longer counted twice on resize, and whatever ChatGPT's re-render removes (the column, the button, the style) is put back on the next page change.
+- A thread with no prompt of yours (a scheduled task's runs) lists each reply, so the Prompts list and the conversation view are no longer empty there (#969).
+- While a response runs, Send goes to the queue by default, also on pages where ChatGPT shows only its Steer control and no Stop control: that control now counts as a running response, so Enter and the native Send/Steer button append to the pending prompt instead of steering (#969).
+- ChatGPT's collapsed thinking traces open by themselves when they scroll into view, once each (one you close stays closed); turn off with `{"expandThinking":false}`.
+
 ## [0.7.5] - 2026-10-25
 
 - The right-hand pane is replaced by two panels in ChatGPT's own style: the conversation view (minimap) pinned top-right, growing down, and the prompt list pinned bottom-left, growing up, with the conversation and composer re-centered in the space between them, around any side pane and with the sidebar open or closed. Each panel collapses to a button in ChatGPT's header button area and the same button restores it (remembered per browser); when there is no room the panels become drawers opened by those buttons (#628).

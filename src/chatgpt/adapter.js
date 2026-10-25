@@ -24,7 +24,8 @@ const PROFILE = '[data-testid="accounts-profile-button"], [data-testid="profile-
 // Files attached to the message being composed, best effort. Unrestorable by the queue.
 const ATTACHMENT = '[data-testid*="attachment" i], [data-testid*="file-thumbnail" i]';
 const SCROLLER = "[data-scroll-root], [data-app-action-timeline-scroll]";
-const HEADER = "#page-header";
+// The page header: a plain `<header>` in the active page (a hidden page keeps its own, zero-sized one), or `#page-header`.
+const HEADER = "#page-header, header";
 const ASSISTANT = '[data-message-author-role="assistant"], [data-conversation-role="assistant"]';
 const SCROLLABLE = new Set(["auto", "scroll", "overlay"]);
 const ABSOLUTE = new Set(["absolute", "fixed"]);
@@ -32,6 +33,15 @@ const ABSOLUTE = new Set(["absolute", "fixed"]);
 // scroller). Everything the script attaches to must come from the active page.
 const ACTIVE_PAGE = '[data-app-shell-active-page="true"]';
 const scope = (root) => (root.nodeType === 9 ? root.querySelector(ACTIVE_PAGE) ?? root : root);
+/** The visible page header of the active page, or null. */
+const pageHeader = (doc) => {
+  for (const h of scope(doc).querySelectorAll(HEADER)) {
+    if (h.closest(OWN_UI) || h.closest(TURN)) continue;
+    const r = h.getBoundingClientRect();
+    if (r.width && r.height) return h;
+  }
+  return scope(doc).querySelector("#page-header");
+};
 
 // ChatGPT's own pinned right-side summary pane (Outputs / Sources). Detected structurally, never by one
 // class or test id: a visible, right-side region holding a heading or disclosure button titled
@@ -46,6 +56,10 @@ const SUMMARY_REGION = `aside,[role="complementary"],[role="region"],[aria-label
 const BUTTONS = 'button,[role="button"]';
 const BUTTON_REGION = `aside,[role="complementary"],[role="region"],${SUMMARY_HINT}`;
 const OWN_UI = "[data-gs-ui]";
+// The header button that opens and closes ChatGPT's summary pane (aria-pressed says which).
+const SUMMARY_TOGGLE = 'button[data-thread-summary-panel-toggle="true"]';
+// The title of a thinking trace's disclosure button.
+const THINKING_TITLE = /^(thought|worked|thinking|stopped thinking|reasoned)\b/i;
 
 const commonAncestor = (a, b) => {
   for (let el = a; el; el = el.parentElement) if (el.contains(b)) return el;
@@ -93,9 +107,12 @@ export const chatgptAdapter = {
     const page = scope(doc);
     return page.querySelector(STOP) ?? page.querySelector(COMPOSER)?.closest("form")?.querySelector(STOP_FALLBACK) ?? null;
   },
-  /** A response is being produced: a Stop control is shown or the reply is still streaming. */
+  /**
+   * A response is being produced: a Stop control is shown, the reply is still streaming, or the composer offers to steer it
+   * (ChatGPT only offers Steer while a response runs, even where it hides Stop). A Send gesture then belongs to the queue.
+   */
   generating(doc) {
-    return this.stopButton(doc) !== null || scope(doc).querySelector(STREAMING) !== null;
+    return this.stopButton(doc) !== null || this.steerButton(doc) !== null || scope(doc).querySelector(STREAMING) !== null;
   },
   /** Opaque, stable per signed-in profile ("unknown" when the page does not say); no label is kept. */
   accountId(doc) {
@@ -152,7 +169,19 @@ export const chatgptAdapter = {
     const composer = this.composer(doc);
     const scroller = this.scroller(doc);
     if (!composer || !scroller) return null;
-    const header = scope(doc).querySelector(HEADER);
+    if (!scope(doc).querySelector(TURN)) {
+      // A new chat has no scroller: the column is the widest ancestor of the composer that is not the whole window
+      // (it holds the composer and the greeting, and leaves the sidebar out).
+      const win = doc.defaultView;
+      let node = composer;
+      for (let up = node.parentElement; up && up !== doc.body && up !== doc.documentElement; up = up.parentElement) {
+        const width = up.getBoundingClientRect().width;
+        if (width >= win.innerWidth - 40) break;
+        if (width) node = up; // an element with no box of its own (display: contents) cannot be padded
+      }
+      return node;
+    }
+    const header = pageHeader(doc);
     let node = scroller;
     while (node && !(node.contains(composer) && (!header || node.contains(header)))) node = node.parentElement;
     return !node || node === doc.documentElement ? doc.body : node;
@@ -174,8 +203,10 @@ export const chatgptAdapter = {
         break;
       }
     }
-    const header = scope(doc).querySelector(HEADER);
-    return { frame, pads, header: header && frame.contains(header) && header !== frame ? header : null };
+    const header = pageHeader(doc);
+    // A fixed header spans the window whatever the column's padding, so it needs no cancelling.
+    const flows = header && frame.contains(header) && header !== frame && win.getComputedStyle(header).position !== "fixed";
+    return { frame, pads, header: flows ? header : null };
   },
   /**
    * ChatGPT's mounted, visible summary pane, or null (the script then shows its one fallback pane).
@@ -224,7 +255,7 @@ export const chatgptAdapter = {
    * `{ parent, before }`; null when there is no header or no button in it (the buttons then float top-right).
    */
   headerActions(doc) {
-    const header = scope(doc).querySelector(HEADER);
+    const header = pageHeader(doc);
     if (!header) return null;
     const win = doc.defaultView;
     let best = null;
@@ -233,11 +264,67 @@ export const chatgptAdapter = {
       const r = b.getBoundingClientRect();
       if (r.width && r.right > win.innerWidth / 2 && (!best || r.right > best.right)) best = { el: b, right: r.right };
     }
-    return best ? { parent: best.el.parentElement, before: best.el } : null;
+    if (!best) return null;
+    // Insert beside the button's outermost single-child wrappers, so ours is a sibling in the same row, not stacked inside one.
+    let before = best.el;
+    while (before.parentElement && before.parentElement !== header && nativeChildren(before.parentElement) === 1) before = before.parentElement;
+    return { parent: before.parentElement, before, right: best.right };
+  },
+  /**
+   * Whether ChatGPT's own summary pane (Activity / Outputs / Sources) is open, wherever it renders: the header toggle says
+   * so, or a pane carrying its markup hint has a box (it is a popover outside the page when the page is narrow).
+   */
+  summaryOpen(doc) {
+    if (scope(doc).querySelector(SUMMARY_TOGGLE)?.getAttribute("aria-pressed") === "true") return true;
+    for (const el of doc.querySelectorAll(SUMMARY_HINT)) if (!el.closest(OWN_UI) && !el.closest(TURN) && el.getBoundingClientRect().width) return true;
+    return false;
+  },
+  /**
+   * Any other pane docked or floating over the right edge of the page (a Subagents or canvas view, say), found by
+   * what is really painted there rather than by its title: the widest element on the right edge that is neither
+   * the conversation nor the composer nor ours. `{ pane, container, left, outputs: null }` like `nativeSummary`, or null.
+   */
+  sidePane(doc) {
+    const win = doc.defaultView;
+    const W = win.innerWidth;
+    const H = win.innerHeight;
+    if (!doc.elementFromPoint) return null;
+    const composer = this.composer(doc);
+    let best = null;
+    for (const y of [Math.max(24, this.headerBottom(doc) + 16), H * 0.3, H * 0.55, H * 0.8]) {
+      let hit = doc.elementFromPoint(W - 16, y);
+      if (!hit || hit.closest(OWN_UI)) continue;
+      for (let el = hit; el && el !== doc.body && el !== doc.documentElement; el = el.parentElement) {
+        const r = el.getBoundingClientRect();
+        if (r.width > W * 0.6) break; // the page itself
+        if (r.right < W - 24) continue; // a part inside the pane, not the pane
+        if (el.matches(TURN) || el.closest(TURN) || (composer && el.contains(composer)) || el.querySelector(TURN) || el.querySelector(OWN_UI)) break;
+        if (r.width >= 200 && r.height >= H * 0.25 && (!best || r.left < best.left)) best = { pane: el, left: r.left };
+      }
+    }
+    return best && { pane: best.pane, container: best.pane, left: best.left, outputs: null };
+  },
+  /**
+   * ChatGPT's collapsed thinking traces in the active page: the disclosure buttons of assistant turns ("Thought for 12s",
+   * "Worked for 1m 5s", "Stopped thinking"), as `{ button, turn, key }` where `key` names the trace within its turn.
+   * Buttons outside a turn (the model picker's "Thinking effort", say) never count.
+   */
+  thinkingToggles(doc) {
+    const out = [];
+    scope(doc)
+      .querySelectorAll(TURN)
+      .forEach((turn, turnIndex) => {
+        let nth = 0;
+        for (const button of turn.querySelectorAll("button[aria-expanded]")) {
+          if (button.closest(OWN_UI) || !THINKING_TITLE.test((button.textContent ?? "").trim())) continue;
+          out.push({ button, turn, key: `${this.turnId(turn, turnIndex)}#${nth++}` });
+        }
+      });
+    return out;
   },
   /** Bottom edge of the page header (0 without one): the fallback pane docks below it. */
   headerBottom(doc) {
-    return scope(doc).querySelector(HEADER)?.getBoundingClientRect().bottom ?? 0;
+    return pageHeader(doc)?.getBoundingClientRect().bottom ?? 0;
   },
   /** The assistant reply of turn `index` of `turns`: inside the turn element, else the next message element. */
   reply(turns, index) {

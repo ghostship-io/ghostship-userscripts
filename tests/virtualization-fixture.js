@@ -160,6 +160,7 @@ export function createFixture({ turns = 40, viewport = 800, markup = "chatgpt", 
     const { outputs, sources } = paneState.opts;
     const el = doc.createElement(paneState.opts.tag ?? "aside");
     el.id = "native-pane";
+    el.style.position = "fixed"; // the real pane is an overlay: it stays where it is whatever pads the page column
     if (!paneState.opts.tag) el.setAttribute("aria-label", "Summary");
     for (const [name, value] of Object.entries(paneState.opts.attrs ?? {})) el.setAttribute(name, value);
     if (paneState.opts.html) {

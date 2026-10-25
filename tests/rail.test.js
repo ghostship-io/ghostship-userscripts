@@ -48,7 +48,7 @@ test("layout: minimap on top, prompts chronological oldest-first, newest last, l
   assert.deepEqual([...q('[data-gs-panel="prompts"] .gs-panel-body').children].map((c) => c.className), ["gs-search", "gs-prompts"]);
   assert.equal(q('[data-gs-panel="minimap"] .gs-panel-title').textContent, "Conversation view");
   assert.equal(q('[data-gs-panel="prompts"] .gs-panel-title').textContent, "Prompts");
-  assert.equal(q(".gs-search input").placeholder, "Search prompts...");
+  assert.equal(q(".gs-search input").placeholder, "Filter prompts...");
   const buttons = items(fx);
   assert.equal(buttons.length, 30);
   assert.deepEqual(buttons.map((b) => b.querySelector(".gs-n").textContent), Array.from({ length: 30 }, (_, i) => `#${i + 1}`));
@@ -201,60 +201,59 @@ test("minimap: viewport indicator, click and drag navigate the active turn throu
   assert.ok(runtime.diagnostics.snapshot()["scroll.moved.keyboard"] >= 1);
 });
 
-test("responsive: docked panels from the dock threshold, drawers opened by the header buttons on narrow viewports", async () => {
-  const hidden = (fx, name) => fx.doc.querySelector(`.gs-panel[data-gs-panel="${name}"]`).hidden;
+test("responsive: docked from the dock threshold, a drawer opened by the one header button on narrow viewports", async () => {
+  const hidden = (fx) => fx.doc.querySelector(".gs-rail").hidden;
   const wide = createFixture({ turns: 12, width: 1600 });
   mount(wide);
-  assert.deepEqual([hidden(wide, "minimap"), hidden(wide, "prompts")], [false, false]);
-  assert.equal(wide.doc.querySelector(".gs-panel").dataset.gsDrawer, "false");
+  assert.equal(hidden(wide), false);
+  assert.equal(wide.doc.querySelector(".gs-rail").dataset.gsDrawer, "false");
 
-  // 1280 leaves 256px of natural gutter per side: docked by shifting the page column, not by overlapping it.
+  // 1280 leaves 256px of natural gutter: docked by shifting the page column, not by overlapping it.
   const tight = createFixture({ turns: 12, width: 1280 });
   mount(tight);
-  assert.deepEqual([hidden(tight, "minimap"), hidden(tight, "prompts")], [false, false]);
-  assert.ok(tight.reserve() > 0 && tight.reserveLeft() > 0);
+  assert.equal(hidden(tight), false);
+  assert.ok(tight.reserve() > 0);
 
   const narrow = createFixture({ turns: 12, width: 390 });
   const { q } = mount(narrow);
-  assert.deepEqual([hidden(narrow, "minimap"), hidden(narrow, "prompts")], [true, true], "nothing covers the conversation on its own");
-  assert.equal(narrow.reserve() + narrow.reserveLeft(), 0, "drawers reserve nothing");
-  const btn = (name) => q(`.gs-hbtn[data-gs-panel="${name}"]`);
-  assert.equal(btn("prompts").getAttribute("aria-pressed"), "false");
-  btn("prompts").click();
-  assert.equal(hidden(narrow, "prompts"), false);
-  assert.equal(q('[data-gs-panel="prompts"]').dataset.gsDrawer, "true");
-  assert.equal(btn("prompts").getAttribute("aria-pressed"), "true");
-  q(".gs-panel-prompts").dispatchEvent(new narrow.win.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-  assert.equal(hidden(narrow, "prompts"), true, "Escape closes the drawer");
-  btn("minimap").click();
-  btn("minimap").click();
-  assert.equal(hidden(narrow, "minimap"), true, "the same button closes it again");
-  // Growing the window docks the remembered panels.
+  assert.equal(hidden(narrow), true, "nothing covers the conversation on its own");
+  assert.equal(narrow.reserve(), 0, "a drawer reserves nothing");
+  const btn = () => q(".gs-hbtn");
+  assert.equal(btn().getAttribute("aria-pressed"), "false");
+  btn().click();
+  assert.equal(hidden(narrow), false);
+  assert.equal(q(".gs-rail").dataset.gsDrawer, "true");
+  assert.equal(btn().getAttribute("aria-pressed"), "true");
+  q(".gs-rail").dispatchEvent(new narrow.win.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  assert.equal(hidden(narrow), true, "Escape closes the drawer");
+  btn().click();
+  btn().click();
+  assert.equal(hidden(narrow), true, "the same button closes it again");
+  // Growing the window docks the remembered choice (shown by default).
   narrow.win.innerWidth = 1700;
   narrow.win.dispatchEvent(new narrow.win.Event("resize"));
   await narrow.settle();
-  assert.deepEqual([hidden(narrow, "minimap"), hidden(narrow, "prompts")], [false, false]);
+  assert.equal(hidden(narrow), false);
 });
 
-test("styles: two bordered panels pinned to opposite corners, native tokens only, no bespoke chrome", async () => {
+test("styles: one right-hand column of two elevated cards, native tokens only, no bespoke chrome", async () => {
   const fx = createFixture({ turns: 5, width: 1600 });
   mount(fx);
   const css = fx.doc.getElementById("gs-pane-style").textContent;
-  assert.match(css, /\.gs-panel-map\{top:var\(--gs-top,8px\);right:var\(--gs-right,12px\)/, "minimap top-right, growing down");
-  assert.match(css, /\.gs-panel-prompts\{left:var\(--gs-left,12px\);bottom:var\(--gs-bottom,16px\)/, "prompts bottom-left, growing up");
-  assert.match(css, /\.gs-panel\{[^}]*max-width|\.gs-panel\[data-gs-drawer="true"\]\{max-width:calc\(100vw - 16px\)/);
-  assert.match(css, /\.gs-panel\{[^}]*border:1px solid[^}]*border-radius:16px/);
+  assert.match(css, /\.gs-rail\{position:fixed;[^}]*top:var\(--gs-top,60px\);right:var\(--gs-right,12px\);bottom:var\(--gs-bottom,16px\)[^}]*flex-direction:column/, "one column pinned top-right to bottom-right");
+  assert.match(css, /\.gs-panel-prompts\{margin-top:auto\}/, "the prompts sit at the bottom of the column and grow up");
+  assert.match(css, /\.gs-panel\{[^}]*border-radius:var\(--radius-2xl,16px\)[^}]*box-shadow:var\(--elevation-prominent/, "ChatGPT's own card: elevated surface, ring, radius");
   assert.match(css, /\.gs-prompts\{[^}]*overflow-x:hidden;overflow-y:auto/);
   assert.match(css, /\.gs-title\{[^}]*white-space:nowrap[^}]*text-overflow:ellipsis/);
   assert.match(css, /\.gs-preview\{[^}]*white-space:nowrap[^}]*text-overflow:ellipsis/);
   assert.doesNotMatch(css, /overflow-x:(auto|scroll)/);
   assert.match(css, /focus-visible/);
   // Native visual system: colors come from ChatGPT's tokens (or the current color / system colors), so both
-  // themes and later token changes carry over; no fixed colors, underlined titles, shadows or card shells.
+  // themes and later token changes carry over; no fixed colors, underlined titles or card shells.
   assert.doesNotMatch(css, /#[0-9a-f]{3,8}\b|rgba?\(|hsla?\(/i, "no literal colors");
-  assert.doesNotMatch(css, /text-decoration|box-shadow|drop-shadow/);
-  assert.doesNotMatch(css, /\.gs-(rail|card|pane)\b/);
-  for (const token of ["--main-surface-primary", "--text-primary", "--border-light", "--text-secondary"]) assert.ok(css.includes(token), token);
+  assert.doesNotMatch(css, /text-decoration|drop-shadow/);
+  assert.doesNotMatch(css, /\.gs-(card|pane)\b/);
+  for (const token of ["--color-surface-elevated-secondary", "--color-text", "--color-border", "--color-text-secondary", "--elevation-prominent"]) assert.ok(css.includes(token), token);
 });
 
 test("keyboard: arrows rove through prompts and Enter-click activates", async () => {
@@ -315,13 +314,10 @@ test("reference layout: collapsible cards, caption percentage, green in-view dot
   assert.ok(dotted().length >= 1);
   assert.ok(items(fx).find((b) => b.getAttribute("aria-current") === "true").dataset.inView === "true", "active row is in view");
 
-  // Filter button limits the list to prompts in view.
-  q(".gs-filter").click();
-  assert.equal(q(".gs-filter").getAttribute("aria-pressed"), "true");
-  assert.ok(items(fx).length >= 1 && items(fx).length < 40);
-  assert.ok(items(fx).every((b) => b.dataset.inView === "true"));
-  q(".gs-filter").click();
-  assert.equal(items(fx).length, 40);
+  // The one box filters the list by text; there is no second control beside it.
+  assert.equal(q(".gs-filter"), null);
+  assert.equal(q(".gs-search").querySelectorAll("button").length, 0, "no button beside the filter box");
+  assert.equal(q(".gs-search input").getAttribute("aria-label"), "Filter prompts");
 
   // No "First prompt" / "Last prompt" buttons: the list itself (scroll, search, select) is the navigation.
   assert.equal(q(".gs-first"), null);
@@ -338,21 +334,17 @@ test("reference layout: collapsible cards, caption percentage, green in-view dot
   assert.equal(items(fx).at(-1).getAttribute("aria-current"), "true");
   assert.equal(fx.blankInViewport().length, 0);
 
-  // Each panel collapses to its header button and the same button restores it; the choice is remembered per browser.
-  for (const name of ["minimap", "prompts"]) {
-    const panel = q(`.gs-panel[data-gs-panel="${name}"]`);
-    const button = q(`.gs-hbtn[data-gs-panel="${name}"]`);
-    assert.equal(button.getAttribute("aria-pressed"), "true");
-    button.click();
-    assert.equal(panel.hidden, true);
-    assert.equal(button.getAttribute("aria-pressed"), "false");
-    button.click();
-    assert.equal(panel.hidden, false);
-    panel.querySelector(".gs-collapse").click();
-    assert.equal(panel.hidden, true, "the panel's own close control does the same");
-    button.click();
-    assert.equal(panel.hidden, false);
-  }
+  // One header button hides both panels and the same button restores them; the choice is remembered per browser.
+  const rail = q(".gs-rail");
+  const button = q(".gs-hbtn");
+  assert.equal(fx.doc.querySelectorAll(".gs-hbtn").length, 1, "one button for both panels");
+  assert.equal(q(".gs-collapse"), null, "no per-panel controls");
+  assert.equal(button.getAttribute("aria-pressed"), "true");
+  button.click();
+  assert.equal(rail.hidden, true);
+  assert.equal(button.getAttribute("aria-pressed"), "false");
+  button.click();
+  assert.equal(rail.hidden, false);
 });
 
 test("minimap caption reports the visible share of the turn", async () => {

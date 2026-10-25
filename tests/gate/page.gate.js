@@ -31,10 +31,10 @@ test("canary: the page guards really detect a native Send click, a stop click an
   assert.equal(guards.isClean(), false);
 });
 
-test("bundle: no network, form-submit or synthetic-event primitive; the only clicks are the live dispatcher's Send and Stop and the recovery's Try again", () => {
+test("bundle: no network, form-submit or synthetic-event primitive; the only clicks are the live dispatcher's Send and Stop, the recovery's Try again and a thinking trace's own disclosure button", () => {
   const code = bundleSource().replace(/\/\/.*$/gm, "");
   assert.doesNotMatch(code, /\b(fetch|XMLHttpRequest|WebSocket|EventSource|sendBeacon|GM_xmlhttpRequest|requestSubmit)\b|dispatchEvent\(\s*new (Mouse|Pointer)Event|\.submit\(\)/);
-  assert.equal(code.match(/\.click\(\)/g)?.length, 3, "exactly three click sites: Send and Stop in the live dispatcher, Try again in the recovery");
+  assert.equal(code.match(/\.click\(\)/g)?.length, 4, "exactly four click sites: Send and Stop in the live dispatcher, Try again in the recovery, the disclosure button in the thinking expander");
 });
 
 test("boot: activates on a long thread without any traffic, click or scroll", async () => {
@@ -115,5 +115,31 @@ test("no recognisable turns (a new chat or changed turn markup): composer-only, 
   assert.equal(fx.thread.outerHTML, turnsBefore, "the conversation is not modified");
   fx.scroller.scrollTop = 100;
   assert.equal(fx.rawTop(), 100, "native scrolling is not intercepted");
+  assert.equal(guards.isClean(), true, JSON.stringify(guards.report()));
+});
+
+test("thinking traces: the built script opens a collapsed trace that is in view, once, and presses nothing else", async () => {
+  const fx = createFixture({ turns: 40, markup: "real" });
+  const guards = installPageGuards(fx);
+  const turn = fx.elements().at(-1).firstElementChild;
+  turn.insertAdjacentHTML("afterbegin", '<div><button type="button" aria-expanded="false" id="trace">Worked for 12s</button></div>');
+  const trace = fx.doc.getElementById("trace");
+  trace.getBoundingClientRect = () => ({ top: 100, bottom: 124, left: 0, right: 200, width: 200, height: 24, x: 0, y: 100 });
+  let presses = 0;
+  trace.addEventListener("click", () => {
+    presses++;
+    trace.setAttribute("aria-expanded", "true");
+  });
+  const picker = fx.doc.getElementById("composer").appendChild(Object.assign(fx.doc.createElement("button"), { id: "picker", type: "button", textContent: "Thinking effort" }));
+  picker.setAttribute("aria-expanded", "false");
+  let pickerPresses = 0;
+  picker.addEventListener("click", () => pickerPresses++);
+  runBundle(fx);
+  await fx.settle();
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  await fx.settle();
+  assert.equal(presses, 1, "the trace in view is opened once");
+  assert.equal(trace.getAttribute("aria-expanded"), "true");
+  assert.equal(pickerPresses, 0, "nothing in the composer is pressed");
   assert.equal(guards.isClean(), true, JSON.stringify(guards.report()));
 });

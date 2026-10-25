@@ -5,53 +5,58 @@ import { contentSignature, createPanePrefs, createPanelPrefs, createRailStateSto
 
 const STYLE_ID = "gs-pane-style";
 
-// Layout contract: two pinned panels in ChatGPT's own chrome. The conversation view (minimap) is pinned
-// top-right and grows downward with the conversation's real shape; the prompt list is pinned bottom-left
-// and grows upward as prompts are added. The page column is padded (rail-layout.js, the one layout owner)
-// so the conversation and composer re-center in the space the panels leave, around any native side pane
-// or sidebar. Each panel collapses to a button in ChatGPT's header button area, and the same button
-// restores it; the choice is remembered per browser. Without room (narrow windows) the panels become
-// drawers opened by those buttons, never covering the composer or header. ChatGPT's own Outputs section
-// only gets a disclosure control (no native node is moved, removed or re-created). Styling is ChatGPT's own
-// tokens with theme-neutral fallbacks, no colors of its own, so both themes and later token changes carry over.
-const LINE = "var(--border-light,color-mix(in srgb,currentColor 14%,transparent))";
-const HOVER = "var(--surface-hover,color-mix(in srgb,currentColor 7%,transparent))";
-const SELECTED = "var(--interactive-bg-secondary-selected,color-mix(in srgb,currentColor 12%,transparent))";
-const FIELD = "var(--bg-elevated-secondary,color-mix(in srgb,currentColor 6%,transparent))";
-const CODE = "var(--bg-elevated-secondary,color-mix(in srgb,currentColor 12%,transparent))";
-const BUBBLE = "var(--message-surface,color-mix(in srgb,currentColor 10%,transparent))";
+// Layout contract: one pinned column on the right in ChatGPT's own chrome. The conversation view (minimap) is
+// pinned top-right and grows downward with the conversation's real shape; the prompt list is pinned to the
+// bottom of the same column and grows upward as prompts are added. The page column is padded (rail-layout.js,
+// the one layout owner) so the conversation and composer re-center in the space the column leaves, around any
+// native side pane or sidebar. ONE button in ChatGPT's header button area shows and hides both panels (the
+// choice is remembered per browser); without a header it floats top-right, above the column, never over it.
+// Without room (narrow windows) the column becomes a drawer opened by that button, never covering the composer
+// or header. The column, its button and its style are re-attached whenever ChatGPT's re-render removes them.
+// ChatGPT's own Outputs section only gets a disclosure control (no native node is moved, removed or
+// re-created). Styling is ChatGPT's own tokens with theme-neutral fallbacks, no colors of its own, so both
+// themes and later token changes carry over.
+// ChatGPT's own tokens (as its summary pane uses them: elevated card, ring shadow, 16px radius, secondary text for
+// titles), then neutral fallbacks, so the panels look like the page's own cards in both themes.
+const SURFACE = "var(--color-surface-elevated-secondary,Canvas)";
+const PAGE = "var(--color-surface,Canvas)";
+const TEXT = "var(--color-text,CanvasText)";
+const LINE = "var(--color-border,color-mix(in srgb,currentColor 14%,transparent))";
+const HOVER = "var(--color-token-interactive-bg-secondary-hover,color-mix(in srgb,currentColor 8%,transparent))";
+const SELECTED = "var(--color-token-interactive-bg-secondary-selected,color-mix(in srgb,currentColor 12%,transparent))";
+const CODE = "var(--color-token-text-code-block-background,color-mix(in srgb,currentColor 12%,transparent))";
+const BUBBLE = "var(--color-token-interactive-bg-secondary-selected,color-mix(in srgb,currentColor 10%,transparent))";
 const INK = "color-mix(in srgb,currentColor 38%,transparent)";
 const INK_FAINT = "color-mix(in srgb,currentColor 22%,transparent)";
-const ACCENT = "var(--interactive-bg-accent-default,AccentColor)";
-const MUTED = "var(--text-secondary,color-mix(in srgb,currentColor 65%,transparent))";
-const FOCUS = "outline:2px solid var(--border-heavy,currentColor);outline-offset:-2px";
+const ACCENT = "var(--color-token-focus-border,AccentColor)";
+const MUTED = "var(--color-text-secondary,color-mix(in srgb,currentColor 65%,transparent))";
+const RING = "var(--elevation-prominent,0 0 0 .5px color-mix(in srgb,currentColor 20%,transparent))";
+const FOCUS = "outline:2px solid var(--color-border-strong,currentColor);outline-offset:-2px";
 const CHEVRON = '<svg class="gs-chevron" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>';
-const CLOSE = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>';
-const MAP_ICON = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M8.5 8h7M8.5 11.5h7M8.5 15h4"/></svg>';
-const LIST_ICON = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"/></svg>';
-const MENU = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>';
+const PANELS_ICON = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M8.5 8h7M8.5 11.5h7M8.5 15h4"/></svg>';
 
 const CSS = `
-.gs-panel{position:fixed;z-index:30;display:flex;flex-direction:column;width:min(${PANEL_WIDTH}px,calc(100vw - 16px));box-sizing:border-box;border:1px solid ${LINE};border-radius:16px;background:var(--main-surface-primary,Canvas);color:var(--text-primary,CanvasText);font:inherit;font-size:14px;line-height:20px;overflow:hidden}
+.gs-rail{position:fixed;z-index:30;top:var(--gs-top,60px);right:var(--gs-right,12px);bottom:var(--gs-bottom,16px);display:flex;flex-direction:column;gap:12px;width:min(${PANEL_WIDTH}px,calc(100vw - 16px));box-sizing:border-box;pointer-events:none}
+.gs-rail[hidden]{display:none}
+.gs-panel{display:flex;flex:0 1 auto;flex-direction:column;min-height:0;box-sizing:border-box;border-radius:var(--radius-2xl,16px);background:${SURFACE};box-shadow:${RING};color:${TEXT};font:inherit;font-size:14px;line-height:20px;overflow:hidden;pointer-events:auto}
 .gs-panel[hidden]{display:none}
 .gs-panel *,.gs-hbtns *{box-sizing:border-box}
-.gs-panel-map{top:var(--gs-top,8px);right:var(--gs-right,12px);max-height:calc(100vh - var(--gs-top,8px) - var(--gs-map-bottom,16px))}
-.gs-panel-prompts{left:var(--gs-left,12px);bottom:var(--gs-bottom,16px);max-height:calc(100vh - 96px - var(--gs-bottom,16px))}
-.gs-panel[data-gs-drawer="true"]{max-width:calc(100vw - 16px)}
-.gs-panel-head{display:flex;flex:0 0 auto;align-items:center;justify-content:space-between;min-height:44px;padding:8px 8px 8px 16px;font-weight:600}
+.gs-panel-map{max-height:55%}
+.gs-panel-prompts{margin-top:auto}
+.gs-panel-head{display:flex;flex:0 0 auto;align-items:center;min-height:44px;padding:8px 16px;color:${MUTED}}
 .gs-panel-body{display:flex;flex:1 1 auto;flex-direction:column;min-height:0;padding:0 16px 12px}
-.gs-collapse,.gs-hbtn{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;padding:0;border:0;background:transparent;color:inherit;cursor:pointer}
-.gs-collapse{width:28px;height:28px;border-radius:8px}
-.gs-hbtns{display:inline-flex;align-items:center;gap:2px;margin:0 4px}
-.gs-hbtns[data-gs-float]{position:fixed;top:8px;right:8px;z-index:31;margin:0}
-.gs-hbtn{width:36px;height:36px;border-radius:8px;color:var(--text-secondary,currentColor)}
-.gs-hbtn[aria-pressed="true"]{color:var(--text-primary,currentColor);background:${SELECTED}}
-.gs-collapse:hover,.gs-hbtn:hover,.gs-outputs-toggle:hover{background:${HOVER}}
+.gs-hbtns{display:inline-flex;align-items:center;margin:0 4px;pointer-events:auto}
+.gs-hbtns[hidden]{display:none}
+.gs-hbtns[data-gs-float]{position:fixed;top:8px;right:var(--gs-float-right,8px);z-index:41;margin:0}
+.gs-hbtn{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:36px;height:36px;padding:0;border:0;border-radius:8px;background:transparent;color:${MUTED};cursor:pointer;pointer-events:auto}
+.gs-hbtn[aria-pressed="true"]{color:${TEXT};background:${SELECTED}}
+.gs-hbtn:hover,.gs-outputs-toggle:hover{background:${HOVER}}
 .gs-chevron{flex:0 0 auto;transition:transform .15s}
 [data-gs-outputs][data-gs-collapsed="true"] .gs-chevron{transform:rotate(-90deg)}
-.gs-minimap{position:relative;display:flex;justify-content:center;align-items:flex-start;flex:0 0 auto;min-height:56px;padding:8px;border:1px solid ${LINE};border-radius:8px;background:${FIELD};cursor:pointer;touch-action:none;overflow:hidden}
-.gs-frame{position:relative;flex:0 0 auto;width:100%;height:120px;border:1px solid ${INK};border-radius:4px;background:var(--main-surface-primary,Canvas)}
-.gs-minimap:focus-visible,.gs-search input:focus-visible,.gs-prompt:focus-visible,.gs-hbtn:focus-visible,.gs-collapse:focus-visible,.gs-filter:focus-visible,.gs-outputs-toggle:focus-visible{${FOCUS}}
+.gs-minimap{position:relative;display:flex;justify-content:center;align-items:flex-start;flex:0 0 auto;min-height:56px;padding:8px;border:1px solid ${LINE};border-radius:12px;background:${PAGE};cursor:pointer;touch-action:none;overflow:hidden}
+.gs-frame{position:relative;flex:0 0 auto;width:72%;height:120px;overflow:hidden;border:1px solid ${INK};border-radius:4px;background:${PAGE}}
+.gs-minimap:focus-visible,.gs-search input:focus-visible,.gs-prompt:focus-visible,.gs-hbtn:focus-visible,.gs-outputs-toggle:focus-visible{${FOCUS}}
+.gs-scene{position:absolute;top:0;left:0;right:0;height:100%}
 .gs-bars{position:absolute;inset:0;--gs-lh:4px}
 .gs-bar{position:absolute;min-height:2px;border-radius:2px;pointer-events:none}
 .gs-bar[data-kind="text"]{background-image:linear-gradient(${INK_FAINT} 0 50%,transparent 50%);background-size:100% var(--gs-lh)}
@@ -66,9 +71,6 @@ const CSS = `
 .gs-search-field{position:relative;flex:1 1 auto;min-width:0}
 .gs-search-field::before{content:"";position:absolute;left:10px;top:50%;width:9px;height:9px;margin-top:-6px;border:2px solid currentColor;border-radius:50%;opacity:.55;pointer-events:none}
 .gs-search input{width:100%;min-height:36px;padding:4px 8px 4px 30px;border:1px solid ${LINE};border-radius:10px;background:transparent;color:inherit;font:inherit}
-.gs-filter{flex:0 0 auto;display:flex;align-items:center;justify-content:center;width:36px;height:36px;border:1px solid ${LINE};border-radius:10px;background:transparent;color:${MUTED};cursor:pointer}
-.gs-filter:hover{background:${HOVER}}
-.gs-filter[aria-pressed="true"]{background:${SELECTED};color:inherit}
 .gs-prompts{flex:1 1 auto;min-height:60px;margin:0;padding:0;list-style:none;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
 .gs-prompt{position:relative;display:flex;gap:10px;width:100%;min-height:48px;padding:6px 24px 6px 10px;border:0;border-radius:8px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
 .gs-prompt:hover{background:${HOVER}}
@@ -100,8 +102,12 @@ const OPEN_FOLLOW_MS = 1500; // after selecting, further prompts loading within 
 const SCAN_MS = 400; // at most one page scan for ChatGPT's pane per this long
 const BLOCK_CAP = 800; // rendered blocks measured per rebuild
 const CONTENT_W = 768; // the conversation column's usual width, when it cannot be measured
+const FRAME_SHARE = 0.72; // the sheet's width as a share of the track: the rest is the bezel at its sides
+const PAPER = 11 / 8.5; // US Letter, portrait: height over width
 const MAP_PAD = 18; // the track's padding and borders
 const MAP_CHROME = 120; // the minimap panel's header, caption and padding around the frame
+const PANE_SETTLE_MS = 450; // ChatGPT's pane and page transitions are done by then
+const FLOAT_BOTTOM = 44; // the floating header button ends here (8px from the top, 36px high)
 const MAP_W = 244; // the track's width when it cannot be measured
 
 /**
@@ -127,10 +133,10 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
   let signature = null;
   let query = "";
   let activeId = null;
-  let docked = { minimap: true, prompts: true }; // the panels that have room beside the conversation; the others are drawers opened on request
-  let drawer = null; // the panel open as a drawer ("minimap" | "prompts")
-  const shown = layoutPrefs.get(); // which panels the user wants docked: remembered per browser
-  let inViewOnly = false;
+  let docked = true; // whether the panel column has room beside the conversation; without it the column is a drawer opened on request
+  let drawer = false; // the column is open as a drawer
+  let shown = layoutPrefs.get(); // whether the user wants the panels: remembered per browser
+  let hasMap = false; // there is a conversation turn to draw
   let viewSet = new Set();
   let listPinned = true;
   let listManual = false;
@@ -149,6 +155,8 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
   let restore = store.get(convId);
   let didRestore = false;
   let viewBox = "";
+  let geom = { sceneH: 1, frameH: 1 }; // the minimap's scene (the whole turn at the minimap's scale) and the frame it slides in, px
+  let mapOffset = 0; // how far the scene is slid up under the frame, px
   let bookmarkToRestore = null;
   let listTopToRestore = null;
   let outputsCollapsed = false;
@@ -158,6 +166,8 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
   let openGen = 0;
   let interacted = false;
   let lastHost = null;
+  let lastPaneOpen = false;
+  let settleTimer = null;
   let scannedAt = -Infinity;
   let scanTimer = null;
   let outputsHost = null; // { section, head } of the native Outputs section we added the disclosure to
@@ -169,45 +179,45 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
   doc.head.appendChild(style);
 
   const panel = (name, label, inner) => {
-    const el = doc.createElement("aside");
+    const el = doc.createElement("section");
     el.className = `gs-panel gs-panel-${name === "minimap" ? "map" : "prompts"}`;
     el.dataset.gsUi = "";
     el.dataset.gsPanel = name;
     el.setAttribute("aria-label", label);
-    el.innerHTML = `<div class="gs-panel-head"><span class="gs-panel-title">${label}</span><button type="button" class="gs-collapse" aria-label="Hide ${label.toLowerCase()}" title="Hide ${label.toLowerCase()}">${CLOSE}</button></div><div class="gs-panel-body">${inner}</div>`;
+    el.innerHTML = `<div class="gs-panel-head"><span class="gs-panel-title">${label}</span></div><div class="gs-panel-body">${inner}</div>`;
     return el;
   };
   const mapPanel = panel(
     "minimap",
     "Conversation view",
-    `<div class="gs-minimap" tabindex="0" role="slider" aria-orientation="vertical" aria-label="Current turn overview" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="gs-frame"><div class="gs-bars"></div><div class="gs-view" hidden></div></div></div><div class="gs-caption" aria-live="off">Drag to navigate • 0% visible</div>`,
+    `<div class="gs-minimap" tabindex="0" role="slider" aria-orientation="vertical" aria-label="Current turn overview" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="gs-frame"><div class="gs-scene"><div class="gs-bars"></div><div class="gs-view" hidden></div></div></div></div><div class="gs-caption" aria-live="off">Drag to navigate • 0% visible</div>`,
   );
   const promptsPanel = panel(
     "prompts",
     "Prompts",
-    `<div class="gs-search"><div class="gs-search-field"><input type="search" placeholder="Search prompts..." aria-label="Search prompts"></div><button type="button" class="gs-filter" aria-pressed="false" aria-label="Only prompts in view" title="Only prompts in view">${MENU}</button></div><ol class="gs-prompts" aria-label="Prompts, oldest first"></ol>`,
+    `<div class="gs-search"><div class="gs-search-field"><input type="search" placeholder="Filter prompts..." aria-label="Filter prompts"></div></div><ol class="gs-prompts" aria-label="Prompts, oldest first"></ol>`,
   );
-  const panels = { minimap: mapPanel, prompts: promptsPanel };
-  const root = { querySelector: (sel) => mapPanel.querySelector(sel) ?? promptsPanel.querySelector(sel), contains: (n) => mapPanel.contains(n) || promptsPanel.contains(n) };
-  // The buttons that collapse and restore the panels live in ChatGPT's header button area.
+  mapPanel.hidden = true; // until there is a conversation to draw
+  // One column holds both panels: the conversation view on top, the prompt list pinned to the bottom.
+  const column = doc.createElement("div");
+  column.className = "gs-rail";
+  column.dataset.gsUi = "";
+  column.append(mapPanel, promptsPanel);
+  const root = { querySelector: (sel) => mapPanel.querySelector(sel) ?? promptsPanel.querySelector(sel), contains: (n) => column.contains(n) };
+  // The one button that shows and hides both panels lives in ChatGPT's header button area.
   const actions = doc.createElement("span");
   actions.className = "gs-hbtns";
   actions.dataset.gsUi = "";
-  const buttons = {};
-  for (const [name, label, icon] of [["minimap", "Conversation view", MAP_ICON], ["prompts", "Prompts", LIST_ICON]]) {
-    const b = doc.createElement("button");
-    b.type = "button";
-    b.className = "gs-hbtn";
-    b.dataset.gsPanel = name;
-    b.dataset.gsUi = "";
-    b.setAttribute("aria-label", label);
-    b.title = label;
-    b.setAttribute("aria-pressed", "false");
-    b.innerHTML = icon;
-    actions.append(b);
-    buttons[name] = b;
-  }
-  doc.body.append(mapPanel, promptsPanel);
+  const button = doc.createElement("button");
+  button.type = "button";
+  button.className = "gs-hbtn";
+  button.dataset.gsUi = "";
+  button.setAttribute("aria-label", "Conversation view");
+  button.title = "Show or hide the conversation view and prompts";
+  button.setAttribute("aria-pressed", "false");
+  button.innerHTML = PANELS_ICON;
+  actions.append(button);
+  doc.body.append(column);
 
   const outputsBtn = doc.createElement("button");
   outputsBtn.type = "button";
@@ -219,10 +229,10 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
   const $ = (sel) => root.querySelector(sel);
   const minimap = $(".gs-minimap");
   const frame = $(".gs-frame");
+  const scene = $(".gs-scene");
   const bars = $(".gs-bars");
   const view = $(".gs-view");
   const caption = $(".gs-caption");
-  const filterBtn = $(".gs-filter");
   const input = $(".gs-search input");
   const list = $(".gs-prompts");
   const railLayout = createRailLayout({ win, adapter, target: () => els[0] });
@@ -244,8 +254,6 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
     outputsCollapsed = restore.ui.outputsCollapsed ?? outputsCollapsed;
     query = restore.ui.query;
     input.value = query;
-    inViewOnly = restore.ui.inViewOnly;
-    filterBtn.setAttribute("aria-pressed", String(inViewOnly));
   }
 
   /** Remember this conversation's state; never from another conversation's (stale) DOM. */
@@ -261,7 +269,7 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
     const prev = store.get(convId);
     store.save(convId, {
       sig,
-      ui: { query, inViewOnly, outputsCollapsed },
+      ui: { query, outputsCollapsed },
       activeId,
       list: { top: list.scrollTop, pinned: listPinned },
       bookmark: bookmark ?? prev?.bookmark ?? null,
@@ -349,9 +357,9 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
 
   // ---- layout -----------------------------------------------------------------------------
 
-  /** Change-only write of a panel position variable. */
+  /** Change-only write of a position variable of the panel column. */
   function setVar(name, value) {
-    for (const el of [mapPanel, promptsPanel]) if (el.style.getPropertyValue(name) !== value) el.style.setProperty(name, value);
+    if (column.style.getPropertyValue(name) !== value) column.style.setProperty(name, value);
   }
 
   /** Remove the disclosure from the native Outputs section and the attributes that drive its collapse. */
@@ -380,66 +388,77 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
     if (outputsBtn.getAttribute("aria-expanded") !== expanded) outputsBtn.setAttribute("aria-expanded", expanded);
   }
 
-  const visible = (name) => docked[name] || drawer === name;
+  const open = () => els.length > 0 && ((docked && shown) || drawer);
 
-  /** Panels and their header buttons follow the room (docked or drawer) and the remembered choice. */
+  /** The column, the minimap inside it and the header button follow the room (docked or drawer) and the remembered choice. */
   function applyVisibility() {
-    for (const name of ["minimap", "prompts"]) {
-      const on = visible(name);
-      if (panels[name].hidden === on) panels[name].hidden = !on;
-      const pressed = String(on);
-      if (buttons[name].getAttribute("aria-pressed") !== pressed) buttons[name].setAttribute("aria-pressed", pressed);
-      const drawerMode = String(!docked[name]);
-      if (panels[name].dataset.gsDrawer !== drawerMode) panels[name].dataset.gsDrawer = drawerMode;
-    }
-    if (visible("minimap")) {
+    const on = open();
+    if (actions.hidden === (els.length > 0)) actions.hidden = els.length === 0;
+    if (column.hidden === on) column.hidden = !on;
+    const mapOn = on && hasMap;
+    if (mapPanel.hidden === mapOn) mapPanel.hidden = !mapOn;
+    const pressed = String(on);
+    if (button.getAttribute("aria-pressed") !== pressed) button.setAttribute("aria-pressed", pressed);
+    const drawerMode = String(!docked);
+    if (column.dataset.gsDrawer !== drawerMode) column.dataset.gsDrawer = drawerMode;
+    if (mapOn) {
       modelKey = "";
       schedule();
     }
   }
 
-  /** Put the panel buttons in ChatGPT's header button area (before its right-most button); floating when there is none. */
-  function placeButtons() {
+  /**
+   * Put the button in ChatGPT's header button area (before its right-most button). With no header, or when a pane
+   * covers that corner of the header, it floats top-right instead, left of the pane. Returns whether it floats.
+   */
+  function placeButton(pane) {
     const spot = adapter.headerActions(doc);
-    if (spot) {
+    const box = pane?.isConnected ? pane.getBoundingClientRect() : null;
+    const covered = !!spot && !!box?.width && spot.right > box.left + 1 && box.top < adapter.headerBottom(doc) - 1; // under a pane that reaches into the header band
+    const floating = !spot || covered;
+    if (!floating) {
       if (actions.parentElement !== spot.parent || actions.nextElementSibling !== spot.before) spot.parent.insertBefore(actions, spot.before);
       if (actions.hasAttribute("data-gs-float")) actions.removeAttribute("data-gs-float");
     } else {
       if (actions.parentElement !== doc.body) doc.body.append(actions);
       if (!actions.hasAttribute("data-gs-float")) actions.setAttribute("data-gs-float", "");
     }
+    const right = `${box?.width && floating ? Math.max(8, Math.round(win.innerWidth - box.left) + 8) : 8}px`;
+    if (actions.style.getPropertyValue("--gs-float-right") !== right) actions.style.setProperty("--gs-float-right", right);
+    return floating;
   }
 
-  /** The same button collapses and restores a panel: docked, it is the remembered choice; with no room beside the conversation it opens and closes a drawer. */
-  function toggle(name) {
-    if (docked[name]) {
-      shown[name] = false;
-      layoutPrefs.set(shown);
-      layoutSig = null;
-      layout(true);
-    } else if (drawer === name) {
-      drawer = null;
-    } else {
-      if (!shown[name]) {
-        shown[name] = true;
-        layoutPrefs.set(shown);
-        layoutSig = null;
-        layout(true);
-      }
-      if (!docked[name]) drawer = name; // no room for it beside the conversation: show it as a drawer
+  /** ChatGPT's re-render can drop what we put in the page (the column, its style or the header button): put it back. */
+  function remount() {
+    if (!style.isConnected) doc.head.appendChild(style);
+    if (!column.isConnected) {
+      doc.body.append(column);
+      layoutSig = null; // a fresh column has none of its position variables
     }
-    applyVisibility();
   }
 
-  /** Re-center the conversation around the docked panels (or turn them into drawers) when the page layout changed. */
+  /** The one button shows and hides both panels: docked, it is the remembered choice; with no room beside the conversation it opens and closes a drawer. */
+  function toggle() {
+    if (docked) {
+      shown = !shown;
+      layoutPrefs.set(shown);
+    } else {
+      drawer = !drawer;
+    }
+    layoutSig = null;
+    layout(true);
+  }
+
+  /** Re-center the conversation around the docked column (or turn it into a drawer) when the page layout changed. */
   function layout(rescan = false) {
+    remount();
     // A mounted native pane is revalidated cheaply; looking for one is a page scan, so it runs at most every SCAN_MS
     // (at once on resize, route and animation hints) and a trailing pass catches a pane that mounted in between.
     let host = lastHost;
     if (!host || !host.pane.isConnected || !host.container.isConnected || (host.outputs && !(host.outputs.section.isConnected && host.outputs.head.isConnected)) || !host.pane.getBoundingClientRect().width) {
       const t = win.performance.now();
       if (rescan || t - scannedAt >= SCAN_MS) {
-        host = adapter.nativeSummary(doc);
+        host = adapter.nativeSummary(doc) ?? adapter.sidePane(doc);
         scannedAt = t;
       } else {
         host = null;
@@ -453,45 +472,40 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
     }
     lastHost = host;
     syncOutputs(host);
-    placeButtons();
-    // Dock every panel the user wants if the conversation keeps its width, else the prompts alone, else the minimap alone.
-    const want = ["minimap", "prompts"].filter((n) => shown[n]);
-    const options = want.length === 2 ? [want, ["prompts"], ["minimap"], []] : [want, []];
-    const key = `${railLayout.signature(host?.left)}|${want.join()}`;
+    const floating = placeButton(host?.pane);
+    // Under a page header the column starts below it; with the button floating, below the button.
+    const top = Math.max(Math.round(adapter.headerBottom(doc)), floating ? FLOAT_BOTTOM : 0) + 8;
+    // A new chat has nothing to show. While one of ChatGPT's own panes is open it has the room: our panels step aside
+    // (the page is left to ChatGPT) and are a drawer on request, and they come back when the pane closes.
+    const paneOpen = !!host || adapter.summaryOpen(doc);
+    const conversation = els.length > 0;
+    if (paneOpen !== lastPaneOpen) {
+      // ChatGPT slides its page into the new place over a transition, so what is measured right now is not where it ends up:
+      // measure again once it has settled.
+      lastPaneOpen = paneOpen;
+      if (settleTimer) win.clearTimeout(settleTimer);
+      settleTimer = win.setTimeout(() => {
+        settleTimer = null;
+        layoutSig = null;
+        if (!disposed) layout(true);
+      }, PANE_SETTLE_MS);
+    }
+    const key = `${railLayout.signature()}|${shown}|${top}|${paneOpen}|${conversation}`;
     if (key !== layoutSig) {
-      let chosen = [];
-      for (const option of options) {
-        const r = railLayout.evaluate({ left: option.includes("prompts") ? PANEL_WIDTH : 0, right: option.includes("minimap") ? PANEL_WIDTH : 0, paneLeft: host?.left });
-        if (r.docked || !option.length) {
-          chosen = option;
-          break;
-        }
-      }
-      docked = { minimap: chosen.includes("minimap"), prompts: chosen.includes("prompts") };
-      if (docked.minimap && drawer === "minimap") drawer = null;
-      if (docked.prompts && drawer === "prompts") drawer = null;
-      layoutSig = `${railLayout.signature(host?.left)}|${want.join()}`;
-      const edge = railLayout.edges(host?.left);
-      setVar("--gs-top", `${Math.max(0, Math.round(adapter.headerBottom(doc))) + 8}px`);
-      applyVars(edge);
+      const room = shown && conversation && !paneOpen;
+      const r = railLayout.evaluate({ right: room ? PANEL_WIDTH : 0 }); // nothing is reserved while hidden
+      docked = room ? r.docked : !(shown && conversation); // hidden by choice counts as "has room": the button then only toggles the choice
+      if (docked) drawer = false;
+      layoutSig = key;
+      setVar("--gs-top", `${top}px`);
+      // Docked, the column sits in the right gutter the page column leaves; as a drawer, in the window's corner.
+      setVar("--gs-right", `${docked ? Math.max(PANEL_GAP, Math.round(win.innerWidth - railLayout.edge()) + PANEL_GAP) : 8}px`);
       applyVisibility();
     }
-    // A drawer sits in its free corner and ends above the composer, never over it or the header.
+    // A drawer ends above the composer, never over it.
     const rect = adapter.composer(doc)?.getBoundingClientRect();
     const clear = rect?.height ? `${Math.max(16, Math.round(win.innerHeight - rect.top + 8))}px` : "96px";
-    if (!docked.prompts && promptsPanel.style.getPropertyValue("--gs-bottom") !== clear) promptsPanel.style.setProperty("--gs-bottom", clear);
-    const mapBottom = docked.minimap ? "16px" : clear;
-    if (mapPanel.style.getPropertyValue("--gs-map-bottom") !== mapBottom) mapPanel.style.setProperty("--gs-map-bottom", mapBottom);
-  }
-
-  /** Panel anchors: docked panels sit in the corners of the space the page column leaves; drawers in the window's corners. */
-  function applyVars(edge) {
-    const set = (name, prop, value) => {
-      if (panels[name].style.getPropertyValue(prop) !== value) panels[name].style.setProperty(prop, value);
-    };
-    set("minimap", "--gs-right", `${docked.minimap ? Math.max(PANEL_GAP, Math.round(win.innerWidth - edge.right) + PANEL_GAP) : 8}px`);
-    set("prompts", "--gs-left", `${docked.prompts ? Math.round(edge.left) + PANEL_GAP : 8}px`);
-    set("prompts", "--gs-bottom", "16px");
+    setVar("--gs-bottom", docked ? "16px" : clear);
   }
 
   // ---- prompt list ------------------------------------------------------------------------
@@ -527,8 +541,7 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
   }
 
   function renderList() {
-    let shown = searchPrompts(prompts, query);
-    if (inViewOnly) shown = shown.filter((p) => viewSet.has(p.id));
+    const shown = searchPrompts(prompts, query);
     list.textContent = "";
     if (!shown.length) {
       const li = doc.createElement("li");
@@ -589,7 +602,6 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
     const changed = next.size !== viewSet.size || [...next].some((id) => !viewSet.has(id));
     viewSet = next;
     if (!changed) return;
-    if (inViewOnly) return renderList();
     for (const b of list.querySelectorAll(".gs-prompt")) b.dataset.inView = String(viewSet.has(b.dataset.id));
   }
 
@@ -658,9 +670,10 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
     const slice = els.slice(prompts[ext.i].turnIndex, promptEnd(ext.i) + 1);
     const turnBox = ext.a.getBoundingClientRect();
     const turnPx = ext.z.getBoundingClientRect().bottom - turnBox.top;
-    const contentWidth = Math.min(turnBox.width || CONTENT_W, CONTENT_W); // ChatGPT's centered conversation column
+    // The conversation column as it is with no panes open, drawn on a sheet of paper (portrait, with a bezel at the sides).
+    const contentWidth = Math.min((turnBox.width || CONTENT_W) + railLayout.reserve(), CONTENT_W);
     // Content, rendered-ness and the turn's size (to 20px / 8px): anything that changes the drawn boxes.
-    const key = `${activeId}:${slice.map((e) => e.textContent.length).join(",")}:${slice.every((e) => runtime.isTurnActive(e))}:${Math.round(turnPx / 20)}:${Math.round(turnBox.width / 8)}:${Math.round(minimap.getBoundingClientRect().width / 8)}:${Math.round(win.innerHeight / 8)}:${mapPanel.style.getPropertyValue("--gs-map-bottom")}`;
+    const key = `${activeId}:${slice.map((e) => e.textContent.length).join(",")}:${slice.every((e) => runtime.isTurnActive(e))}:${Math.round(turnPx / 20)}:${Math.round(turnBox.width / 8)}:${Math.round(minimap.getBoundingClientRect().width / 8)}:${Math.round(win.innerHeight / 8)}:${Math.round(column.getBoundingClientRect().height / 8)}`;
     // A growing (streaming) turn rebuilds its overview at most twice a second.
     const now = win.performance.now();
     const throttled = key !== modelKey && modelKey !== "" && modelKey.startsWith(`${activeId}:`) && now - modelBuiltAt < 500 && !forceModel;
@@ -677,14 +690,17 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
       modelBuiltAt = now;
       bars.textContent = "";
       const items = silhouetteItems(ext, slice, turnBox.top, turnPx);
-      // The frame keeps the conversation's real aspect ratio: one scale for both axes, fitted to the box.
+      // The frame always fills the track, so it reads as the conversation column at one fixed scale; the scene inside
+      // it is the whole turn at that scale and slides under the frame as the conversation scrolls (a short turn fits).
       const box = minimap.getBoundingClientRect();
-      const room = win.innerHeight - parseFloat(mapPanel.style.getPropertyValue("--gs-map-bottom") || "16") - (adapter.headerBottom(doc) + 8) - MAP_CHROME;
+      const room = (column.getBoundingClientRect().height || win.innerHeight - 76) * 0.55 - MAP_CHROME; // the panel takes at most 55% of the column
       const maxH = clamp(Math.min(win.innerHeight * 0.45, room), 48, 360); // the panel grows with the conversation, up to this
-      const scale = Math.min((box.width ? box.width - MAP_PAD : MAP_W) / contentWidth, maxH / Math.max(turnPx, 1));
-      const size = { w: `${Math.max(24, Math.round(contentWidth * scale))}px`, h: `${Math.max(8, Math.round(turnPx * scale))}px` };
-      if (frame.style.width !== size.w) frame.style.width = size.w;
-      if (frame.style.height !== size.h) frame.style.height = size.h;
+      const frameW = Math.round((box.width ? box.width - MAP_PAD : MAP_W) * FRAME_SHARE);
+      const scale = frameW / contentWidth;
+      geom = { sceneH: Math.max(8, Math.round(turnPx * scale)), frameH: 0 };
+      geom.frameH = Math.min(geom.sceneH, Math.round(frameW * PAPER), Math.round(maxH)); // a sheet of paper, or the whole turn when it is shorter
+      if (frame.style.height !== `${geom.frameH}px`) frame.style.height = `${geom.frameH}px`;
+      scene.style.height = `${geom.sceneH}px`;
       // One text line of the real conversation (about 24px), at the same scale (never finer than 3px).
       bars.style.setProperty("--gs-lh", `${Math.max(3, Math.min(8, 24 * scale)).toFixed(1)}px`);
       for (const b of items) {
@@ -702,6 +718,15 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
       viewBottom: m.viewBottom,
     });
     if (view.hidden !== !ind) view.hidden = !ind;
+    // The scene slides so the viewport box stays inside the frame (centered where the turn is longer than the frame).
+    if (ind) {
+      const center = (ind.top + ind.height / 2) * geom.sceneH;
+      const next = Math.round(clamp(center - geom.frameH / 2, 0, Math.max(0, geom.sceneH - geom.frameH)));
+      if (next !== mapOffset) {
+        mapOffset = next;
+        scene.style.transform = `translateY(${-next}px)`;
+      }
+    }
     // Only write on change: any DOM write under body re-triggers the prompt-index observer.
     const text = `Drag to navigate • ${ind ? Math.round(ind.visible * 100) : 0}% visible`;
     if (caption.textContent !== text) caption.textContent = text;
@@ -748,6 +773,12 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
       markActive();
     }
     updateInView(m);
+    // The conversation view only exists for a conversation with a turn to draw; an empty frame would say nothing.
+    const drawable = turnExtent() !== null;
+    if (drawable !== hasMap) {
+      hasMap = drawable;
+      applyVisibility();
+    }
     renderMinimap(m);
     refreshLastPreview();
     persist(els.length ? bookmarkOf(m) : null);
@@ -818,8 +849,8 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
     const ext = turnExtent();
     if (!ext) return;
     ensureRendered(ext);
-    const f = frame.getBoundingClientRect();
-    const r = f.height ? f : minimap.getBoundingClientRect(); // the frame is the conversation; the track around it clamps
+    const sc = scene.getBoundingClientRect(); // the whole turn, slid under the frame: a point on it is a point in the turn
+    const r = sc.height ? sc : minimap.getBoundingClientRect(); // the track around it clamps
     const fraction = clamp(r.height ? (clientY - r.top) / r.height : 0, 0, 1);
     scroll.scrollTo("minimap", scrollTopForFraction({ fraction, ...turnGeometry(ext), viewHeight: scrollerHeight() }));
   }
@@ -886,32 +917,20 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
       e.stopPropagation();
     }
   });
-  for (const name of ["minimap", "prompts"]) {
-    on(buttons[name], "click", () => toggle(name));
-    on(panels[name].querySelector(".gs-collapse"), "click", () => {
-      toggle(name);
-      buttons[name].focus?.();
-    });
-    on(panels[name], "keydown", (e) => {
-      if (e.key === "Escape" && !docked[name] && drawer === name && !(name === "prompts" && input.value)) {
-        drawer = null;
-        applyVisibility();
-        buttons[name].focus?.();
-      }
-    });
-  }
+  on(button, "click", () => toggle());
+  on(column, "keydown", (e) => {
+    if (e.key === "Escape" && !docked && drawer && !input.value) {
+      drawer = false;
+      applyVisibility();
+      button.focus?.();
+    }
+  });
   on(outputsBtn, "click", (e) => {
     e.stopPropagation(); // the native title row has handlers of its own
     outputsCollapsed = !outputsCollapsed;
     syncOutputs(lastHost);
     persist();
     savePrefs();
-  });
-  on(filterBtn, "click", () => {
-    inViewOnly = !inViewOnly;
-    filterBtn.setAttribute("aria-pressed", String(inViewOnly));
-    renderList();
-    persist();
   });
   // The page column moves with the window and with ChatGPT's own sidebar (an animated width change).
   on(win, "resize", () => {
@@ -938,24 +957,29 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
 
   const api = {
     element: mapPanel,
-    state: () => ({ activeId, docked: { ...docked }, outputsCollapsed, listPinned, query, reserve: railLayout.reserve() }),
+    state: () => ({ activeId, docked, outputsCollapsed, listPinned, query, reserve: railLayout.reserve() }),
     /** Structure only, safe to expose: no ids, search text or prompts. */
-    shape: () => ({ docked: { ...docked }, minimap: visible("minimap"), prompts: visible("prompts"), drawer, outputsCollapsible: !!outputsHost, outputsCollapsed, reserve: railLayout.reserve() }),
+    shape: () => ({ docked, open: open(), minimap: open() && hasMap, prompts: open(), drawer, outputsCollapsible: !!outputsHost, outputsCollapsed, reserve: railLayout.reserve() }),
     select: (id) => {
       const p = prompts.find((x) => x.id === id);
       if (p) select(p);
       return !!p;
     },
     update,
+    /** Cheap check on every page mutation batch: put back whatever ChatGPT's re-render removed (the column, the button, the style). */
+    heal() {
+      if (disposed) return;
+      if (!column.isConnected || !style.isConnected || !actions.isConnected || !actions.parentElement?.isConnected) scheduleLayout(true);
+    },
     dispose() {
       disposed = true;
       if (trailing) win.clearTimeout(trailing);
       if (scanTimer) win.clearTimeout(scanTimer);
+      if (settleTimer) win.clearTimeout(settleTimer);
       cleanups.forEach((fn) => fn());
       railLayout.dispose();
       releaseOutputs();
-      mapPanel.remove();
-      promptsPanel.remove();
+      column.remove();
       actions.remove();
       style.remove();
     },

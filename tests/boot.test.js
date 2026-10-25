@@ -51,6 +51,7 @@ function setup(fx, { maxWaitMs = 30000, queueUi: customQueueUi } = {}) {
       const rail = runtime.mode === "active" || runtime.mode === "composer-only" ? createRail({ win: fx.win, adapter, runtime }) : null;
       return {
         runtime,
+        heal: () => rail?.heal(),
         dispose() {
           rail?.dispose();
           runtime.dispose();
@@ -346,4 +347,38 @@ test("while running, streaming mutations cost no script DOM writes and a bounded
   assert.ok(layoutCalls.n - before <= 3, `layout checks: ${layoutCalls.n - before}`);
   assert.ok(queries.n < 400, `selector calls during the whole burst: ${queries.n}`);
   mo.disconnect();
+});
+
+test("a re-render that removes the panels is healed on the next page mutation, even on a new chat with no observers of its own", async () => {
+  const fx = createFixture({ turns: 0, width: 1600 });
+  fx.win.history.replaceState(null, "", "/");
+  const { health, flush, log } = setup(fx);
+  assert.equal(health.mode, "composer-only");
+  assert.equal(fx.doc.querySelectorAll(".gs-rail").length, 1);
+  fx.doc.querySelector(".gs-rail").remove();
+  fx.doc.querySelector(".gs-hbtns").remove();
+  fx.doc.getElementById("gs-pane-style").remove();
+  fx.doc.body.append(fx.doc.createComment("ChatGPT re-rendered"));
+  await flush();
+  assert.equal(fx.doc.querySelectorAll(".gs-rail").length, 1, "the column is back");
+  assert.equal(fx.doc.querySelectorAll(".gs-hbtns").length, 1, "and its button");
+  assert.equal(fx.doc.querySelectorAll("#gs-pane-style").length, 1, "and its style");
+  assert.equal(log.mounts, 1, "healed in place, not by remounting everything");
+});
+
+test("a new chat shows no panels, no button and reserves nothing; the conversation's first turn brings them", async () => {
+  const fx = createFixture({ turns: 0, width: 1600 });
+  fx.win.history.replaceState(null, "", "/");
+  const { health, flush } = setup(fx);
+  assert.equal(health.mode, "composer-only");
+  assert.equal(fx.doc.querySelector(".gs-rail").hidden, true, "no prompt list and no conversation view on a new chat");
+  assert.equal(fx.doc.querySelector(".gs-hbtns").hidden, true, "and nothing to toggle");
+  assert.equal(fx.reserve(), 0, "the composer stays where it is");
+  for (let i = 0; i < 4; i++) fx.addTurn();
+  fx.win.history.pushState(null, "", "/c/first");
+  await flush();
+  assert.equal(health.mode, "active");
+  assert.equal(fx.doc.querySelectorAll(".gs-rail").length, 1);
+  assert.equal(fx.doc.querySelector(".gs-rail").hidden, false);
+  assert.equal(fx.doc.querySelector(".gs-hbtns").hidden, false);
 });

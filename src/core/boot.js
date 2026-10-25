@@ -12,7 +12,7 @@ export const BOOT_DEFAULTS = Object.freeze({ maxWaitMs: 30000, settleMs: 100 });
  * @param {object} o
  * @param {Window} o.win
  * @param {object} o.adapter selfCheck(doc), layout(doc, win)
- * @param {() => { runtime: object, dispose(): void }} o.mount builds one feature set; a throw is contained
+ * @param {() => { runtime: object, heal?(): void, dispose(): void }} o.mount builds one feature set (`heal` is called after page mutations while the layout is unchanged); a throw is contained
  * @param {string} o.version
  * @param {() => void} [o.onDispose] page-lifetime resources that survive restarts (the queue)
  * @param {() => object} [o.extraDiagnostics] counters of page-lifetime features outside the mount (recovery)
@@ -130,6 +130,7 @@ export function createBoot({ win, adapter, mount, version, onDispose, extraDiagn
       if (sameLayout(current.layout, layout)) {
         // The runtime may have dropped itself to safe mode since: that is final for this layout.
         if (current.handle.runtime.mode === "safe") failedLayout = layout;
+        else current.handle.heal?.(); // a re-render may have removed what the mount put in the page
         return;
       }
       // Route change, conversation root replaced, turns appeared in a new chat, or the composer was swapped.
