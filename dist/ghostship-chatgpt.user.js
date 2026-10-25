@@ -32,7 +32,7 @@
 
   // src/core/boot.js
   var BOOT_DEFAULTS = Object.freeze({ maxWaitMs: 3e4, settleMs: 100 });
-  function createBoot({ win, adapter, mount, version, onDispose, maxWaitMs = BOOT_DEFAULTS.maxWaitMs, settleMs = BOOT_DEFAULTS.settleMs, timers }) {
+  function createBoot({ win, adapter, mount, version, onDispose, extraDiagnostics, maxWaitMs = BOOT_DEFAULTS.maxWaitMs, settleMs = BOOT_DEFAULTS.settleMs, timers }) {
     const doc = win.document;
     const t = timers ?? {
       setTimeout: (fn, ms) => win.setTimeout(fn, ms),
@@ -185,7 +185,7 @@
       get attempts() {
         return state.attempts;
       },
-      diagnostics: () => ({ ...diagnostics.snapshot(), ...current?.handle.runtime.diagnostics.snapshot() ?? {} })
+      diagnostics: () => ({ ...diagnostics.snapshot(), ...extraDiagnostics?.() ?? {}, ...current?.handle.runtime.diagnostics.snapshot() ?? {} })
     };
     return {
       health,
@@ -211,6 +211,8 @@
     enabled: true,
     dryRun: false,
     // opt-in for testing only: the queue then talks to a no-side-effect dispatcher
+    recovery: true,
+    // retry ChatGPT's own "Try again" when a conversation fails to load
     windowTurns: 10,
     prefetchTurns: 2,
     maxObservers: 4,
@@ -614,11 +616,11 @@
   }
 
   // src/core/runtime.js
-  function createRuntime({ win, adapter, backend = createNoopBackend(), queueUi: queueUi2, config = loadConfig(win.localStorage) }) {
+  function createRuntime({ win, adapter, backend = createNoopBackend(), queueUi: queueUi2, config: config2 = loadConfig(win.localStorage) }) {
     const diagnostics = createDiagnostics(win.console);
-    const runtime = { config, diagnostics, mode: "off", promptIndex: [], dispose() {
+    const runtime = { config: config2, diagnostics, mode: "off", promptIndex: [], dispose() {
     } };
-    if (!config.enabled) return runtime;
+    if (!config2.enabled) return runtime;
     const check = adapter.selfCheck(win.document);
     if (!check.ok) {
       runtime.mode = "safe";
@@ -628,7 +630,7 @@
     }
     const mountQueue = () => {
       try {
-        return queueUi2?.({ win, adapter, config, diagnostics }) ?? { dispose() {
+        return queueUi2?.({ win, adapter, config: config2, diagnostics }) ?? { dispose() {
         } };
       } catch (error) {
         diagnostics.count("queue.mount.failed");
@@ -656,7 +658,7 @@
       diagnostics.count("runtime.composer-only");
       return runtime;
     }
-    const observers = createObserverHub({ max: config.maxObservers, MutationObserverCtor: win.MutationObserver, schedule: (fn) => win.setTimeout(fn, 16), diagnostics });
+    const observers = createObserverHub({ max: config2.maxObservers, MutationObserverCtor: win.MutationObserver, schedule: (fn) => win.setTimeout(fn, 16), diagnostics });
     const scroll = createScrollManager({ scroller: adapter.scroller(win.document), diagnostics });
     assertBackend(backend);
     const queue = mountQueue();
@@ -678,7 +680,7 @@
       diagnostics.count("virtualization.fallback");
       diagnostics.warnOnce("virtualization", `virtualization disabled (${reason}); running in safe mode`);
     };
-    const mounted = backend.mount({ doc: win.document, adapter, scroll, observers, config, diagnostics, fallback: failOpen, onLayout: () => layoutListeners.forEach((fn) => fn()) });
+    const mounted = backend.mount({ doc: win.document, adapter, scroll, observers, config: config2, diagnostics, fallback: failOpen, onLayout: () => layoutListeners.forEach((fn) => fn()) });
     if (mounted?.active === false) {
       failOpen(mounted.reason);
       return runtime;
@@ -778,6 +780,8 @@
     const section = head.parentElement;
     return !section || section === pane2 || section === head ? null : { section, head };
   }
+  var LOAD_ERROR = /could not load this chatgpt conversation/i;
+  var RETRY_LABEL = /^try again$/i;
   var nonEmptyRole = (el2, sel, attr) => (el2.matches(sel) ? el2 : el2.querySelector(sel))?.getAttribute(attr) || null;
   var chatgptAdapter = {
     turns: (root) => [...scope(root).querySelectorAll(TURN)],
@@ -929,6 +933,25 @@
         container: first ? this.turnRoot(doc) : null,
         scroller: first ? this.scroller(doc) : null
       };
+    },
+    /**
+     * The conversation-load failure card of the active page, or null: `{card, control}` where `control` is the
+     * "Try again" button/link inside it. Only a page without turns can hold it, and a control inside a turn
+     * (a per-message "Try again") never counts.
+     */
+    loadError(doc) {
+      const page = scope(doc);
+      if (page.querySelector(TURN)) return null;
+      for (const control of page.querySelectorAll('button, a, [role="button"]')) {
+        if (!RETRY_LABEL.test((control.textContent ?? "").trim())) continue;
+        let card = control;
+        for (let depth = 0; depth < 5 && card.parentElement && card !== page; depth++) {
+          card = card.parentElement;
+          const text = card.textContent ?? "";
+          if (text.length < 600 && LOAD_ERROR.test(text)) return { card, control };
+        }
+      }
+      return null;
     },
     /** `ok` means the composer is there (a new chat has no turns); `hasTurns` selects the full feature set. */
     selfCheck(doc) {
@@ -1293,8 +1316,8 @@
   }
 
   // src/chatgpt/queue/select.js
-  function selectDispatcher({ config, win, adapter }) {
-    return config.dryRun ? new DryRunDispatcher() : createLiveDispatcher({ win, adapter });
+  function selectDispatcher({ config: config2, win, adapter }) {
+    return config2.dryRun ? new DryRunDispatcher() : createLiveDispatcher({ win, adapter });
   }
 
   // src/chatgpt/queue/types.js
@@ -2687,6 +2710,143 @@
     return mount;
   }
 
+  // src/chatgpt/recovery.js
+  var RECOVERY_DEFAULTS = Object.freeze({
+    maxAttempts: 3,
+    delaysMs: [800, 4e3, 12e3],
+    // before attempt 1, 2, 3 (counted from detection / the previous failure)
+    verifyMs: 6e3,
+    // how long a retry gets to make the card go away
+    typingQuietMs: 3e3,
+    busyRecheckMs: 1500,
+    debounceMs: 500
+  });
+  var STATUS_ATTR = "data-gs-recovery";
+  function createRecovery({ win, adapter, diagnostics, options = {}, timers }) {
+    const doc = win.document;
+    const opts = { ...RECOVERY_DEFAULTS, ...options };
+    const t = timers ?? { setTimeout: (fn, ms) => win.setTimeout(fn, ms), clearTimeout: (id) => win.clearTimeout(id), now: () => win.performance.now() };
+    const hub = createObserverHub({ max: 1, MutationObserverCtor: win.MutationObserver, schedule: (fn) => t.setTimeout(fn, opts.debounceMs), diagnostics });
+    let route = win.location.pathname;
+    let attempts = 0;
+    let phase = "idle";
+    let timer = null;
+    let lastTyping = -Infinity;
+    let statusEl = null;
+    let disposed = false;
+    const clearTimer = () => {
+      if (timer !== null) t.clearTimeout(timer);
+      timer = null;
+    };
+    const later = (fn, ms) => {
+      clearTimer();
+      timer = t.setTimeout(() => {
+        timer = null;
+        if (!disposed) fn();
+      }, ms);
+    };
+    function showStatus(text) {
+      if (!statusEl) {
+        statusEl = doc.createElement("div");
+        statusEl.setAttribute(STATUS_ATTR, "");
+        statusEl.setAttribute("role", "status");
+        statusEl.style.cssText = "position:fixed;left:50%;bottom:12px;transform:translateX(-50%);z-index:2147483000;max-width:90vw;padding:4px 12px;border:1px solid rgba(127,127,127,.4);border-radius:999px;background:var(--main-surface-secondary,rgba(127,127,127,.15));color:inherit;font:12px/1.4 system-ui,sans-serif;opacity:.85";
+        doc.body.append(statusEl);
+      }
+      statusEl.textContent = text;
+    }
+    function hideStatus() {
+      statusEl?.remove();
+      statusEl = null;
+    }
+    function reset() {
+      clearTimer();
+      attempts = 0;
+      phase = "idle";
+      hideStatus();
+    }
+    function typing() {
+      if (t.now() - lastTyping < opts.typingQuietMs) return true;
+      const input = adapter.composerInput(doc);
+      if (!input || doc.activeElement !== input) return false;
+      return (input.value ?? input.textContent ?? "").trim() !== "";
+    }
+    const onTyping = () => {
+      lastTyping = t.now();
+    };
+    win.addEventListener("keydown", onTyping, true);
+    win.addEventListener("input", onTyping, true);
+    function recovered() {
+      diagnostics?.count("recovery.recovered");
+      reset();
+    }
+    function schedule() {
+      phase = "waiting";
+      later(attempt, opts.delaysMs[Math.min(attempts, opts.delaysMs.length - 1)]);
+    }
+    function attempt() {
+      if (win.location.pathname !== route) return check();
+      const found = adapter.loadError(doc);
+      if (!found) return recovered();
+      if (typing()) {
+        diagnostics?.count("recovery.deferred");
+        return later(attempt, opts.busyRecheckMs);
+      }
+      attempts += 1;
+      phase = "verifying";
+      diagnostics?.count("recovery.retry");
+      found.control.click();
+      later(verify, opts.verifyMs);
+    }
+    function verify() {
+      if (win.location.pathname !== route) return check();
+      if (!adapter.loadError(doc)) return recovered();
+      if (attempts >= opts.maxAttempts) {
+        phase = "gave-up";
+        diagnostics?.count("recovery.gave-up");
+        showStatus(`ChatGPT still could not load this conversation after ${attempts} tries. Reload the page to try again.`);
+        return;
+      }
+      schedule();
+    }
+    function check() {
+      if (disposed) return;
+      if (win.location.pathname !== route) {
+        route = win.location.pathname;
+        reset();
+      }
+      const found = adapter.loadError(doc);
+      if (!found) {
+        if (phase === "waiting" || phase === "verifying") recovered();
+        return;
+      }
+      if (phase === "idle") {
+        diagnostics?.count("recovery.detected");
+        schedule();
+      }
+    }
+    const unsubscribe = hub.subscribe(doc.body, check);
+    check();
+    return {
+      get phase() {
+        return phase;
+      },
+      get attempts() {
+        return attempts;
+      },
+      check,
+      dispose() {
+        if (disposed) return;
+        disposed = true;
+        unsubscribe();
+        clearTimer();
+        win.removeEventListener("keydown", onTyping, true);
+        win.removeEventListener("input", onTyping, true);
+        hideStatus();
+      }
+    };
+  }
+
   // src/chatgpt/rail/minimap-model.js
   var HEADING = /^H[1-6]$/;
   var PRIORITY = ["code", "table", "image", "heading", "text"];
@@ -3757,10 +3917,10 @@ ${LAYOUT_CSS}`;
       api: () => api
     };
   }
-  function mountTurns({ doc, adapter, scroll, observers, config, fallback, onLayout }) {
+  function mountTurns({ doc, adapter, scroll, observers, config: config2, fallback, onLayout }) {
     const win = doc.defaultView;
-    const size = config.windowTurns ?? 10;
-    const prefetch = config.prefetchTurns ?? 2;
+    const size = config2.windowTurns ?? 10;
+    const prefetch = config2.prefetchTurns ?? 2;
     const found = discover(doc, adapter);
     if (!found.parent) return { active: false, reason: found.reason };
     const { parent } = found;
@@ -3946,15 +4106,22 @@ ${LAYOUT_CSS}`;
 
   // src/chatgpt/main.js
   var queueUi = persistentQueueUi(
-    ({ win, adapter, diagnostics, config }) => createQueueUi({ win, adapter, diagnostics, dispatcher: selectDispatcher({ config, win, adapter }) })
+    ({ win, adapter, diagnostics, config: config2 }) => createQueueUi({ win, adapter, diagnostics, dispatcher: selectDispatcher({ config: config2, win, adapter }) })
   );
   var railState = createRailStateStore();
   var pane = null;
+  var config = loadConfig(window.localStorage);
+  var recoveryDiagnostics = createDiagnostics(window.console);
+  var recovery = config.enabled && config.recovery ? createRecovery({ win: window, adapter: chatgptAdapter, diagnostics: recoveryDiagnostics }) : null;
   var boot = createBoot({
     win: window,
     adapter: chatgptAdapter,
     version: "0.7.0",
-    onDispose: () => queueUi.shutdown(),
+    extraDiagnostics: () => recoveryDiagnostics.snapshot(),
+    onDispose: () => {
+      queueUi.shutdown();
+      recovery?.dispose();
+    },
     mount() {
       const runtime = createRuntime({ win: window, adapter: chatgptAdapter, backend: createTurnBackend(), queueUi });
       const rail = runtime.mode === "active" || runtime.mode === "composer-only" ? createRail({ win: window, adapter: chatgptAdapter, runtime, store: railState }) : null;

@@ -59,6 +59,11 @@ function summarySection(title, pane) {
   return !section || section === pane || section === head ? null : { section, head };
 }
 
+// ChatGPT's conversation-load failure card: a fixed message with a "Try again" control. Matched by its fixed
+// strings, never by class names; nothing in a conversation turn is ever treated as this card.
+const LOAD_ERROR = /could not load this chatgpt conversation/i;
+const RETRY_LABEL = /^try again$/i;
+
 const nonEmptyRole = (el, sel, attr) => (el.matches(sel) ? el : el.querySelector(sel))?.getAttribute(attr) || null;
 
 export const chatgptAdapter = {
@@ -211,6 +216,25 @@ export const chatgptAdapter = {
       container: first ? this.turnRoot(doc) : null,
       scroller: first ? this.scroller(doc) : null,
     };
+  },
+  /**
+   * The conversation-load failure card of the active page, or null: `{card, control}` where `control` is the
+   * "Try again" button/link inside it. Only a page without turns can hold it, and a control inside a turn
+   * (a per-message "Try again") never counts.
+   */
+  loadError(doc) {
+    const page = scope(doc);
+    if (page.querySelector(TURN)) return null;
+    for (const control of page.querySelectorAll('button, a, [role="button"]')) {
+      if (!RETRY_LABEL.test((control.textContent ?? "").trim())) continue;
+      let card = control;
+      for (let depth = 0; depth < 5 && card.parentElement && card !== page; depth++) {
+        card = card.parentElement;
+        const text = card.textContent ?? "";
+        if (text.length < 600 && LOAD_ERROR.test(text)) return { card, control };
+      }
+    }
+    return null;
   },
   /** `ok` means the composer is there (a new chat has no turns); `hasTurns` selects the full feature set. */
   selfCheck(doc) {

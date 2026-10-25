@@ -15,9 +15,10 @@ export const BOOT_DEFAULTS = Object.freeze({ maxWaitMs: 30000, settleMs: 100 });
  * @param {() => { runtime: object, dispose(): void }} o.mount builds one feature set; a throw is contained
  * @param {string} o.version
  * @param {() => void} [o.onDispose] page-lifetime resources that survive restarts (the queue)
+ * @param {() => object} [o.extraDiagnostics] counters of page-lifetime features outside the mount (recovery)
  * @param {{ setTimeout: Function, clearTimeout: Function, now(): number }} [o.timers]
  */
-export function createBoot({ win, adapter, mount, version, onDispose, maxWaitMs = BOOT_DEFAULTS.maxWaitMs, settleMs = BOOT_DEFAULTS.settleMs, timers }) {
+export function createBoot({ win, adapter, mount, version, onDispose, extraDiagnostics, maxWaitMs = BOOT_DEFAULTS.maxWaitMs, settleMs = BOOT_DEFAULTS.settleMs, timers }) {
   const doc = win.document;
   const t = timers ?? {
     setTimeout: (fn, ms) => win.setTimeout(fn, ms),
@@ -188,7 +189,7 @@ export function createBoot({ win, adapter, mount, version, onDispose, maxWaitMs 
     get attempts() {
       return state.attempts;
     },
-    diagnostics: () => ({ ...diagnostics.snapshot(), ...(current?.handle.runtime.diagnostics.snapshot() ?? {}) }),
+    diagnostics: () => ({ ...diagnostics.snapshot(), ...(extraDiagnostics?.() ?? {}), ...(current?.handle.runtime.diagnostics.snapshot() ?? {}) }),
   };
 
   return {
