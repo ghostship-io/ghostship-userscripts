@@ -26,13 +26,13 @@ The queue is live: the queued prompt is sent through ChatGPT's own composer, and
 
 ## Update
 
-The script's `@updateURL` points at `dist/<id>.meta.js` on `main` and the manager installs a new `dist/<id>.user.js` when its `@version` is higher. To release: change `src/`, run `npm run bump -- <id> <patch|minor|major>`, `npm run build`, commit `dist/`, merge to `main`. The update channel is GitHub over HTTPS only; verify an artifact against `dist/manifest.json` (`sha256sum`).
+The script's `@updateURL` points at `dist/<id>.meta.js` on `main` and the manager installs a new `dist/<id>.user.js` when its `@version` is higher. To release: change `src/`, run `npm run build`, commit `dist/`, add an entry under `## Unreleased` in `CHANGELOG.md` and merge to `main`. Nobody edits a version by hand: after the merge, the release workflow (`.github/workflows/release.yml`, `scripts/release.mjs`) derives the next version from the changelog (patch by default, or a standalone `Release: minor` / `Release: major` line in the Unreleased section), moves the entries under a `## [x.y.z] - date` heading with their PR number, writes the version into `manifest.json`, rebuilds `dist/` and pushes one `Release x.y.z` commit carrying a `Ghostship-Release: repo#PR` trailer. It is idempotent and refuses to run on a merge that was not made with the owner's no-reply identity. CI (`scripts/check-pr.mjs`) refuses a PR that edits a version field, adds a release section or ships a change to `src/`, `dist/` or `manifest.json` without a new Unreleased entry. The update channel is GitHub over HTTPS only; verify an artifact against `dist/manifest.json` (`sha256sum`).
 
 Violentmonkey checks for updates every **1 day** (Settings, "Check for script updates every N day(s)"; the smallest non-zero value, left at the default). GitHub's raw host may serve a cached file for a few minutes after a merge. To update immediately: Violentmonkey dashboard, Installed scripts, the refresh icon on the script (or the toolbar refresh button for all scripts), then reload chatgpt.com.
 
 ## Rollback and pinning
 
-Managers only move to a strictly higher `@version`, so roll back by `git revert` of the bad change, then bump and build as above; the manager picks the fix up on its next check.
+Managers only move to a strictly higher `@version`, so roll back by `git revert` of the bad change, then add a changelog entry (the release step bumps and rebuilds); the manager picks the fix up on its next check.
 
 To pin a build, install from an immutable tag or commit URL (`https://raw.githubusercontent.com/ghostship-io/ghostship-userscripts/<tag-or-sha>/dist/<id>.user.js`) and turn off that script's automatic update (Violentmonkey, script settings, uncheck "Update"). To follow `main` again, reinstall from the `main` URL above.
 

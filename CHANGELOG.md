@@ -1,6 +1,6 @@
 # Changelog
 
-Agents add an entry under Unreleased and do not touch version fields; release tooling sets the version on merge.
+Agents add entries under Unreleased and never touch version fields. After a merge, `scripts/release.mjs` moves the entries under a new `## [x.y.z] - date` heading (adding the PR number) and sets the version: patch by default, or minor/major with a standalone `Release: minor` / `Release: major` line in the Unreleased section.
 
 ## Unreleased
 

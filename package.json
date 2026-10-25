@@ -8,9 +8,10 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
-    "bump": "node scripts/bump.mjs",
     "gate": "node scripts/gate.mjs",
-    "test": "npm run build --silent && node --test \"tests/*.test.js\""
+    "test": "npm run build --silent && node --test \"tests/*.test.js\"",
+    "check:pr": "node scripts/check-pr.mjs",
+    "release": "node scripts/release.mjs"
   },
   "devDependencies": {
     "esbuild": "^0.25.0",

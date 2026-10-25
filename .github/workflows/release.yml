@@ -1,0 +1,35 @@
+name: release
+# Runs after a merge to main: derives the version from CHANGELOG.md, rebuilds dist/ and pushes one release commit.
+# The merge commit's runtime identity (the owner GitHub no-reply address) is reused for the release commit; the step
+# refuses any other identity. A release commit pushed with GITHUB_TOKEN does not start another run.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+concurrency:
+  group: release
+  cancel-in-progress: false
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - id: release
+        run: echo "result=$(node scripts/release.mjs --apply)" >> "$GITHUB_OUTPUT"
+      - name: Verify the release before publishing it
+        if: contains(steps.release.outputs.result, '"released":true')
+        run: |
+          npm test
+          npm run gate
+      - name: Publish the release commit
+        if: contains(steps.release.outputs.result, '"released":true')
+        run: git push origin HEAD:main
