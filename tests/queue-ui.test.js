@@ -16,7 +16,7 @@ async function mount({ page, factory = new IDBFactory(), clock = new ManualClock
   const { window } = page;
   const t = { now: 1_000_000 };
   dispatcher ??= live
-    ? createLiveDispatcher({ win: window, adapter: chatgptAdapter, pollMs: 1, settleMs: 0, sendWaitMs: 40, steerWaitMs: 15, ackMs: 40, stopWaitMs: 40, now: () => t.now })
+    ? createLiveDispatcher({ win: window, adapter: chatgptAdapter, pollMs: 1, settleMs: 0, placeWaitMs: 15, sendWaitMs: 40, steerWaitMs: 15, ackMs: 40, stopWaitMs: 40, now: () => t.now })
     : new DryRunDispatcher();
   const ui = createQueueUi({ win: window, adapter: chatgptAdapter, dispatcher, indexedDB: factory, clock, tabId, pollMs: 0 });
   await ui.ready;
@@ -387,4 +387,30 @@ test("a new unsaved chat is not intercepted", async () => {
   const event = await t.enter("hello");
   assert.equal(event.defaultPrevented, false);
   assert.equal(t.rows(), 0);
+});
+
+test("a Blocked card keeps Steer, Interrupt & Send Next and Pause usable, and Retry works without a reload", async () => {
+  // Defect: the owner's live bug: Blocked with Steer and Pause disabled and nothing to press but a reload.
+  const t = await mount({ live: true, page: await fakePage({ editable: "contenteditable", sendOnlyWithText: true }) });
+  t.page.startStreaming();
+  await t.enter("held text");
+  t.page.finishStreaming();
+  t.page.fill = "never";
+  for (let i = 0; i < 6; i++) await t.tick();
+  assert.match(t.$(".gs-q-status").textContent, /Blocked/);
+  assert.equal(t.key("head:steer").disabled, false);
+  assert.equal(t.key("head:interrupt").disabled, false);
+  assert.equal(t.key("head:pause").disabled, false);
+  assert.deepEqual(t.page.log, []);
+
+  await t.click("head:pause");
+  assert.match(t.$(".gs-q-status").textContent, /Blocked/);
+  await t.click("head:pause");
+
+  t.page.fill = "now";
+  await t.click("head:retry");
+  assert.match(t.$(".gs-q-status").textContent, /Queued|Waiting/);
+  for (let i = 0; i < 4; i++) await t.tick();
+  assert.deepEqual(t.page.sends(), ["send:held text"], "Retry sent it without a reload");
+  assert.equal(t.queued(), null);
 });

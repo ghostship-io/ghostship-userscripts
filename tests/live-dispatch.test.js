@@ -281,3 +281,82 @@ test("the published default is live; dry run is an explicit opt-in", async () =>
   assert.ok(!(live instanceof DryRunDispatcher));
   assert.ok(selectDispatcher({ config: { ...DEFAULTS, dryRun: true }, ...args }) instanceof DryRunDispatcher);
 });
+
+// ---- the composer race from live use: placement confirmed late (#630) ----
+
+test("placement the editor applies LATE is read back after it settles: the text counts as placed and is sent once, never blocked", async () => {
+  // Defect: one immediate read-back right after the write said `could not place the text` while the text was arriving.
+  const page = await fakePage({ editable: "contenteditable", sendOnlyWithText: true });
+  page.fill = 60; // the editor shows the text 60 ms after the write
+  const { engine, dispatcher } = await engineOn(page, { placeWaitMs: 600 });
+  await engine.append(TARGET, { text: "first\n\nsecond" });
+  dispatcher.clock.t += 5_000;
+  assert.equal((await engine.step(TARGET)).kind, "sent");
+  assert.deepEqual(page.sends(), ["send:first\n\nsecond"]);
+  assert.equal((await engine.view(TARGET)).pending, null);
+  assert.equal(page.text(), "");
+});
+
+test("placement slower than the wait: the step waits; when the text lands, the composer holding exactly the queued text is ours and is sent", async () => {
+  // Defect: the late text read as a user draft (`composer-has-draft`), then a hold that never cleared.
+  const page = await fakePage({ editable: "contenteditable", sendOnlyWithText: true });
+  page.fill = 120;
+  const { engine, dispatcher } = await engineOn(page, { placeWaitMs: 20 });
+  await engine.append(TARGET, { text: "queued text" });
+  dispatcher.clock.t += 5_000;
+  assert.deepEqual(await engine.step(TARGET), { kind: "waiting", reason: "placing-text" });
+  assert.deepEqual((await engine.view(TARGET)).pending.status, "pending", "not blocked by a placement still in progress");
+  await new Promise((resolve) => setTimeout(resolve, 200)); // the text arrives after the step gave up
+  assert.equal(page.text(), "queued text");
+  assert.deepEqual(await dispatcher.readiness(TARGET, "queued text"), { state: "ready" });
+  assert.deepEqual(await dispatcher.readiness(TARGET), { state: "waiting", reason: "composer-has-draft" }, "without the queued text it is still a draft");
+  const outcome = await engine.step(TARGET);
+  assert.equal(outcome.kind, "sent");
+  assert.deepEqual(page.sends(), ["send:queued text"], "sent once");
+});
+
+test("a different draft is still a draft: the composer holding other text is never treated as the queued text", async () => {
+  // Defect: the fix swallowing a real user draft.
+  const page = await fakePage();
+  page.type("something else");
+  const { engine, dispatcher } = await engineOn(page);
+  await engine.append(TARGET, { text: "queued text" });
+  dispatcher.clock.t += 5_000;
+  assert.deepEqual(await engine.step(TARGET), { kind: "waiting", reason: "composer-has-draft" });
+  assert.equal(page.text(), "something else");
+  assert.deepEqual(page.log, []);
+});
+
+test("text that truly never appears is waited out twice, then held; the hold never stops Steer, and Retry works without a reload", async () => {
+  // Defect: a Blocked prompt with Steer and Pause disabled that only a page reload could clear.
+  const page = await fakePage({ editable: "contenteditable", sendOnlyWithText: true });
+  page.fill = "never";
+  const { engine, dispatcher } = await engineOn(page, { placeWaitMs: 15 });
+  await engine.append(TARGET, { text: "x" });
+  dispatcher.clock.t += 5_000;
+  assert.deepEqual(await engine.step(TARGET), { kind: "waiting", reason: "placing-text" });
+  assert.deepEqual(await engine.step(TARGET), { kind: "waiting", reason: "placing-text" });
+  const held = await engine.step(TARGET);
+  assert.equal(held.kind, "rejected");
+  assert.equal(held.error.code, "composer-fill-failed");
+  assert.equal((await engine.view(TARGET)).pending.status, "blocked");
+  assert.equal((await engine.step(TARGET)).kind, "halted", "no automatic retry");
+  assert.deepEqual(page.log, []);
+
+  page.fill = "now"; // the page recovers
+  await engine.pause(TARGET); // pausing a blocked prompt works
+  const steered = await engine.steer(TARGET, { native: false });
+  assert.equal(steered.kind, "sent", "an explicit Steer lifts the hold");
+  assert.deepEqual(page.sends(), ["send:x"]);
+
+  await engine.append(TARGET, { text: "y" });
+  page.fill = "never";
+  for (let i = 0; i < 3; i++) await engine.steer(TARGET, { native: false });
+  assert.equal((await engine.view(TARGET)).pending.status, "blocked");
+  page.fill = "now";
+  await engine.unblock(TARGET);
+  await engine.resume(TARGET);
+  page.finishStreaming();
+  dispatcher.clock.t += 5_000;
+  assert.equal((await engine.step(TARGET)).kind, "sent", "Retry then sends, no reload");
+});

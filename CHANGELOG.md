@@ -6,6 +6,10 @@ Agents add entries under Unreleased and never touch version fields. After a merg
 
 - On opening a conversation the script now waits for the page to settle, then selects the last prompt in the Prompts list like a click on it, and keeps re-targeting the newest last prompt while more prompts load until the list settles; any scroll, click, key or touch from the user ends it (#629).
 
+## [0.7.2] - 2026-10-25
+
+- Fix the queue's false "could not place the text in the composer" error (#630): the staged text is read back after the editor has applied it instead of once, immediately; a composer that already holds exactly the queued text counts as placed and is sent; a genuinely missing placement is waited out twice before the prompt is held. A held prompt no longer disables Steer, Interrupt & Send Next or Pause, and Retry works without a reload.
+
 ## [0.7.1] - 2026-10-25
 
 - Recover from ChatGPT's "Could not load this ChatGPT conversation" card (#796): the script presses ChatGPT's own "Try again" up to 3 times per conversation and route visit with a bounded backoff, never while the owner is typing, and shows a quiet status line if it still fails. It never reloads the page or sends anything. `{"recovery":false}` turns it off.
