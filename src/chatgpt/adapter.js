@@ -12,6 +12,8 @@ const REPLY = "[data-conversation-role]";
 // The prompt box is a ProseMirror contenteditable inside the composer form (no #prompt-textarea any more).
 const COMPOSER = '#prompt-textarea, [data-chatgpt-composer] [contenteditable="true"], form [contenteditable="true"][role="textbox"]';
 const SEND = 'button[data-testid="send-button"]';
+// ChatGPT's composer no longer carries test ids: its Send is the form's submit button labelled "Send".
+const SEND_FALLBACK = 'button[type="submit"][aria-label^="Send" i]';
 const STOP = 'button[data-testid="stop-button"]';
 // ChatGPT's Stop control is not always the same testid. Inside the composer form any "Stop ..." button
 // counts, and so does a reply that is still marked as streaming; missing one signal never reads as idle.
@@ -100,7 +102,7 @@ export const chatgptAdapter = {
   blocks: (turnEls) => turnEls.flatMap((el) => [...el.querySelectorAll(BLOCKS)]),
   // Queue transport (live dispatcher): the editable composer input and its Send/Stop buttons.
   composerInput: (doc) => scope(doc).querySelector(COMPOSER),
-  sendButton: (doc) => scope(doc).querySelector(SEND),
+  sendButton: (doc) => scope(doc).querySelector(SEND) ?? scope(doc).querySelector(COMPOSER)?.closest("form")?.querySelector(SEND_FALLBACK) ?? null,
   // Inside the composer form only: the queue card has its own Steer button, which must never be mistaken for it.
   steerButton: (doc) => scope(doc).querySelector(COMPOSER)?.closest("form")?.querySelector(STEER) ?? null,
   stopButton(doc) {
@@ -146,6 +148,25 @@ export const chatgptAdapter = {
   turnRoot: (doc) => scope(doc).querySelector(TURN_ROOT) ?? scope(doc).querySelector(TURN)?.parentElement ?? null,
   /** The element the queue panel is inserted directly before: the composer form, else the input itself. */
   composer: (doc) => scope(doc).querySelector(COMPOSER)?.closest("form") ?? scope(doc).querySelector(COMPOSER),
+  /**
+   * The conversation the active page itself says it holds (ChatGPT stamps its composer wrapper with it), or null when it
+   * declares none. The URL changes before the page behind it does, so a send is verified against both.
+   */
+  pageConversationId: (doc) => scope(doc).querySelector("[data-map-composer-conversation]")?.getAttribute("data-map-composer-conversation") || null,
+  /**
+   * The sidebar's conversation rows (the sidebar is outside the page element): `{ id, link, host }`, where `host` is the
+   * element holding the row's title, which is where a marker goes.
+   */
+  sidebarLinks(doc) {
+    const out = [];
+    for (const link of doc.querySelectorAll('a[href*="/c/"]')) {
+      const id = link.getAttribute("href")?.match(/^(?:\/g\/[^/]+)?\/c\/([\w-]+)/)?.[1];
+      if (!id || link.closest(OWN_UI) || link.closest(TURN) || !link.closest("nav")) continue;
+      const title = link.querySelector("[data-thread-title]");
+      out.push({ id, link, host: title?.parentElement ?? link });
+    }
+    return out;
+  },
   conversationId: (win) => win.location.pathname.match(/^(?:\/g\/[^/]+)?\/c\/([\w-]+)/)?.[1] ?? "new",
   /**
    * The element that actually scrolls the conversation. The known selector is trusted unless a nearer

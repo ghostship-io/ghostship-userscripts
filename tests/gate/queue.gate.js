@@ -222,14 +222,11 @@ test("failed attachments: a prompt whose files cannot be restored is held, nothi
   clean(w);
 });
 
-test("cancellation: a deleted or paused prompt is never sent; one being sent keeps its text while a new one starts", async () => {
+test("cancellation: a deleted prompt is never sent; one being sent keeps its text while a new one starts", async () => {
   const w = guardedWorld();
   const { engine } = await w.tab("T1");
   await engine.append(A, { text: "a" });
-  await engine.pause(A);
-  assert.deepEqual(await engine.step(A), { kind: "paused" });
   await engine.remove(A);
-  await engine.resume(A);
   assert.equal((await engine.step(A)).kind, "idle");
   await engine.append(A, { text: "b" });
   w.dispatcher.submitScript = ["hang"];
@@ -241,6 +238,32 @@ test("cancellation: a deleted or paused prompt is never sent; one being sent kee
   w.clock.advance(10_000);
   await sending;
   assert.deepEqual(w.dispatcher.sentTexts(), ["b"], "the deleted prompt never left");
+  clean(w);
+});
+
+test("persist and resume: a prompt queued in A is untouched while B is on screen and goes out once, into A, when A is back and idle", async () => {
+  const w = guardedWorld();
+  const { engine } = await w.tab("T1");
+  w.dispatcher.state = "generating";
+  await engine.append(A, { text: "left behind" });
+  assert.deepEqual(await engine.step(A), { kind: "waiting", reason: "generating" });
+  // The owner moves to B, which is idle and has nothing queued: only B is ever stepped, A's record just waits.
+  w.dispatcher.finishGeneration();
+  for (let i = 0; i < 30; i++) {
+    w.clock.advance(60_000);
+    assert.deepEqual(await engine.step(B), { kind: "idle" });
+  }
+  assert.equal(w.dispatcher.submits(), 0, "nothing is sent while A is not on screen");
+  assert.equal((await pending(engine)).text, "left behind", "A's prompt is still there, unchanged");
+  assert.deepEqual([...(await engine.queuedConversations(A.accountId))], [A.conversationId], "and flagged for the sidebar");
+  // A is opened again, its response long over.
+  assert.equal((await engine.step(A)).kind, "sent");
+  assert.deepEqual(w.dispatcher.sentTexts(), ["left behind"]);
+  assert.deepEqual(w.dispatcher.log.map((e) => e.request.conversationId), [A.conversationId], "into A, never B");
+  assert.equal(w.dispatcher.stops(), 0);
+  w.dispatcher.finishGeneration();
+  assert.equal((await engine.step(A)).kind, "idle");
+  assert.equal(w.dispatcher.submits(), 1, "exactly once");
   clean(w);
 });
 
@@ -307,6 +330,7 @@ test("bundle: Enter while generating queues in the native composer; no native Se
   const fx = createFixture({ turns: 6 });
   const guards = installPageGuards(fx);
   fx.win.indexedDB = new IDBFactory();
+  fx.doc.body.insertAdjacentHTML("afterbegin", '<nav><a href="/c/fixture"><span data-thread-title="true">here</span></a><a href="/c/elsewhere"><span data-thread-title="true">there</span></a></nav>');
   runBundle(fx);
   await fx.settle();
   const input = fx.doc.querySelector("#prompt-textarea");
@@ -326,6 +350,11 @@ test("bundle: Enter while generating queues in the native composer; no native Se
   assert.equal(panel().querySelectorAll(".gs-q-text").length, 1);
   assert.equal(panel().querySelector("textarea"), null, "no separate input");
   assert.doesNotMatch(panel().textContent, /\bnull\b|\bundefined\b/);
+  // The card is the bubble with three small icons below its text; the sidebar row of the conversation carries a pencil.
+  assert.deepEqual([...panel().querySelectorAll("button")].map((b) => b.getAttribute("data-gs-key")), ["head:edit", "head:delete", "head:steer"]);
+  assert.equal(panel().firstElementChild.className, "gs-q-text");
+  assert.equal(fx.doc.querySelectorAll("a[href='/c/fixture'] [data-gs-queued]").length, 1);
+  assert.equal(fx.doc.querySelectorAll("a[href='/c/elsewhere'] [data-gs-queued]").length, 0);
   assert.deepEqual(guards.report(), { nativeClicks: [], formSubmits: 0, network: [] });
   fx.win.close(); // the queue polls on a timer; closing the window stops it
 });

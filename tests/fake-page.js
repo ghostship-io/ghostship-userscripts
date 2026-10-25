@@ -6,7 +6,7 @@ import { loadFixture } from "./helpers.js";
 
 export const TARGET = { accountId: "unknown", conversationId: "fixture" };
 
-export async function fakePage({ editable = "textarea", acknowledges = true, stopWorks = true, steer = false, sendOnlyWithText = false, sendMissing = false, profile = null } = {}) {
+export async function fakePage({ editable = "textarea", acknowledges = true, stopWorks = true, steer = false, sendOnlyWithText = false, sendMissing = false, profile = null, sendLabel = false } = {}) {
   const dom = await loadFixture();
   const { window } = dom;
   const doc = window.document;
@@ -88,7 +88,9 @@ export async function fakePage({ editable = "textarea", acknowledges = true, sto
   const button = (testid, onClick) => {
     const b = doc.createElement("button");
     b.type = "button";
-    b.setAttribute("data-testid", testid);
+    // ChatGPT's current composer has no test ids: Send is the form's submit button labelled "Send".
+    if (sendLabel && testid === "send-button") (b.setAttribute("type", "submit"), b.setAttribute("aria-label", "Send"));
+    else b.setAttribute("data-testid", testid);
     b.addEventListener("click", onClick);
     form.append(b);
     return b;
@@ -144,6 +146,25 @@ export async function fakePage({ editable = "textarea", acknowledges = true, sto
   if (sendMissing) page.mountSend = () => {}; // the page never shows a Send button
   input.addEventListener("input", sync);
   if (!sendOnlyWithText) page.mountSend();
+  // The conversation the active page says it holds (ChatGPT stamps its composer wrapper); null removes the stamp.
+  page.holds = (id) => {
+    form.parentElement.toggleAttribute("data-map-composer-conversation", id !== null);
+    if (id !== null) form.parentElement.setAttribute("data-map-composer-conversation", id);
+  };
+  // The sidebar: a nav of conversation rows (the link holds the title span), outside the page.
+  page.sidebar = (ids) => {
+    doc.querySelector("nav[data-fake-sidebar]")?.remove();
+    const nav = doc.createElement("nav");
+    nav.setAttribute("data-fake-sidebar", "");
+    for (const id of ids) {
+      const a = doc.createElement("a");
+      a.setAttribute("href", `/c/${id}`);
+      a.innerHTML = '<span data-thread-title="true">title</span>';
+      nav.append(a);
+    }
+    doc.body.prepend(nav);
+    return nav;
+  };
   page.sends = () => page.log.filter((e) => e.startsWith("send:"));
   page.io = createComposerIO(window);
   return page;

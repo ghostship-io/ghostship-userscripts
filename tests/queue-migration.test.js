@@ -93,11 +93,13 @@ test("migration: failed or blocked rows keep their text but hold the prompt for 
   assert.deepEqual(b.attachments, [file]);
 });
 
-test("migration: the paused flag follows, and the original rows stay untouched as the recovery copy", async () => {
+test("migration: a paused queue stays held until Retry, and the original rows stay untouched as the recovery copy", async () => {
   // Defect: an upgrade that resumes a paused queue, or that destroys the source text.
   const factory = await legacyDatabase([row("a", "conv", 0, "pending"), row("b", "conv", 1, "pending")], [{ conversationId: "conv", paused: true }]);
   const store = await QueueStore.open(factory);
-  assert.equal((await read(store, "unknown:conv")).state.paused, true);
+  const held = (await read(store, "unknown:conv")).pending;
+  assert.equal(held.status, "blocked", "nothing is sent unasked after the upgrade");
+  assert.equal(held.lastError.code, "legacy-paused");
   const originals = await store.legacyItems();
   assert.deepEqual(originals.map((r) => [r.id, r.text, r.status]).sort(), [["a", "text-a", "pending"], ["b", "text-b", "pending"]]);
   store.close();

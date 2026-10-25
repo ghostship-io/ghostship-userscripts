@@ -17,6 +17,7 @@ function dispatcherFor(page, opts = {}) {
     win: page.window,
     adapter: chatgptAdapter,
     pollMs: 1,
+    arriveMs: 0,
     settleMs: 500,
     sendWaitMs: 40,
     steerWaitMs: 15,
@@ -328,7 +329,7 @@ test("a different draft is still a draft: the composer holding other text is nev
 });
 
 test("text that truly never appears is waited out twice, then held; the hold never stops Steer, and Retry works without a reload", async () => {
-  // Defect: a Blocked prompt with Steer and Pause disabled that only a page reload could clear.
+  // Defect: a Blocked prompt with Steer disabled that only a page reload could clear.
   const page = await fakePage({ editable: "contenteditable", sendOnlyWithText: true });
   page.fill = "never";
   const { engine, dispatcher } = await engineOn(page, { placeWaitMs: 15 });
@@ -344,7 +345,6 @@ test("text that truly never appears is waited out twice, then held; the hold nev
   assert.deepEqual(page.log, []);
 
   page.fill = "now"; // the page recovers
-  await engine.pause(TARGET); // pausing a blocked prompt works
   const steered = await engine.steer(TARGET, { native: false });
   assert.equal(steered.kind, "sent", "an explicit Steer lifts the hold");
   assert.deepEqual(page.sends(), ["send:x"]);
@@ -355,7 +355,6 @@ test("text that truly never appears is waited out twice, then held; the hold nev
   assert.equal((await engine.view(TARGET)).pending.status, "blocked");
   page.fill = "now";
   await engine.unblock(TARGET);
-  await engine.resume(TARGET);
   page.finishStreaming();
   dispatcher.clock.t += 5_000;
   assert.equal((await engine.step(TARGET)).kind, "sent", "Retry then sends, no reload");

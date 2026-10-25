@@ -2,10 +2,13 @@
 // native composer is the only place text is entered or edited: while a response runs, plain Enter
 // there appends to the conversation's one pending prompt instead of sending or steering. Every send
 // and stop goes through the injected dispatcher; this file has no way to reach ChatGPT itself.
+import { createObserverHub } from "../../core/observers.js";
+import { createWorkerTimers } from "../../core/worker-timer.js";
 import { createComposerIO } from "./composer.js";
 import { DispatchBoundary } from "./dispatch.js";
 import { QueueEngine } from "./queue.js";
 import { QueueStore } from "./store.js";
+import { createQueueMarkers } from "./markers.js";
 import { joinContributions } from "./text.js";
 import { systemClock } from "./types.js";
 import { CSS, STYLE_ID, renderPanel } from "./view.js";
@@ -26,6 +29,8 @@ const RELOAD_EVERY = 5; // ticks between quiet reloads when no cross-tab message
  * @param {object} [o.diagnostics]
  * @param {IDBFactory} [o.indexedDB]
  * @param {number} [o.pollMs] Background refresh/dispatch period; 0 disables it (tests call `tick`).
+ * @param {number} [o.hiddenPollMs] Period of the hidden-tab ticker (worker timers, not throttled); defaults to `pollMs`.
+ * @param {{once: Function, every: Function, dispose(): void}} [o.timers] shared with the dispatcher; hidden-tab safe
  */
 export function createQueueUi({
   win,
@@ -36,6 +41,8 @@ export function createQueueUi({
   clock = systemClock,
   tabId = globalThis.crypto.randomUUID(),
   pollMs = 1000,
+  hiddenPollMs = pollMs,
+  timers = createWorkerTimers({ win }),
   engineOptions = {},
   BroadcastChannelCtor = win.BroadcastChannel ?? globalThis.BroadcastChannel,
 }) {
@@ -59,15 +66,12 @@ export function createQueueUi({
   const model = {
     pending: null,
     inflight: null,
-    paused: false,
     editingElsewhere: false,
     edit: null, // {target, input, baseVersion, baseText, draft}
     busy: null,
     waiting: null,
     error: null,
     note: null,
-    generating: false,
-    composerHasText: false,
     dryRun: dispatcher.dryRun === true,
   };
   let engine = null;
@@ -77,6 +81,10 @@ export function createQueueUi({
   let dispatching = false;
   let submitting = false;
   let timer = null;
+  let hiddenTicker = null;
+  let queuedIds = new Set();
+  let queuedStale = true;
+  let lastGenerating = false;
   let ticks = 0;
   let reloadSeq = 0;
   let opSeq = 0;
@@ -115,8 +123,8 @@ export function createQueueUi({
   // Rebuilding the DOM would drop focus, so the poll only repaints when something visible changed.
   let painted = null;
   function render(focusKey) {
-    const { pending, inflight, paused, editingElsewhere, edit, busy, waiting, error, note, generating, composerHasText, dryRun } = model;
-    const signature = JSON.stringify({ pending, inflight, paused, editingElsewhere, editing: edit?.baseVersion ?? null, busy, waiting, error, note, generating, composerHasText, dryRun });
+    const { pending, inflight, editingElsewhere, edit, busy, waiting, error, note, dryRun } = model;
+    const signature = JSON.stringify({ pending, inflight, editingElsewhere, editing: edit?.baseVersion ?? null, busy, waiting, error, note, dryRun });
     if (signature === painted && !focusKey) return;
     painted = signature;
     const active = doc.activeElement;
@@ -126,6 +134,19 @@ export function createQueueUi({
     const wanted = root.querySelector(`[data-gs-key="${CSS_ESCAPE(key)}"]`);
     (wanted && !wanted.disabled ? wanted : root.querySelector("button:not(:disabled)"))?.focus({ preventScroll: true });
   }
+
+  const markers = createQueueMarkers({ doc, adapter });
+
+  /** Which conversations hold a queued prompt, for the sidebar markers; re-read when anything may have changed. */
+  async function refreshQueued() {
+    queuedStale = false;
+    try {
+      queuedIds = await engine.queuedConversations(target.accountId);
+    } catch {
+      queuedStale = true;
+    }
+  }
+  const paintMarkers = () => markers.sync(queuedIds);
 
   const notify = () => {
     try {
@@ -142,18 +163,14 @@ export function createQueueUi({
     if (seq !== reloadSeq || asked !== target) return; // a newer view or another conversation took over
     model.pending = view.pending;
     model.inflight = view.inflight;
-    model.paused = view.paused;
     model.editingElsewhere = view.editing && view.editBy !== tabId;
     if (!view.pending) model.waiting = null;
     if (!view.pending && !view.inflight && !model.edit) model.error = null;
     if (model.edit && !view.pending) endEditLocally("gone");
+    await refreshQueued();
+    paintMarkers();
+    syncHidden();
     render();
-  }
-
-  function readDom() {
-    model.generating = adapter.generating(doc);
-    const input = adapter.composerInput(doc);
-    model.composerHasText = Boolean(input) && io.hasText(input);
   }
 
   // ---- edit session (the pending text lives in the native composer meanwhile) ----
@@ -309,19 +326,9 @@ export function createQueueUi({
     void submitComposer("button");
   }
 
-  function onInput(event) {
-    if (!inComposer(event)) return;
-    // Typing outside a running response needs nothing from the card.
-    if (!model.generating && !model.composerHasText && !adapter.generating(doc)) return;
-    const had = model.composerHasText;
-    readDom();
-    if (had !== model.composerHasText) render();
-  }
-
   win.addEventListener("keydown", onKeydown, true);
   win.addEventListener("submit", onSubmit, true);
   win.addEventListener("click", onClick, true);
-  win.addEventListener("input", onInput, true);
 
   // ---- actions ----------------------------------------------------------------
 
@@ -341,7 +348,7 @@ export function createQueueUi({
     model.busy = busy;
     model.error = null;
     model.note = null;
-    render(busy === "interrupting" ? "head:interrupt" : "head:steer");
+    render("head:steer");
     return dispatch(async () => {
       try {
         const outcome = await run(t);
@@ -358,7 +365,6 @@ export function createQueueUi({
   };
 
   const handlers = {
-    queueDraft: () => submitComposer("button"),
     startEdit: () => act(startEdit),
     saveEdit: () => act(saveEdit),
     cancelEdit: () => act(cancelEdit),
@@ -372,12 +378,6 @@ export function createQueueUi({
           io.write(edit.input, edit.draft);
         }
         await engine.remove(t);
-        await reload();
-        notify();
-      }),
-    togglePause: () =>
-      act(async () => {
-        await (model.paused ? engine.resume(target) : engine.pause(target));
         await reload();
         notify();
       }),
@@ -400,7 +400,6 @@ export function createQueueUi({
         notify();
       }),
     steer: explicit("steering", (t) => engine.steer(t, { native: true })),
-    interrupt: explicit("interrupting", (t) => engine.steer(t, { native: false })),
   };
 
   // ---- background pass ---------------------------------------------------------
@@ -412,7 +411,7 @@ export function createQueueUi({
     if (model.edit) endEditLocally("cancel");
     await engine.release(previous).catch(() => undefined);
     target = now;
-    Object.assign(model, { pending: null, inflight: null, paused: false, editingElsewhere: false, waiting: null, error: null, note: null });
+    Object.assign(model, { pending: null, inflight: null, editingElsewhere: false, waiting: null, error: null, note: null });
     await engine.adoptLegacy(now).catch(() => 0);
     ticks = RELOAD_EVERY;
     return true;
@@ -423,7 +422,7 @@ export function createQueueUi({
     return dispatch(async () => {
       if (!engine || model.busy) return;
       await followNavigation();
-      readDom();
+      paintMarkers();
       const home = adapter.composer(doc);
       if (home && (!root.isConnected || root.nextElementSibling !== home)) home.before(root);
       if (model.edit && !(await engine.renewEdit(model.edit.target))) endEditLocally("gone");
@@ -451,6 +450,51 @@ export function createQueueUi({
     });
   }
 
+  // ---- wake-ups: the pass runs when something relevant happened, not only on the poll ----------------------
+  // A hidden tab's window timers are throttled (about one a second, about one a minute after five minutes), so while a
+  // prompt waits in a hidden page its pass is driven by a worker ticker, and by the page itself: the response ending
+  // (the Stop control going away) wakes it at once through an observer, which runs in hidden tabs too.
+  let waking = false;
+  let again = false;
+  function wake() {
+    if (disposed || !engine) return;
+    if (waking) {
+      again = true;
+      return;
+    }
+    waking = true;
+    void tick().finally(() => {
+      waking = false;
+      if (again) {
+        again = false;
+        wake();
+      }
+    });
+  }
+
+  const hub = createObserverHub({ max: 1, MutationObserverCtor: win.MutationObserver, schedule: (fn) => Promise.resolve().then(fn) });
+  let unobserve = null;
+  function syncHidden() {
+    const want = doc.hidden === true && Boolean(model.pending || model.inflight) && !disposed;
+    if (want && !hiddenTicker && hiddenPollMs > 0) hiddenTicker = timers.every(wake, hiddenPollMs);
+    else if (!want && hiddenTicker) (hiddenTicker(), (hiddenTicker = null));
+    if (want && !unobserve && doc.body) {
+      lastGenerating = adapter.generating(doc);
+      unobserve = hub.subscribe(doc.body, () => {
+        const now = adapter.generating(doc);
+        if (lastGenerating && !now) wake();
+        lastGenerating = now;
+      }, { childList: true, subtree: true, attributes: true, attributeFilter: ["class", "disabled", "data-is-streaming"] });
+    } else if (!want && unobserve) (unobserve(), (unobserve = null));
+  }
+  const onVisibility = () => {
+    syncHidden();
+    if (doc.hidden !== true) wake();
+  };
+  doc.addEventListener("visibilitychange", onVisibility);
+  win.addEventListener("focus", wake);
+  win.addEventListener("pageshow", wake);
+
   const ready = QueueStore.open(indexedDB, undefined, () => clock.now()).then(async (opened) => {
     if (disposed) return opened.close();
     store = opened;
@@ -466,14 +510,15 @@ export function createQueueUi({
       channel?.unref?.();
       if (channel) {
         channel.onmessage = (event) => {
-          if (event.data?.from !== tabId && event.data?.key === `${target.accountId}:${target.conversationId}`) void act(reload);
+          if (event.data?.from === tabId) return;
+          if (event.data?.key === `${target.accountId}:${target.conversationId}`) void act(reload);
+          else void act(async () => (await refreshQueued(), paintMarkers()));
         };
       }
     } catch {
       channel = null;
     }
     await engine.adoptLegacy(target).catch(() => 0);
-    readDom();
     await act(reload);
     if (pollMs > 0) timer = win.setInterval(tick, pollMs);
   });
@@ -492,12 +537,22 @@ export function createQueueUi({
     root,
     ready,
     tick,
+    /** Runs the background pass now (coalesced); called on route changes, focus and visibility changes. */
+    wake,
     /** Resolves when every queued UI action and dispatch pass has finished. */
     settled: () => Promise.all([actionChain, dispatchChain]).then(() => undefined),
     dispose() {
       disposed = true;
       if (timer) win.clearInterval(timer);
-      for (const [name, fn] of [["keydown", onKeydown], ["submit", onSubmit], ["click", onClick], ["input", onInput], ["pagehide", onPageHide]]) {
+      hiddenTicker?.();
+      unobserve?.();
+      hub.disposeAll();
+      doc.removeEventListener("visibilitychange", onVisibility);
+      win.removeEventListener("focus", wake);
+      win.removeEventListener("pageshow", wake);
+      markers.dispose();
+      timers.dispose();
+      for (const [name, fn] of [["keydown", onKeydown], ["submit", onSubmit], ["click", onClick], ["pagehide", onPageHide]]) {
         win.removeEventListener(name, fn, name === "pagehide" ? undefined : true);
       }
       if (model.edit) endEditLocally("cancel");

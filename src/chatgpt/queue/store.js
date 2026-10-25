@@ -50,6 +50,8 @@ export function migrateLegacy(items, legacyQueues, now) {
       }
       merge.push(row);
     }
+    // Pausing is gone: a queue that was paused stays held (Retry lifts it) instead of sending on its own.
+    if (paused.get(conversationId) && merge.length) needsDecision ??= "legacy-paused";
     if (uncertain) {
       out.inflight.push({
         key,
@@ -90,7 +92,6 @@ export function migrateLegacy(items, legacyQueues, now) {
         ops: [],
       });
     }
-    if (paused.get(conversationId) && (merge.length || uncertain)) out.state.push({ key, paused: true, editBy: null, editUntil: 0 });
   }
   return out;
 }
@@ -98,6 +99,9 @@ export function migrateLegacy(items, legacyQueues, now) {
 function legacyError(code, lost, now) {
   if (code === "attachments-not-restorable") {
     return { code, message: `Cannot restore ${lost.map((a) => a.name).join(", ")}.`, action: "Reattach the files, then retry.", at: now };
+  }
+  if (code === "legacy-paused") {
+    return { code, message: "This queue was paused before the queue was upgraded, so it is held.", action: "Press Retry to let it send.", at: now };
   }
   return {
     code,
@@ -133,7 +137,7 @@ export class Tx {
     return request(this.#tx.objectStore("inflight").delete(key));
   }
   async getState(key) {
-    return (await request(this.#tx.objectStore("state").get(key))) ?? { key, paused: false, editBy: null, editUntil: 0 };
+    return (await request(this.#tx.objectStore("state").get(key))) ?? { key, editBy: null, editUntil: 0 };
   }
   putState(state) {
     return request(this.#tx.objectStore("state").put(state));
@@ -146,6 +150,12 @@ export class Tx {
   }
   deleteLease(key) {
     return request(this.#tx.objectStore("locks").delete(key));
+  }
+  allPending() {
+    return request(this.#tx.objectStore("pending").getAll());
+  }
+  allInflight() {
+    return request(this.#tx.objectStore("inflight").getAll());
   }
   pendingOf(conversationId) {
     return request(this.#tx.objectStore("pending").index("conversationId").getAll(conversationId));

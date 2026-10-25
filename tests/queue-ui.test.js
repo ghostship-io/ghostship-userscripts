@@ -7,18 +7,20 @@ import { chatgptAdapter } from "../src/chatgpt/adapter.js";
 import { DryRunDispatcher } from "../src/chatgpt/queue/dispatch.js";
 import { createLiveDispatcher } from "../src/chatgpt/queue/live-dispatcher.js";
 import { createQueueUi } from "../src/chatgpt/queue/controller.js";
-import { ManualClock } from "./queue-helpers.js";
+import { ManualClock, settle } from "./queue-helpers.js";
+import { createWorkerTimers } from "../src/core/worker-timer.js";
+import { FakeWorker, freezeWindowTimers, setHidden } from "./fake-worker.js";
 import { fakePage } from "./fake-page.js";
 
 /** Mounts the queue on a fake page. `live` drives the real dispatcher against the page; otherwise the dry-run adapter. */
-async function mount({ page, factory = new IDBFactory(), clock = new ManualClock(), tabId = "tab-1", live = false, dispatcher } = {}) {
+async function mount({ page, factory = new IDBFactory(), clock = new ManualClock(), tabId = "tab-1", live = false, dispatcher, liveOptions = {}, uiOptions = {} } = {}) {
   page ??= await fakePage();
   const { window } = page;
   const t = { now: 1_000_000 };
   dispatcher ??= live
-    ? createLiveDispatcher({ win: window, adapter: chatgptAdapter, pollMs: 1, settleMs: 0, placeWaitMs: 15, sendWaitMs: 40, steerWaitMs: 15, ackMs: 40, stopWaitMs: 40, now: () => t.now })
+    ? createLiveDispatcher({ win: window, adapter: chatgptAdapter, pollMs: 1, arriveMs: 0, settleMs: 0, placeWaitMs: 15, sendWaitMs: 40, steerWaitMs: 15, ackMs: 40, stopWaitMs: 40, now: () => t.now, ...liveOptions })
     : new DryRunDispatcher();
-  const ui = createQueueUi({ win: window, adapter: chatgptAdapter, dispatcher, indexedDB: factory, clock, tabId, pollMs: 0 });
+  const ui = createQueueUi({ win: window, adapter: chatgptAdapter, dispatcher, indexedDB: factory, clock, tabId, pollMs: 0, ...uiOptions });
   await ui.ready;
   await ui.settled();
   const $ = (sel) => ui.root.querySelector(sel);
@@ -72,9 +74,16 @@ test("the card sits directly above the native composer, has no separate input an
   assert.doesNotMatch(t.ui.root.textContent, /Queue a message/);
   const labels = t.$$("button").map((b) => `${b.textContent} ${b.getAttribute("aria-label") ?? ""}`);
   assert.ok(!labels.some((l) => /[…⋯⋮]|\.\.\.|\bmore\b|menu/i.test(l)), `unexpected overflow control: ${labels}`);
-  for (const wanted of ["Edit", "Delete", "Steer", "Interrupt & Send Next", "Pause"]) assert.ok(labels.some((l) => l.includes(wanted)), wanted);
+  for (const wanted of ["Edit", "Delete", "Steer"]) assert.ok(labels.some((l) => l.includes(wanted)), wanted);
+  assert.equal(t.$$("button").length, 3, "Edit, Delete and Steer are the only controls");
+  for (const gone of ["Interrupt", "Pause", "Resume", "Queue"]) assert.ok(!labels.some((l) => l.includes(gone)), `${gone} is gone`);
   assert.ok(!t.$(".gs-q-handle, [class*=drag], ol, li"), "no rows, grips or reorder controls");
-  assert.match(t.$(".gs-q-title").textContent, /^Queue \(1\)$/);
+  assert.equal(t.$(".gs-q-title"), null, "no header: the card is the text and its icons");
+  // The text is the bubble; its icons sit below it, at the right.
+  assert.equal(t.ui.root.firstElementChild.className, "gs-q-text");
+  assert.equal(t.ui.root.lastElementChild.className, "gs-q-foot");
+  assert.deepEqual(t.$$(".gs-q-foot button").map((b) => b.getAttribute("data-gs-key")), ["head:edit", "head:delete", "head:steer"]);
+  assert.ok(t.$$(".gs-q-foot button").every((b) => b.classList.contains("gs-q-icon") && b.textContent === ""), "icons only");
   t.ui.dispose();
   assert.equal(t.doc.querySelector("[data-gs-queue]"), null);
 });
@@ -90,7 +99,6 @@ test("Enter A, Enter B, Enter C while generating: one card row `A\\n\\nB\\n\\nC`
   }
   assert.equal(t.rows(), 1);
   assert.equal(t.queued(), "A\n\nB\n\nC");
-  assert.match(t.$(".gs-q-title").textContent, /^Queue \(1\)$/);
   assert.deepEqual(t.page.log, [], "zero native sends and zero stops");
   assert.equal(t.ui.root.querySelector(".gs-q-text").dataset.version, "3");
   noNullText(t.ui);
@@ -161,16 +169,15 @@ test("whenever ChatGPT offers to steer, Send goes to the queue by default, even 
   assert.deepEqual(t.page.log, [], "nothing was steered natively");
 });
 
-test("the Queue button appends the composer text while generating, without Enter", async () => {
-  // Defect: no visible way to queue other than the keyboard.
+test("text typed while generating without Enter shows no card and no Queue button: Enter is the way in", async () => {
+  // Defect: a separate Queue button next to the native composer.
   const t = await mount();
   t.page.startStreaming();
   t.page.type("typed");
   await t.press({ key: "a" });
-  assert.equal(t.key("head:queue")?.disabled, false);
-  await t.click("head:queue");
-  assert.equal(t.queued(), "typed");
-  assert.equal(t.page.text(), "");
+  assert.equal(t.key("head:queue"), null);
+  assert.equal(t.ui.root.hidden, true);
+  assert.equal(t.page.text(), "typed", "the draft stays in the composer");
 });
 
 test("Edit puts the whole text in the native composer; Enter saves it under the same id (version up, nothing sent); Cancel restores the previous draft", async () => {
@@ -239,7 +246,7 @@ test("Delete removes the whole queued prompt, even during an edit, and restores 
   await t.click("head:delete");
   assert.equal(t.queued(), null);
   assert.equal(t.page.text(), "my draft", "the draft is back");
-  assert.equal(t.$(".gs-q-title").textContent, "Queue (0)");
+  assert.equal(t.ui.root.hidden, true, "nothing left to show");
 });
 
 test("the card never renders literal null/undefined, in any state", async () => {
@@ -252,35 +259,14 @@ test("the card never renders literal null/undefined, in any state", async () => 
   noNullText(t.ui);
   await t.enter("x");
   noNullText(t.ui);
-  await t.click("head:pause");
-  noNullText(t.ui);
-  await t.click("head:pause");
   await t.click("head:edit");
   noNullText(t.ui);
   await t.click("head:cancel");
   t.dispatcher.state = "generating";
   t.dispatcher.stopScript = [{ kind: "failed", code: "stop-button-missing", message: "no stop" }];
-  await t.click("head:interrupt");
+  await t.click("head:steer");
   noNullText(t.ui);
   assert.ok(t.$(".gs-q-note"), "the failure is shown as text");
-});
-
-test("Pause holds automatic dispatch; Resume lets the prompt go out once the response settles", async () => {
-  // Defect: pause ignored, or resume sending while the response is still running.
-  const t = await mount({ live: true });
-  t.page.startStreaming();
-  await t.enter("later");
-  await t.click("head:pause");
-  assert.match(t.$(".gs-q-status").textContent, /Paused/);
-  t.page.finishStreaming();
-  await t.tick();
-  await t.tick();
-  assert.deepEqual(t.page.log, []);
-  await t.click("head:pause");
-  await t.tick();
-  await t.tick();
-  assert.deepEqual(t.page.sends(), ["send:later"]);
-  assert.equal(t.ui.root.hidden, true, "nothing left to show once sent");
 });
 
 test("while the response runs the card says `Waiting for response`; when Send is available the prompt goes out once", async () => {
@@ -299,7 +285,7 @@ test("while the response runs the card says `Waiting for response`; when Send is
   assert.equal(t.queued(), null);
 });
 
-test("Steer sends the whole text once through the native control; Interrupt & Send Next stops first, then sends once", async () => {
+test("Steer sends the whole text once: through the native control when the page has one, otherwise a confirmed stop and then one send", async () => {
   // Defect: steering with part of the text, or sending before the stop.
   const steerable = await mount({ live: true, page: await fakePage({ steer: true }) });
   steerable.page.startStreaming();
@@ -313,17 +299,17 @@ test("Steer sends the whole text once through the native control; Interrupt & Se
   plain.page.startStreaming();
   await plain.enter("A");
   await plain.enter("B");
-  await plain.click("head:interrupt");
+  await plain.click("head:steer");
   assert.deepEqual(plain.page.log, ["stop", "send:A\n\nB"]);
   assert.equal(plain.queued(), null);
 });
 
-test("a failed interrupt leaves the prompt queued with an actionable message and sends nothing", async () => {
+test("a Steer whose stop is not confirmed leaves the prompt queued with an actionable message and sends nothing", async () => {
   // Defect: an ambiguous stop turning into a send, or the error disappearing.
   const t = await mount({ live: true, page: await fakePage({ stopWorks: false }) });
   t.page.startStreaming();
   await t.enter("urgent");
-  await t.click("head:interrupt");
+  await t.click("head:steer");
   assert.deepEqual(t.page.log, ["stop"]);
   assert.equal(t.queued(), "urgent");
   assert.match(t.$(".gs-q-note").textContent, /not confirm|did not end|Nothing was sent|still be running/i);
@@ -408,8 +394,8 @@ test("a new unsaved chat is not intercepted", async () => {
   assert.equal(t.rows(), 0);
 });
 
-test("a Blocked card keeps Steer, Interrupt & Send Next and Pause usable, and Retry works without a reload", async () => {
-  // Defect: the owner's live bug: Blocked with Steer and Pause disabled and nothing to press but a reload.
+test("a Blocked card keeps Steer usable, and Retry works without a reload", async () => {
+  // Defect: the owner's live bug: Blocked with Steer disabled and nothing to press but a reload.
   const t = await mount({ live: true, page: await fakePage({ editable: "contenteditable", sendOnlyWithText: true }) });
   t.page.startStreaming();
   await t.enter("held text");
@@ -418,13 +404,7 @@ test("a Blocked card keeps Steer, Interrupt & Send Next and Pause usable, and Re
   for (let i = 0; i < 6; i++) await t.tick();
   assert.match(t.$(".gs-q-status").textContent, /Blocked/);
   assert.equal(t.key("head:steer").disabled, false);
-  assert.equal(t.key("head:interrupt").disabled, false);
-  assert.equal(t.key("head:pause").disabled, false);
   assert.deepEqual(t.page.log, []);
-
-  await t.click("head:pause");
-  assert.match(t.$(".gs-q-status").textContent, /Blocked/);
-  await t.click("head:pause");
 
   t.page.fill = "now";
   await t.click("head:retry");
@@ -432,4 +412,174 @@ test("a Blocked card keeps Steer, Interrupt & Send Next and Pause usable, and Re
   for (let i = 0; i < 4; i++) await t.tick();
   assert.deepEqual(t.page.sends(), ["send:held text"], "Retry sent it without a reload");
   assert.equal(t.queued(), null);
+});
+
+// ---- persist across navigation, resume, hidden tab, sidebar markers -------------------------------------------
+
+const status = (t) => t.$(".gs-q-status")?.textContent ?? null;
+
+test("a prompt queued in A waits in the store while B is on screen and goes out when A is opened again and idle, never into B", async () => {
+  // Defect: the queue held only for the conversation on screen, or sent A's text into whatever page was open.
+  const t = await mount({ live: true, liveOptions: { arriveMs: 1200 } });
+  t.page.holds("fixture");
+  t.page.startStreaming();
+  await t.enter("for A");
+  assert.equal(t.queued(), "for A");
+
+  await t.navigate("conv-b");
+  t.page.holds("conv-b");
+  t.page.finishStreaming(); // B is idle; A's own response ended while it was out of sight
+  for (let i = 0; i < 5; i++) await t.tick();
+  assert.deepEqual(t.page.sends(), [], "nothing is sent into B");
+  assert.equal(t.queued(), null, "B shows no prompt of A");
+
+  await t.navigate("fixture");
+  t.page.holds("fixture");
+  await t.tick();
+  assert.equal(t.queued(), "for A", "A's prompt is back");
+  assert.match(status(t), /load/i, "A's page has only just shown its turns: it is still loading");
+  assert.deepEqual(t.page.sends(), []);
+  for (let i = 0; i < 4; i++) await t.tick();
+  assert.deepEqual(t.page.sends(), ["send:for A"], "once the conversation has loaded and is idle it goes out, once");
+  assert.equal(t.queued(), null);
+});
+
+test("on returning to a conversation that is still answering, the queue keeps waiting and sends when the response ends", async () => {
+  // Defect: sending into a response that was still running when the conversation was reopened.
+  const t = await mount({ live: true, liveOptions: { arriveMs: 1200 } });
+  t.page.holds("fixture");
+  t.page.startStreaming();
+  await t.enter("next");
+  await t.navigate("conv-b");
+  t.page.holds("conv-b");
+  await t.navigate("fixture");
+  t.page.holds("fixture"); // the page behind the route shows A again, still streaming
+  for (let i = 0; i < 6; i++) await t.tick();
+  assert.deepEqual(t.page.log, [], "no send and no stop");
+  assert.match(status(t), /Waiting for response/);
+  t.page.finishStreaming();
+  for (let i = 0; i < 5; i++) await t.tick();
+  assert.deepEqual(t.page.sends(), ["send:next"]);
+});
+
+test("the route changes before the page does: a page that still holds another conversation never gets the prompt, and the card says why", async () => {
+  // Defect: the URL already named A while the page behind it was still B's, so A's text went into B.
+  const t = await mount({ live: true, liveOptions: { arriveMs: 0 } });
+  t.page.holds("fixture");
+  t.page.startStreaming();
+  await t.enter("for A");
+  await t.navigate("conv-b");
+  t.page.holds("conv-b");
+  t.page.finishStreaming();
+  await t.navigate("fixture"); // the URL is A's; the page still says B
+  for (let i = 0; i < 6; i++) await t.tick();
+  assert.deepEqual(t.page.log, [], "held: nothing staged, nothing clicked");
+  assert.equal(t.page.text(), "", "the composer was not touched");
+  assert.match(status(t), /Waiting for the conversation to open/);
+  t.page.holds("fixture");
+  for (let i = 0; i < 3; i++) await t.tick();
+  assert.deepEqual(t.page.sends(), ["send:for A"]);
+});
+
+test("Send found by its label: ChatGPT's composer has no test ids, only a submit button called Send", async () => {
+  // Defect (the owner's live report): "Send button did not become available" on a page whose Send has no data-testid.
+  const t = await mount({ live: true, page: await fakePage({ sendLabel: true }) });
+  assert.equal(chatgptAdapter.sendButton(t.doc).getAttribute("aria-label"), "Send");
+  t.page.startStreaming();
+  await t.enter("labelled");
+  t.page.finishStreaming();
+  for (let i = 0; i < 4; i++) await t.tick();
+  assert.deepEqual(t.page.sends(), ["send:labelled"]);
+  assert.equal(t.queued(), null);
+});
+
+/** A live queue whose every timer is worker-carried (virtual) while the window's own timers are frozen: a throttled hidden tab. */
+async function hiddenTab({ ticker, observer }) {
+  const page = await fakePage();
+  const worker = new FakeWorker();
+  if (!observer) page.window.MutationObserver = class { observe() {} disconnect() {} };
+  const timers = createWorkerTimers({ win: page.window, createWorker: () => worker });
+  const t = await mount({ page, live: true, liveOptions: { timers, arriveMs: 0, placeWaitMs: 60_000, sendWaitMs: 60_000, ackMs: 60_000, stopWaitMs: 60_000 }, uiOptions: { timers, hiddenPollMs: ticker ? 1000 : 0 } });
+  page.holds("fixture");
+  page.startStreaming();
+  await t.enter("while hidden");
+  const calls = freezeWindowTimers(page.window);
+  setHidden(page.window, true);
+  await t.ui.settled();
+  // Five minutes and more pass hidden: the window's timers are gone (throttled), the clocks keep moving.
+  t.t.now += 6 * 60_000;
+  t.clock.advance(6 * 60_000);
+  const pump = async (ms) => {
+    for (let spent = 0; spent < ms; spent += 50) {
+      worker.advance(50);
+      await settle(6); // not `settled()`: the dispatch in progress is itself waiting for the next worker tick
+    }
+    await t.ui.settled();
+  };
+  return { t, page, worker, calls, pump };
+}
+
+test("a hidden tab for more than five minutes: the response ending wakes the queue at once and the prompt goes out, with the window's timers frozen", async () => {
+  // Defect: dispatch rode on throttled window timers, so a queued prompt waited minutes after the response ended.
+  const { t, page, calls, pump } = await hiddenTab({ ticker: false, observer: true });
+  page.finishStreaming();
+  await pump(2_000);
+  assert.deepEqual(page.sends(), ["send:while hidden"], "sent exactly once");
+  assert.equal(t.queued(), null);
+  assert.deepEqual(calls.filter(([name]) => name === "setInterval"), [], "no window interval was needed");
+});
+
+test("a hidden tab where no observer can run: the worker ticker still finds the finished response", async () => {
+  // Defect: a page policy that blocks the observer left a hidden queue with no way to notice the response ending.
+  const { page, worker, pump } = await hiddenTab({ ticker: true, observer: false });
+  assert.ok(worker.active() > 0, "the ticker runs while a prompt waits in a hidden tab");
+  await pump(1_000);
+  assert.deepEqual(page.sends(), [], "still answering: nothing sent");
+  page.finishStreaming();
+  await pump(3_000);
+  assert.deepEqual(page.sends(), ["send:while hidden"]);
+});
+
+test("nothing runs while idle: with no queued prompt the hidden ticker and observer are off, and returning to the tab wakes the queue", async () => {
+  // Defect: a polling loop burning CPU in the background with nothing to send.
+  const page = await fakePage();
+  const worker = new FakeWorker();
+  const timers = createWorkerTimers({ win: page.window, createWorker: () => worker });
+  const t = await mount({ page, live: true, liveOptions: { timers }, uiOptions: { timers, hiddenPollMs: 1000 } });
+  setHidden(page.window, true);
+  await t.ui.settled();
+  assert.equal(worker.active(), 0, "no ticker for an empty queue");
+  setHidden(page.window, false);
+  page.holds("fixture");
+  page.startStreaming();
+  await t.enter("shown again");
+  page.finishStreaming();
+  await t.ui.wake();
+  await t.ui.settled();
+  for (let i = 0; i < 3; i++) await t.tick();
+  assert.deepEqual(page.sends(), ["send:shown again"]);
+});
+
+test("a conversation with a queued prompt carries a pencil in the sidebar, the open one and the ones left behind; it follows the queue and survives a re-render", async () => {
+  // Defect: a queue left in another conversation was invisible until you went back to it.
+  const t = await mount({ dispatcher: new DryRunDispatcher("generating") });
+  const rows = () => [...t.doc.querySelectorAll("[data-gs-queued]")].map((m) => m.closest("a").getAttribute("href"));
+  t.page.sidebar(["fixture", "conv-b", "conv-c"]);
+  t.page.startStreaming();
+  await t.enter("here");
+  assert.deepEqual(rows(), ["/c/fixture"], "the conversation on screen");
+
+  await t.navigate("conv-b");
+  await t.enter("there");
+  assert.deepEqual(rows().sort(), ["/c/conv-b", "/c/fixture"], "A keeps its pencil while B is open");
+
+  t.page.sidebar(["fixture", "conv-b", "conv-c"]); // ChatGPT re-renders its sidebar
+  assert.deepEqual(rows(), []);
+  await t.tick();
+  assert.deepEqual(rows().sort(), ["/c/conv-b", "/c/fixture"], "put back on the next pass");
+
+  await t.click("head:delete");
+  assert.deepEqual(rows(), ["/c/fixture"], "deleting B's prompt takes B's pencil off");
+  t.ui.dispose();
+  assert.deepEqual(rows(), [], "disposing removes every marker");
 });

@@ -12,6 +12,8 @@ const norm = (text) => text.replace(/\s+/g, " ").trim();
  * @param {Window} o.win
  * @param {object} o.adapter composerInput / sendButton / steerButton / stopButton / generating / userTurnCount / accountId / conversationId
  * @param {number} [o.pollMs]
+ * @param {{once(fn: () => void, ms: number): () => void}} [o.timers] timers for the waits below; hidden-tab safe ones in the page
+ * @param {number} [o.arriveMs] how long a conversation must have shown its turns before anything is sent into it
  * @param {number} [o.settleMs] how long the response must have been over before a send is staged
  * @param {number} [o.sendWaitMs] how long to wait for native Send to enable once the text is in the composer
  * @param {number} [o.placeWaitMs] how long the composer gets to show the staged text (its editor applies input asynchronously)
@@ -25,6 +27,8 @@ export function createLiveDispatcher({
   win,
   adapter,
   pollMs = 50,
+  arriveMs = 1200,
+  timers = { once: (fn, ms) => { const handle = win.setTimeout(fn, ms); return () => win.clearTimeout(handle); } },
   settleMs = 600,
   sendWaitMs = 8000,
   placeWaitMs = 1500,
@@ -51,18 +55,38 @@ export function createLiveDispatcher({
         const hit = probe();
         if (hit) return resolve(hit);
         if (Date.now() - started >= ms) return resolve(null);
-        win.setTimeout(poll, pollMs);
+        timers.once(poll, pollMs);
       };
       poll();
     });
 
   const generating = () => adapter.generating(doc);
-  const onTarget = (target) => adapter.conversationId(win) === target.conversationId && adapter.accountId(doc) === target.accountId;
+  // The URL changes before the page behind it does: the page's own conversation stamp must agree too.
+  const onTarget = (target) => {
+    if (adapter.conversationId(win) !== target.conversationId || adapter.accountId(doc) !== target.accountId) return false;
+    const held = adapter.pageConversationId?.(doc);
+    return held === null || held === undefined || held === target.conversationId;
+  };
+  // A conversation just opened shows its turns before its response state (Stop, Steer, streaming) is known.
+  // It counts as loaded once its own turns have been on the page for `arriveMs`.
+  let arrival = null;
+  const loaded = (target) => {
+    const key = `${target.accountId}:${target.conversationId}`;
+    if (adapter.turns(doc).length === 0) {
+      arrival = null;
+      return false;
+    }
+    if (arrival?.key !== key) arrival = { key, since: now() };
+    return now() - arrival.since >= arriveMs;
+  };
   const enabled = (button) => (button && !button.disabled && button.getAttribute("aria-disabled") !== "true" ? button : null);
 
   /** Why a send must not start now, or null. Read-only. */
   function notReady(target, { allowGenerating = false, text = null } = {}) {
-    if (!onTarget(target)) return { state: "waiting", reason: "other-conversation" };
+    if (!onTarget(target)) {
+      arrival = null;
+      return { state: "waiting", reason: "other-conversation" };
+    }
     const input = adapter.composerInput(doc);
     if (!input) {
       composerMissingSince ??= now();
@@ -77,6 +101,7 @@ export function createLiveDispatcher({
       return { state: "waiting", reason: "composer-missing" };
     }
     composerMissingSince = null;
+    if (!loaded(target)) return { state: "waiting", reason: "loading" };
     if (!allowGenerating) {
       if (generating()) {
         lastBusy = now();
