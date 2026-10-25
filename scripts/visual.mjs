@@ -32,6 +32,8 @@ cases.push({ name: "wide-light-no-pane", w: 1700, h: 900, query: "theme=light" }
 cases.push({ name: "wide-sidebar-open-side-pane", w: 1700, h: 900, query: "pane=1&nav=open" });
 cases.push({ name: "wide-prompts-collapsed", w: 1700, h: 900, query: "press=prompts" });
 cases.push({ name: "wide-both-collapsed", w: 1700, h: 900, query: "press=prompts,minimap" });
+cases.push({ name: "wide-minimap-collapsed", w: 1700, h: 900, query: "press=minimap" });
+cases.push({ name: "narrow-short-minimap-drawer", w: 820, h: 420, query: "select=3&press=minimap" });
 cases.push({ name: "narrow-prompts-drawer", w: 820, h: 900, query: "press=prompts" });
 cases.push({ name: "mobile-minimap-drawer", w: 390, h: 800, query: "press=minimap" });
 

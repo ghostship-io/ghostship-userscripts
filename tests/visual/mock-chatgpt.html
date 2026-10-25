@@ -46,7 +46,8 @@ if (q.get("theme") === "light") document.documentElement.className = "light";
 if (q.get("nav") === "open") document.documentElement.style.setProperty("--nav", "260px");
 const lorem = (n) => "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor. ".repeat(n);
 const thread = document.getElementById("thread");
-for (let i = 0; i < 14; i++) {
+const total = Number(q.get("turns")) || 14;
+function addTurn(i) {
   const turn = document.createElement("div");
   turn.setAttribute("data-turn-key", "turn-" + i);
   const heavy = i % 5 === 2;
@@ -55,6 +56,15 @@ for (let i = 0; i < 14; i++) {
     (heavy ? `<pre><code>${Array.from({ length: 12 }, (_, k) => "line " + k + " = value;").join("\n")}</code></pre><table><tr><th>Name</th><th>Value</th></tr>${"<tr><td>row</td><td>cell</td></tr>".repeat(5)}</table><div class="img"></div>` : "") +
     `<p>${lorem(i % 3 + 1)}</p></div>`;
   thread.append(turn);
+}
+// lazy=1: only a few turns at first, then more keep arriving (as ChatGPT loads a long thread) until `turns`.
+let shown = q.get("lazy") ? Math.min(5, total) : total;
+for (let i = 0; i < shown; i++) addTurn(i);
+if (q.get("lazy")) {
+  const more = setInterval(() => {
+    for (let k = 0; k < 3 && shown < total; k++) addTurn(shown++);
+    if (shown >= total) clearInterval(more);
+  }, 600);
 }
 if (q.get("pane")) {
   const aside = document.createElement("aside");
@@ -66,6 +76,9 @@ if (q.get("pane")) {
 // Optional: act like a user pressing the panels' header buttons after the script has started.
 const press = q.get("press");
 if (press) setTimeout(() => press.split(",").forEach((name) => document.querySelector('.gs-hbtn[data-gs-panel="' + name + '"]')?.click()), 1800);
+// select=N: click the Nth prompt in the list (1-based) once the script has started.
+const select = Number(q.get("select"));
+if (select) setTimeout(() => document.querySelectorAll(".gs-prompt")[select - 1]?.click(), 1800);
 const el = document.querySelector("[data-app-action-timeline-scroll]");
 el.scrollTop = el.scrollHeight;
 </script>
