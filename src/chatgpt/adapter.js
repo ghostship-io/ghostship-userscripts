@@ -144,18 +144,24 @@ export const chatgptAdapter = {
     return !node || node === doc.documentElement ? doc.body : node;
   },
   /**
-   * Everything the rail's reservation must be written to: the page column and, when the composer sits in an
-   * absolutely positioned overlay inside it (chatgpt.com does), that overlay, which padding on the column
-   * cannot move.
+   * Where the panels' room is measured and written: `frame` is the page column (its box is what the panels anchor
+   * to) and gets the side padding, `header` is its page header (given opposite margins so it keeps the full width and
+   * its buttons stay in the top-right corner) and, when the composer sits in an absolutely positioned overlay inside
+   * the column (chatgpt.com does), that overlay is padded too, which padding on the column cannot move.
    */
   columns(doc) {
-    const column = this.column(doc);
-    if (!column) return [];
+    const frame = this.column(doc);
+    if (!frame) return null;
     const win = doc.defaultView;
-    for (let el = this.composer(doc)?.parentElement; el && el !== column; el = el.parentElement) {
-      if (column.contains(el) && ABSOLUTE.has(win.getComputedStyle(el).position)) return [column, el];
+    const pads = [frame];
+    for (let el = this.composer(doc)?.parentElement; el && el !== frame; el = el.parentElement) {
+      if (frame.contains(el) && ABSOLUTE.has(win.getComputedStyle(el).position)) {
+        pads.push(el);
+        break;
+      }
     }
-    return [column];
+    const header = scope(doc).querySelector(HEADER);
+    return { frame, pads, header: header && frame.contains(header) && header !== frame ? header : null };
   },
   /**
    * ChatGPT's mounted, visible summary pane, or null (the script then shows its one fallback pane).

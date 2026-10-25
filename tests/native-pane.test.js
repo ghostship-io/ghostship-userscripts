@@ -33,6 +33,7 @@ const panel = (fx, name) => fx.doc.querySelector(`.gs-panel[data-gs-panel="${nam
 const varOf = (fx, name, prop) => parseFloat(panel(fx, name).style.getPropertyValue(prop));
 const outputs = (fx) => fx.doc.getElementById("native-outputs");
 const sources = (fx) => fx.doc.getElementById("native-sources");
+const norm = (html) => html.replace(/style="([^"]*)"/g, (_, v) => `style="${v.replace(/\s+/g, "").replace(/;$/, "")}"`);
 const snapshot = (el) => [el, ...el.querySelectorAll("*")];
 const resize = async (fx) => {
   fx.win.dispatchEvent(new fx.win.Event("resize"));
@@ -327,7 +328,7 @@ test("dispose leaves ChatGPT's pane, its header and the page exactly as they wer
   ui.q(".gs-outputs-toggle").click();
   assert.notEqual(fx.doc.documentElement.outerHTML, before);
   ui.stop();
-  assert.equal(fx.doc.documentElement.outerHTML, before);
+  assert.equal(norm(fx.doc.documentElement.outerHTML), norm(before));
 });
 
 test("mobile: a native full-width sheet is the only thing shown; our panels stay drawers behind their header buttons", async () => {

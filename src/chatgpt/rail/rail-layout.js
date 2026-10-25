@@ -16,6 +16,7 @@ export const MIN_CONTENT = 560;
 export const LAYOUT_CSS = `
 [data-gs-column][data-gs-left]{box-sizing:border-box;padding-left:var(--gs-reserve-left,0px)}
 [data-gs-column][data-gs-right]{box-sizing:border-box;padding-right:var(--gs-reserve,0px)}
+[data-gs-header]{margin-left:calc(-1 * var(--gs-reserve-left,0px));margin-right:calc(-1 * var(--gs-reserve,0px))}
 `;
 
 /**
@@ -30,11 +31,12 @@ export const LAYOUT_CSS = `
 export function createRailLayout({ win, adapter, target }) {
   const doc = win.document;
   let written = []; // the elements we have written to
-  let known = null; // the page column (and composer overlay) once found: the panels are rebuilt whenever the page layout is
+  let known = null; // { frame, pads } once found: the panels are rebuilt whenever the page layout is
   let applied = { left: 0, right: 0 };
 
+  /** `{ frame, pads }`: the page column that is measured, and the elements that get the padding; null when not found. */
   const findColumns = () => {
-    if (!known?.length || known.some((el) => !el.isConnected)) known = adapter.columns(doc);
+    if (!known || !known.frame.isConnected || known.pads.some((el) => !el.isConnected)) known = adapter.columns(doc);
     return known;
   };
 
@@ -48,6 +50,13 @@ export function createRailLayout({ win, adapter, target }) {
   function setReserve(cols, left, right) {
     if (written.some((el) => !cols.includes(el))) clear();
     written = cols;
+    const header = findColumns()?.header;
+    if (header) {
+      // The header sits inside the padded column but spans the window: it cancels the padding.
+      if (left > 0 || right > 0) {
+        if (header.getAttribute("data-gs-header") === null) header.setAttribute("data-gs-header", "");
+      } else if (header.hasAttribute("data-gs-header")) header.removeAttribute("data-gs-header");
+    }
     const l = Math.max(0, Math.round(left));
     const r = Math.max(0, Math.round(right));
     for (const col of cols) {
@@ -71,6 +80,8 @@ export function createRailLayout({ win, adapter, target }) {
   }
 
   function clear() {
+    const header = known?.header;
+    if (header?.hasAttribute("data-gs-header")) header.removeAttribute("data-gs-header");
     for (const el of written) release(el);
     written = [];
     applied = { left: 0, right: 0 };
@@ -79,9 +90,9 @@ export function createRailLayout({ win, adapter, target }) {
   /** What decides the layout independent of what we applied; a change means re-evaluate. */
   function signature(paneLeft) {
     const cols = findColumns();
-    if (!cols.length) return "none";
-    const r = cols[0].getBoundingClientRect();
-    return `${win.innerWidth}|${Math.round(r.left)}|${Math.round(r.right)}|${cols.length}|${paneLeft == null ? "-" : Math.round(paneLeft)}`;
+    if (!cols) return "none";
+    const r = cols.frame.getBoundingClientRect();
+    return `${win.innerWidth}|${Math.round(r.left)}|${Math.round(r.right)}|${cols.pads.length}|${paneLeft == null ? "-" : Math.round(paneLeft)}`;
   }
 
   /** The column's box: our padding changes what is inside it, never its own edges. */
@@ -97,13 +108,13 @@ export function createRailLayout({ win, adapter, target }) {
   function evaluate({ left = 0, right = 0, paneLeft = null } = {}) {
     const cols = findColumns();
     const el = target() ?? adapter.composer(doc);
-    if (!cols.length || !el || win.innerWidth < DOCK_MIN_VIEWPORT) {
-      if (cols.length) setReserve(cols, 0, 0);
+    if (!cols || !el || win.innerWidth < DOCK_MIN_VIEWPORT) {
+      if (cols) setReserve(cols.pads, 0, 0);
       else clear();
       return { docked: false, left: 0, right: 0 };
     }
-    setReserve(cols, 0, 0);
-    const col = natural(cols[0]);
+    setReserve(cols.pads, 0, 0);
+    const col = natural(cols.frame);
     const edge = paneLeft == null ? col.right : Math.min(col.right, paneLeft);
     const needL = left > 0 ? left + 2 * PANEL_GAP : 0; // gap to the column edge and to the conversation
     const needR = right > 0 ? right + 2 * PANEL_GAP : 0;
@@ -121,13 +132,13 @@ export function createRailLayout({ win, adapter, target }) {
     if (o.l > 0.5 || o.r > 0.5) {
       // The conversation is centered in the page column, so padding each side by exactly what its panel takes (plus
       // what a floating native pane covers) re-centers it in the space the panels leave, whatever the page's own margins.
-      setReserve(cols, needL, needR + Math.max(0, col.right - edge));
+      setReserve(cols.pads, needL, needR + Math.max(0, col.right - edge));
       o = over();
     }
     const s = span();
     const fits = o.l <= 0.5 && o.r <= 0.5 && s.right - s.left >= MIN_CONTENT;
     if (!fits) {
-      setReserve(cols, 0, 0);
+      setReserve(cols.pads, 0, 0);
       return { docked: false, left: 0, right: 0 };
     }
     return { docked: true, left: applied.left, right: applied.right };
@@ -136,8 +147,8 @@ export function createRailLayout({ win, adapter, target }) {
   /** Where the panels anchor: the column's edges without our padding, the right one stopping at a floating native pane. */
   function edges(paneLeft) {
     const cols = findColumns();
-    if (!cols.length) return { left: 0, right: win.innerWidth };
-    const col = natural(cols[0]);
+    if (!cols) return { left: 0, right: win.innerWidth };
+    const col = natural(cols.frame);
     return { left: col.left, right: paneLeft == null ? col.right : Math.min(col.right, paneLeft) };
   }
 

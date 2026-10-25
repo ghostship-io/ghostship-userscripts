@@ -861,18 +861,24 @@
       return !node || node === doc.documentElement ? doc.body : node;
     },
     /**
-     * Everything the rail's reservation must be written to: the page column and, when the composer sits in an
-     * absolutely positioned overlay inside it (chatgpt.com does), that overlay, which padding on the column
-     * cannot move.
+     * Where the panels' room is measured and written: `frame` is the page column (its box is what the panels anchor
+     * to) and gets the side padding, `header` is its page header (given opposite margins so it keeps the full width and
+     * its buttons stay in the top-right corner) and, when the composer sits in an absolutely positioned overlay inside
+     * the column (chatgpt.com does), that overlay is padded too, which padding on the column cannot move.
      */
     columns(doc) {
-      const column = this.column(doc);
-      if (!column) return [];
+      const frame = this.column(doc);
+      if (!frame) return null;
       const win = doc.defaultView;
-      for (let el2 = this.composer(doc)?.parentElement; el2 && el2 !== column; el2 = el2.parentElement) {
-        if (column.contains(el2) && ABSOLUTE.has(win.getComputedStyle(el2).position)) return [column, el2];
+      const pads = [frame];
+      for (let el2 = this.composer(doc)?.parentElement; el2 && el2 !== frame; el2 = el2.parentElement) {
+        if (frame.contains(el2) && ABSOLUTE.has(win.getComputedStyle(el2).position)) {
+          pads.push(el2);
+          break;
+        }
       }
-      return [column];
+      const header = scope(doc).querySelector(HEADER);
+      return { frame, pads, header: header && frame.contains(header) && header !== frame ? header : null };
     },
     /**
      * ChatGPT's mounted, visible summary pane, or null (the script then shows its one fallback pane).
@@ -3006,6 +3012,7 @@
   var LAYOUT_CSS = `
 [data-gs-column][data-gs-left]{box-sizing:border-box;padding-left:var(--gs-reserve-left,0px)}
 [data-gs-column][data-gs-right]{box-sizing:border-box;padding-right:var(--gs-reserve,0px)}
+[data-gs-header]{margin-left:calc(-1 * var(--gs-reserve-left,0px));margin-right:calc(-1 * var(--gs-reserve,0px))}
 `;
   function createRailLayout({ win, adapter, target }) {
     const doc = win.document;
@@ -3013,7 +3020,7 @@
     let known = null;
     let applied = { left: 0, right: 0 };
     const findColumns = () => {
-      if (!known?.length || known.some((el2) => !el2.isConnected)) known = adapter.columns(doc);
+      if (!known || !known.frame.isConnected || known.pads.some((el2) => !el2.isConnected)) known = adapter.columns(doc);
       return known;
     };
     function release(el2) {
@@ -3025,6 +3032,12 @@
     function setReserve(cols, left, right) {
       if (written.some((el2) => !cols.includes(el2))) clear();
       written = cols;
+      const header = findColumns()?.header;
+      if (header) {
+        if (left > 0 || right > 0) {
+          if (header.getAttribute("data-gs-header") === null) header.setAttribute("data-gs-header", "");
+        } else if (header.hasAttribute("data-gs-header")) header.removeAttribute("data-gs-header");
+      }
       const l = Math.max(0, Math.round(left));
       const r = Math.max(0, Math.round(right));
       for (const col of cols) {
@@ -3047,15 +3060,17 @@
       applied = { left: l, right: r };
     }
     function clear() {
+      const header = known?.header;
+      if (header?.hasAttribute("data-gs-header")) header.removeAttribute("data-gs-header");
       for (const el2 of written) release(el2);
       written = [];
       applied = { left: 0, right: 0 };
     }
     function signature(paneLeft) {
       const cols = findColumns();
-      if (!cols.length) return "none";
-      const r = cols[0].getBoundingClientRect();
-      return `${win.innerWidth}|${Math.round(r.left)}|${Math.round(r.right)}|${cols.length}|${paneLeft == null ? "-" : Math.round(paneLeft)}`;
+      if (!cols) return "none";
+      const r = cols.frame.getBoundingClientRect();
+      return `${win.innerWidth}|${Math.round(r.left)}|${Math.round(r.right)}|${cols.pads.length}|${paneLeft == null ? "-" : Math.round(paneLeft)}`;
     }
     const natural = (col) => {
       const r = col.getBoundingClientRect();
@@ -3064,13 +3079,13 @@
     function evaluate({ left = 0, right = 0, paneLeft = null } = {}) {
       const cols = findColumns();
       const el2 = target() ?? adapter.composer(doc);
-      if (!cols.length || !el2 || win.innerWidth < DOCK_MIN_VIEWPORT) {
-        if (cols.length) setReserve(cols, 0, 0);
+      if (!cols || !el2 || win.innerWidth < DOCK_MIN_VIEWPORT) {
+        if (cols) setReserve(cols.pads, 0, 0);
         else clear();
         return { docked: false, left: 0, right: 0 };
       }
-      setReserve(cols, 0, 0);
-      const col = natural(cols[0]);
+      setReserve(cols.pads, 0, 0);
+      const col = natural(cols.frame);
       const edge = paneLeft == null ? col.right : Math.min(col.right, paneLeft);
       const needL = left > 0 ? left + 2 * PANEL_GAP : 0;
       const needR = right > 0 ? right + 2 * PANEL_GAP : 0;
@@ -3085,21 +3100,21 @@
       };
       let o = over();
       if (o.l > 0.5 || o.r > 0.5) {
-        setReserve(cols, needL, needR + Math.max(0, col.right - edge));
+        setReserve(cols.pads, needL, needR + Math.max(0, col.right - edge));
         o = over();
       }
       const s = span();
       const fits = o.l <= 0.5 && o.r <= 0.5 && s.right - s.left >= MIN_CONTENT;
       if (!fits) {
-        setReserve(cols, 0, 0);
+        setReserve(cols.pads, 0, 0);
         return { docked: false, left: 0, right: 0 };
       }
       return { docked: true, left: applied.left, right: applied.right };
     }
     function edges(paneLeft) {
       const cols = findColumns();
-      if (!cols.length) return { left: 0, right: win.innerWidth };
-      const col = natural(cols[0]);
+      if (!cols) return { left: 0, right: win.innerWidth };
+      const col = natural(cols.frame);
       return { left: col.left, right: paneLeft == null ? col.right : Math.min(col.right, paneLeft) };
     }
     return { evaluate, signature, edges, reserve: () => ({ ...applied }), dispose: clear };

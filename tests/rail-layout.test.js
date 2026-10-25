@@ -25,6 +25,8 @@ const rects = (fx) => ({
   turn: chatgptAdapter.turns(fx.doc)[0].getBoundingClientRect(),
   composer: chatgptAdapter.composer(fx.doc).getBoundingClientRect(),
 });
+/** Markup with style attributes normalized (a browser re-serializes them once a property was set and removed). */
+const norm = (html) => html.replace(/style="([^"]*)"/g, (_, v) => `style="${v.replace(/\s+/g, "").replace(/;$/, "")}"`);
 const NEED = PANEL_WIDTH + 2 * PANEL_GAP; // what a docked panel takes beside the conversation
 const hiddenPanel = (fx, name) => fx.doc.querySelector(`.gs-panel[data-gs-panel="${name}"]`).hidden;
 const hbtn = (fx, name) => fx.doc.querySelector(`.gs-hbtn[data-gs-panel="${name}"]`);
@@ -112,6 +114,28 @@ test("collapsing a panel to its header button gives its room back; the same butt
   assert.ok(fx.reserve() > 0 && fx.reserveLeft() > 0);
   assert.equal(hbtn(fx, "minimap").getAttribute("aria-pressed"), "true");
   ui.stop();
+});
+
+test("the page column is padded, but the header cancels it: ChatGPT's header, and its buttons, stay where they are", async () => {
+  const fx = createFixture({ turns: 20, width: 1280, markup: "real", header: true });
+  mount(fx);
+  await fx.settle();
+  const header = fx.doc.getElementById("page-header");
+  assert.equal(fx.doc.body.hasAttribute("data-gs-column"), true);
+  assert.equal(header.hasAttribute("data-gs-header"), true, "the header cancels the column's padding with opposite margins");
+  assert.match(fx.doc.getElementById("gs-pane-style").textContent, /\[data-gs-header\]\{margin-left:calc\(-1 \* var\(--gs-reserve-left,0px\)\);margin-right:calc\(-1 \* var\(--gs-reserve,0px\)\)\}/);
+  assert.equal(header.getBoundingClientRect().right, 1280, "the header still spans the window");
+  // Nothing reserved: the header is untouched too.
+  const wide = createFixture({ turns: 20, width: 1920, markup: "real", header: true });
+  mount(wide);
+  await wide.settle();
+  assert.equal(wide.doc.getElementById("page-header").hasAttribute("data-gs-header"), false);
+  // Disposing releases it.
+  const ui = createFixture({ turns: 20, width: 1280, markup: "real", header: true });
+  const m = mount(ui);
+  await ui.settle();
+  m.stop();
+  assert.equal(ui.doc.getElementById("page-header").hasAttribute("data-gs-header"), false);
 });
 
 test("the panel buttons sit in ChatGPT's header button area; without a header they float top-right", async () => {
@@ -220,7 +244,7 @@ test("dispose removes the reservation and the panels and leaves the page exactly
   await fx.settle();
   assert.ok(fx.reserve() > 0 && fx.reserveLeft() > 0);
   stop();
-  assert.equal(fx.doc.documentElement.outerHTML, before);
+  assert.equal(norm(fx.doc.documentElement.outerHTML), norm(before));
 });
 
 test("an idle docked page with reserved columns makes no DOM writes", async () => {
