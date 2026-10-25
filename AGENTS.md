@@ -7,6 +7,7 @@
 - Commit `dist/` with every source change (`npm run build`); CI fails on a stale `dist/`. Bump the version with `npm run bump -- <id> <patch|minor|major>`; managers ignore non-increasing versions.
 - ResizeObserver is allowed only in `src/chatgpt/virtualization/backend.js` (active turn elements only); everything else observes through the hub.
 - Startup is `src/core/boot.js`: it waits (one bounded observer, visible give-up) for the layout, restarts on route changes and root replacement, and a composer without turns (new chat) runs composer-only. Never add a one-shot layout check at script start.
+- The rail's page-layout reservation is written only by `src/chatgpt/rail/rail-layout.js` (the `data-gs-column` padding on the page column found by `adapter.column`), it is change-only and removed on dispose; per-conversation rail state lives in `rail-state.js` and never crosses conversation ids (tests/rail-layout.test.js, tests/gate/rail.gate.js).
 - All scroll writes go through `src/core/scroll-manager.js`; all DOM observation through `src/core/observers.js`; all ChatGPT selectors live in `src/chatgpt/adapter.js`.
 - Public repository: no private data, profile paths, account names, tokens or personal identifiers anywhere (code, fixtures, commits, issues).
 - Keep `@grant none` unless a review justifies a grant.

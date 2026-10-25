@@ -53,6 +53,8 @@ export function createTurnBackend() {
     setWindow(turn, options) {
       return api?.navigateToTurn(turn, options) ?? false;
     },
+    /** True when `el` is a turn element whose content is currently rendered (not skipped). */
+    isTurnActive: (el) => api?.turnIndexOf(el) !== undefined && el.getAttribute(STATE) !== "inactive",
     /** Navigate to the turn that owns `el`; false when `el` is not a known turn element. */
     navigateToElement(el, options) {
       const i = api?.turnIndexOf(el);
@@ -66,7 +68,7 @@ export function createTurnBackend() {
   };
 }
 
-function mountTurns({ doc, adapter, scroll, observers, config, fallback }) {
+function mountTurns({ doc, adapter, scroll, observers, config, fallback, onLayout }) {
   const win = doc.defaultView;
   const size = config.windowTurns ?? 10;
   const prefetch = config.prefetchTurns ?? 2;
@@ -105,6 +107,7 @@ function mountTurns({ doc, adapter, scroll, observers, config, fallback }) {
   const ro = new win.ResizeObserver(() => {
     scroll.restore();
     schedule();
+    onLayout?.(); // a turn changed size: the page column may have moved (sidebar, window)
   });
   const stopObserving = observers.subscribe(parent, () => refresh(), { childList: true, subtree: true });
 

@@ -42,6 +42,8 @@ export function createRuntime({ win, adapter, backend = createNoopBackend(), que
       scroll: { onScroll: none, scrollTo: () => false, navigateTo: () => false, stats: {} },
       onIndexChange: none,
       onFallback: none,
+      onLayoutChange: none,
+      isTurnActive: () => true,
       navigateTo: () => false,
       dispose: () => queue.dispose(),
     });
@@ -59,19 +61,21 @@ export function createRuntime({ win, adapter, backend = createNoopBackend(), que
   let stop = () => {};
   const indexListeners = new Set();
   const fallbackListeners = new Set();
+  const layoutListeners = new Set();
   const failOpen = (reason) => {
     stop();
     indexListeners.clear();
+    layoutListeners.clear();
     fallbackListeners.forEach((fn) => fn(reason));
     fallbackListeners.clear();
     backend.unmount();
     observers.disposeAll();
     scroll.dispose();
-    Object.assign(runtime, { mode: "safe", scroll: undefined, observers: undefined, navigateTo: undefined, onIndexChange: undefined, dispose: () => queue.dispose() });
+    Object.assign(runtime, { mode: "safe", scroll: undefined, observers: undefined, navigateTo: undefined, onIndexChange: undefined, onLayoutChange: undefined, isTurnActive: undefined, dispose: () => queue.dispose() });
     diagnostics.count("virtualization.fallback");
     diagnostics.warnOnce("virtualization", `virtualization disabled (${reason}); running in safe mode`);
   };
-  const mounted = backend.mount({ doc: win.document, adapter, scroll, observers, config, diagnostics, fallback: failOpen });
+  const mounted = backend.mount({ doc: win.document, adapter, scroll, observers, config, diagnostics, fallback: failOpen, onLayout: () => layoutListeners.forEach((fn) => fn()) });
   if (mounted?.active === false) {
     failOpen(mounted.reason);
     return runtime;
@@ -98,6 +102,13 @@ export function createRuntime({ win, adapter, backend = createNoopBackend(), que
       fallbackListeners.add(fn);
       return () => fallbackListeners.delete(fn);
     },
+    /** Subscribe to page-layout hints (a rendered turn changed size); returns an unsubscribe. */
+    onLayoutChange(fn) {
+      layoutListeners.add(fn);
+      return () => layoutListeners.delete(fn);
+    },
+    /** False for a turn the virtualizer currently skips (its height is a placeholder). */
+    isTurnActive: (el) => backend.isTurnActive?.(el) ?? true,
     /** The one explicit navigation entry: activates a virtualized-out turn, then scrolls to it. */
     navigateTo(el, options) {
       return backend.navigateToElement?.(el, options) || scroll.navigateTo(el, options);
@@ -108,6 +119,7 @@ export function createRuntime({ win, adapter, backend = createNoopBackend(), que
       queue.dispose();
       stop();
       indexListeners.clear();
+      layoutListeners.clear();
       observers.disposeAll();
       backend.unmount();
       scroll.dispose();
