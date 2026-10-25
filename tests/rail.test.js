@@ -45,7 +45,7 @@ test("layout: minimap on top, prompts chronological oldest-first, newest last, l
   const cards = [...q(".gs-rail-panel").children].map((c) => c.className.split(" ")[1]);
   assert.deepEqual(cards, ["gs-card-overview", "gs-card-prompts"], "overview card above the prompts card");
   assert.deepEqual([...q(".gs-card-overview .gs-card-body").children].map((c) => c.className), ["gs-minimap", "gs-caption"]);
-  assert.deepEqual([...q(".gs-card-prompts .gs-card-body").children].map((c) => c.className), ["gs-search", "gs-prompts", "gs-jumps"]);
+  assert.deepEqual([...q(".gs-card-prompts .gs-card-body").children].map((c) => c.className), ["gs-search", "gs-prompts"]);
   assert.equal(q(".gs-card-overview .gs-card-title").textContent, "Conversation overview");
   assert.equal(q(".gs-card-prompts .gs-card-title").textContent, "Prompts");
   assert.equal(q(".gs-search input").placeholder, "Search prompts...");
@@ -200,17 +200,18 @@ test("minimap: viewport indicator, click and drag navigate the active turn throu
   assert.ok(runtime.diagnostics.snapshot()["scroll.moved.keyboard"] >= 1);
 });
 
-test("responsive: docked only when the gutter fits; collapsed toggle on narrow viewports", async () => {
+test("responsive: docked from the dock threshold, collapsed toggle on narrow viewports", async () => {
   const wide = createFixture({ turns: 12, width: 1600 });
   mount(wide);
   const dock = wide.doc.querySelector(".gs-rail");
   assert.equal(dock.dataset.gsMode, "docked");
   assert.equal(dock.dataset.gsOpen, "true");
 
-  // 1280 with a 768px column leaves a 256px gutter: too tight for the 240px rail, so no overlap with the conversation.
+  // 1280 leaves a 256px natural gutter: docked by shifting the page column, not by overlapping it.
   const tight = createFixture({ turns: 12, width: 1280 });
   mount(tight);
-  assert.equal(tight.doc.querySelector(".gs-rail").dataset.gsMode, "collapsed");
+  assert.equal(tight.doc.querySelector(".gs-rail").dataset.gsMode, "docked");
+  assert.ok(tight.reserve() > 0);
 
   const narrow = createFixture({ turns: 12, width: 390 });
   const { q } = mount(narrow);
@@ -219,6 +220,7 @@ test("responsive: docked only when the gutter fits; collapsed toggle on narrow v
   assert.equal(rail.dataset.gsMode, "collapsed");
   assert.equal(rail.dataset.gsOpen, "false");
   assert.equal(toggle.getAttribute("aria-expanded"), "false");
+  assert.equal(narrow.reserve(), 0, "a collapsed rail reserves nothing");
   toggle.click();
   assert.equal(rail.dataset.gsOpen, "true");
   assert.equal(toggle.getAttribute("aria-expanded"), "true");
@@ -227,6 +229,7 @@ test("responsive: docked only when the gutter fits; collapsed toggle on narrow v
   // Growing the window re-docks it.
   narrow.win.innerWidth = 1700;
   narrow.win.dispatchEvent(new narrow.win.Event("resize"));
+  await narrow.settle();
   assert.equal(rail.dataset.gsMode, "docked");
   assert.equal(rail.dataset.gsOpen, "true");
 });
@@ -281,7 +284,7 @@ test("fail-open removes the rail; dispose leaves the DOM as it was", async () =>
   assert.equal(fx2.doc.getElementById("gs-rail-style"), null);
 });
 
-test("reference layout: collapsible cards, caption percentage, green in-view dots, jump links, filter", async () => {
+test("reference layout: collapsible cards, caption percentage, green in-view dots, filter", async () => {
   const fx = createFixture({ turns: 40, width: 1600 });
   const { q, list, minimap } = mount(fx);
   fixMinimapRect(minimap);
@@ -312,18 +315,19 @@ test("reference layout: collapsible cards, caption percentage, green in-view dot
   q(".gs-filter").click();
   assert.equal(items(fx).length, 40);
 
-  // Jump links: oldest at the very top, newest at the very bottom.
-  assert.equal(q(".gs-first").textContent, "↑ First prompt (oldest)");
-  assert.equal(q(".gs-last").textContent, "↓ Last prompt (newest)");
-  q(".gs-first").click();
+  // No "First prompt" / "Last prompt" buttons: the list itself (scroll, search, select) is the navigation.
+  assert.equal(q(".gs-first"), null);
+  assert.equal(q(".gs-last"), null);
+  assert.equal(q(".gs-jumps"), null);
+  assert.doesNotMatch(q(".gs-rail").textContent, /First prompt|Last prompt/);
+  items(fx)[0].click();
   await fx.settle();
   assert.equal(fx.rawTop(), 0);
-  assert.equal(list.scrollTop, 0);
   assert.equal(items(fx)[0].getAttribute("aria-current"), "true");
-  q(".gs-last").click();
+  list.scrollTop = list.scrollHeight;
+  items(fx).at(-1).click();
   await fx.settle();
   assert.equal(items(fx).at(-1).getAttribute("aria-current"), "true");
-  assert.equal(list.scrollTop, list.scrollHeight - 200);
   assert.equal(fx.blankInViewport().length, 0);
 
   // Chevron headers collapse and expand each card.

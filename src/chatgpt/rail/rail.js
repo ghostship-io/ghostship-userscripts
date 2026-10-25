@@ -1,18 +1,19 @@
 import { searchPrompts } from "../../core/prompt-index.js";
 import { buildTurnModel, layoutBars, scrollTopForFraction, viewportIndicator } from "./minimap-model.js";
+import { LAYOUT_CSS, RAIL_EDGE, RAIL_WIDTH, createRailLayout } from "./rail-layout.js";
+import { contentSignature, createRailStateStore } from "./rail-state.js";
 
-const RAIL_WIDTH = 296;
-const DOCK_MIN_VIEWPORT = 1100;
 const STYLE_ID = "gs-rail-style";
 const ACCENT = "#19c37d";
 
-// Layout contract (owner reference): a right column of two collapsible cards,
+// Layout contract (approved concept): a right column of two collapsible cards,
 // "Conversation overview" (minimap) above "Prompts", anchored bottom-right and
-// growing upward. Docked only when the free right gutter fits it, so the
-// conversation column is never narrowed; otherwise it collapses to a toggle that
-// opens the same cards above the composer. Nothing is wider than the viewport.
+// growing upward. Docked, its column is reserved in the page layout (rail-layout.js shifts the
+// conversation and composer left by what it needs, never overlapping them); below the dock
+// threshold it collapses to a toggle that opens the same cards above the composer.
+// Nothing is wider than the viewport.
 const CSS = `
-.gs-rail{position:fixed;right:12px;bottom:16px;z-index:40;display:flex;flex-direction:column;align-items:flex-end;gap:8px;max-width:calc(100vw - 24px);box-sizing:border-box;font:13px/1.35 system-ui,sans-serif;color:var(--text-primary,#ececec)}
+.gs-rail{position:fixed;right:${RAIL_EDGE}px;bottom:16px;z-index:40;display:flex;flex-direction:column;align-items:flex-end;gap:8px;max-width:calc(100vw - 24px);box-sizing:border-box;font:13px/1.35 system-ui,sans-serif;color:var(--text-primary,#ececec)}
 .gs-rail *{box-sizing:border-box}
 .gs-rail[data-gs-mode="collapsed"]{bottom:var(--gs-rail-bottom,96px)}
 .gs-rail-panel{display:flex;flex-direction:column;gap:12px;width:${RAIL_WIDTH}px;max-width:calc(100vw - 24px);max-height:min(calc(100vh - 72px),calc(100vh - var(--gs-rail-bottom,16px) - 72px));min-height:0}
@@ -28,7 +29,7 @@ const CSS = `
 .gs-card-prompts .gs-card-body{flex:1 1 auto}
 .gs-card[data-gs-collapsed="true"] .gs-card-body{display:none}
 .gs-minimap{position:relative;flex:0 0 auto;height:min(250px,32vh);border:1px solid var(--border-light,rgba(128,128,128,.35));border-radius:8px;background:rgba(128,128,128,.08);cursor:pointer;touch-action:none;overflow:hidden}
-.gs-minimap:focus-visible,.gs-search input:focus-visible,.gs-prompt:focus-visible,.gs-rail-toggle:focus-visible,.gs-card-head:focus-visible,.gs-filter:focus-visible,.gs-jump:focus-visible{outline:2px solid ${ACCENT};outline-offset:1px}
+.gs-minimap:focus-visible,.gs-search input:focus-visible,.gs-prompt:focus-visible,.gs-rail-toggle:focus-visible,.gs-card-head:focus-visible,.gs-filter:focus-visible{outline:2px solid ${ACCENT};outline-offset:1px}
 .gs-bar{position:absolute;left:12%;min-height:2px;border-radius:2px;background:rgba(160,160,160,.5)}
 .gs-bar[data-kind="heading"]{background:rgba(220,220,220,.8)}
 .gs-bar[data-kind="code"]{background:rgba(106,169,255,.55)}
@@ -44,7 +45,7 @@ const CSS = `
 .gs-search input{width:100%;min-height:36px;padding:4px 8px 4px 30px;border:1px solid var(--border-light,rgba(128,128,128,.35));border-radius:10px;background:rgba(128,128,128,.1);color:inherit;font:inherit}
 .gs-filter{flex:0 0 auto;width:36px;height:36px;border:1px solid var(--border-light,rgba(128,128,128,.35));border-radius:10px;background:rgba(128,128,128,.1);color:inherit;cursor:pointer}
 .gs-filter[aria-pressed="true"]{border-color:${ACCENT};color:${ACCENT}}
-.gs-prompts{flex:1 1 auto;min-height:60px;margin:0;padding:0;list-style:none;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain}
+.gs-prompts{flex:1 1 auto;min-height:60px;margin:0;padding:0;list-style:none;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
 .gs-prompt{position:relative;display:flex;gap:10px;width:100%;min-height:48px;padding:6px 26px 6px 10px;border:0;border-left:3px solid transparent;border-radius:8px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
 .gs-prompt:hover{background:rgba(128,128,128,.12)}
 .gs-prompt[aria-current="true"]{background:rgba(25,195,125,.16);border-left-color:${ACCENT}}
@@ -54,12 +55,9 @@ const CSS = `
 .gs-title{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .gs-preview{font-size:12px;opacity:.65;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .gs-empty{padding:8px;opacity:.6}
-.gs-jumps{display:flex;flex:0 0 auto;flex-direction:column;gap:2px;margin-top:8px;padding-top:8px;border-top:1px solid var(--border-light,rgba(128,128,128,.25))}
-.gs-jump{display:flex;gap:8px;align-items:center;min-height:28px;padding:2px 4px;border:0;background:transparent;color:inherit;font:inherit;font-size:12px;opacity:.8;text-align:left;cursor:pointer}
-.gs-jump:hover{opacity:1;text-decoration:underline}
 .gs-rail-toggle{display:none;min-width:44px;min-height:44px;border:1px solid var(--border-light,rgba(128,128,128,.35));border-radius:22px;background:var(--main-surface-primary,#212121);color:inherit;cursor:pointer}
 .gs-rail[data-gs-mode="collapsed"] .gs-rail-toggle{display:block}
-`;
+${LAYOUT_CSS}`;
 
 /** Title = first sentence of the prompt; preview = what follows, else the start of the reply. */
 export function describePrompt(text, reply = "") {
@@ -72,6 +70,7 @@ export function describePrompt(text, reply = "") {
 }
 
 const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+const PREVIEW_MAX = 100;
 
 /**
  * Right rail: current-turn minimap on top, searchable chronological prompt list
@@ -80,11 +79,16 @@ const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
  * through `runtime.navigateTo` (prompt selection, which also activates
  * virtualized-out turns) or `runtime.scroll.scrollTo` (minimap, keyboard).
  * Re-renders follow the runtime's prompt index; no observers of its own.
+ *
+ * Each conversation keeps its own state (selected prompt, search, filter, card and panel
+ * expansion, prompt-list scroll, conversation scroll bookmark) in `store`, which outlives the
+ * rail: the boot controller rebuilds the rail on every route change.
  */
-export function createRail({ win, adapter, runtime }) {
+export function createRail({ win, adapter, runtime, store = createRailStateStore() }) {
   const doc = win.document;
-  const scroller = adapter.scroller(doc);
   const scroll = runtime.scroll;
+  const scroller = scroll.element ?? adapter.scroller(doc);
+  const convId = adapter.conversationId(win);
   let els = [];
   let prompts = [];
   let signature = null;
@@ -100,8 +104,18 @@ export function createRail({ win, adapter, runtime }) {
   let forceModel = false;
   let trailing = null;
   let scheduled = false;
+  let layoutQueued = false;
+  let layoutSig = null;
   let disposed = false;
   let drag = false;
+  let userScrolled = false;
+  let ownSig = null;
+  let restore = store.get(convId);
+  let didRestore = false;
+  let viewBox = "";
+  let bookmarkToRestore = null;
+  let listTopToRestore = null;
+  const described = new Map();
 
   const style = doc.createElement("style");
   style.id = STYLE_ID;
@@ -127,7 +141,6 @@ export function createRail({ win, adapter, runtime }) {
         <div class="gs-card-body" id="gs-prompts-body">
           <div class="gs-search"><div class="gs-search-field"><input type="search" placeholder="Search prompts..." aria-label="Search prompts"></div><button type="button" class="gs-filter" aria-pressed="false" aria-label="Only prompts in view" title="Only prompts in view">&#9776;</button></div>
           <ol class="gs-prompts" aria-label="Prompts, oldest first"></ol>
-          <div class="gs-jumps"><button type="button" class="gs-jump gs-first">&uarr; First prompt (oldest)</button><button type="button" class="gs-jump gs-last">&darr; Last prompt (newest)</button></div>
         </div>
       </section>
     </div>
@@ -135,21 +148,27 @@ export function createRail({ win, adapter, runtime }) {
   doc.body.appendChild(root);
 
   const $ = (sel) => root.querySelector(sel);
-  const panel = $(".gs-rail-panel");
   const minimap = $(".gs-minimap");
   const bars = $(".gs-bars");
   const view = $(".gs-view");
   const overviewCard = $(".gs-card-overview");
+  const promptsCard = $(".gs-card-prompts");
   const caption = $(".gs-caption");
   const filterBtn = $(".gs-filter");
   const input = $(".gs-search input");
   const list = $(".gs-prompts");
   const toggle = $(".gs-rail-toggle");
+  const railLayout = createRailLayout({ win, adapter, target: () => els[0] });
 
   const cleanups = [];
   const on = (target, type, fn, opts) => {
     target.addEventListener(type, fn, opts);
     cleanups.push(() => target.removeEventListener(type, fn, opts));
+  };
+
+  const setCollapsed = (card, collapsed) => {
+    card.dataset.gsCollapsed = String(collapsed);
+    card.querySelector(".gs-card-head").setAttribute("aria-expanded", String(!collapsed));
   };
 
   // Change-only DOM writes everywhere: an idle or streaming page must see no writes from the rail.
@@ -159,23 +178,121 @@ export function createRail({ win, adapter, runtime }) {
     if (toggle.getAttribute("aria-expanded") !== String(next)) toggle.setAttribute("aria-expanded", String(next));
   }
 
-  /** Dock only when the free right gutter fits the rail; otherwise collapse to the toggle. */
-  function layout() {
-    const first = els[0];
-    const gutter = first ? win.innerWidth - first.getBoundingClientRect().right : win.innerWidth;
-    const docked = win.innerWidth >= DOCK_MIN_VIEWPORT && gutter >= RAIL_WIDTH + 24;
-    const was = root.dataset.gsMode;
-    if (was !== (docked ? "docked" : "collapsed")) root.dataset.gsMode = docked ? "docked" : "collapsed";
-    if (docked) setOpen(true);
-    else if (was === "docked") setOpen(false);
-    const composer = adapter.composer(doc);
-    const rect = composer?.getBoundingClientRect();
-    const bottom = rect?.height ? `${Math.max(16, Math.round(win.innerHeight - rect.top + 8))}px` : "96px";
-    if (root.style.getPropertyValue("--gs-rail-bottom") !== bottom) root.style.setProperty("--gs-rail-bottom", bottom);
+  // ---- per-conversation state -------------------------------------------------------------
+
+  // The conversation's own panel state needs no DOM: apply it right away.
+  if (restore) {
+    query = restore.ui.query;
+    input.value = query;
+    inViewOnly = restore.ui.inViewOnly;
+    filterBtn.setAttribute("aria-pressed", String(inViewOnly));
+    setCollapsed(overviewCard, restore.ui.overviewCollapsed);
+    setCollapsed(promptsCard, restore.ui.promptsCollapsed);
   }
+
+  /** Remember this conversation's state; never from another conversation's (stale) DOM. */
+  function persist(bookmark) {
+    if (disposed || restore || convId === "new") return;
+    const sig = contentSignature(prompts);
+    if (!sig) return;
+    if (ownSig === null) {
+      const owner = store.owner(sig);
+      if (owner && owner !== convId) return;
+      ownSig = sig;
+    } else if (sig !== ownSig) return;
+    const prev = store.get(convId);
+    store.save(convId, {
+      sig,
+      ui: { query, inViewOnly, open, overviewCollapsed: overviewCard.dataset.gsCollapsed === "true", promptsCollapsed: promptsCard.dataset.gsCollapsed === "true" },
+      activeId,
+      list: { top: list.scrollTop, pinned: listPinned },
+      bookmark: bookmark ?? prev?.bookmark ?? null,
+    });
+  }
+
+  /** The saved content applies once the page shows this conversation's own prompts. Returns true when applied. */
+  function applyRestore() {
+    if (!restore || !prompts.length) return false;
+    const sig = contentSignature(prompts);
+    if (sig !== restore.sig) {
+      const owner = store.owner(sig);
+      if (!owner || owner === convId) restore = null; // different content than saved: start fresh
+      return false; // else the page still shows another conversation: wait for its own prompts
+    }
+    const saved = restore;
+    restore = null;
+    ownSig = sig;
+    if (saved.activeId && prompts.some((p) => p.id === saved.activeId)) activeId = saved.activeId;
+    listPinned = saved.list.pinned;
+    listManual = !saved.list.pinned;
+    if (saved.ui.open && root.dataset.gsMode === "collapsed") setOpen(true);
+    bookmarkToRestore = saved.bookmark;
+    listTopToRestore = saved.list.top;
+    didRestore = true;
+    return true;
+  }
+
+  function finishRestore() {
+    if (listTopToRestore !== null) list.scrollTop = listPinned ? list.scrollHeight : listTopToRestore;
+    listTopToRestore = null;
+    const mark = bookmarkToRestore;
+    bookmarkToRestore = null;
+    // Explicit restore of where the user was reading; reading at the latest needs none (the page opens there).
+    if (!mark || mark.bottom || userScrolled) return;
+    const el = els.find((e, i) => adapter.turnId(e, i) === mark.id);
+    if (el) runtime.navigateTo(el, { offset: mark.offset });
+  }
+
+  // ---- layout -----------------------------------------------------------------------------
+
+  /** Reserve the rail's column in the page (or collapse to the toggle) when the page layout changed. */
+  function layout() {
+    const now = railLayout.signature();
+    if (now !== layoutSig) {
+      const { docked } = railLayout.evaluate();
+      const was = root.dataset.gsMode;
+      if (was !== (docked ? "docked" : "collapsed")) root.dataset.gsMode = docked ? "docked" : "collapsed";
+      if (docked) setOpen(true);
+      else if (was === "docked") setOpen(false);
+      layoutSig = railLayout.signature();
+    }
+    if (root.dataset.gsMode === "collapsed") {
+      const rect = adapter.composer(doc)?.getBoundingClientRect();
+      const bottom = rect?.height ? `${Math.max(16, Math.round(win.innerHeight - rect.top + 8))}px` : "96px";
+      if (root.style.getPropertyValue("--gs-rail-bottom") !== bottom) root.style.setProperty("--gs-rail-bottom", bottom);
+    }
+  }
+
+  // ---- prompt list ------------------------------------------------------------------------
 
   function promptEnd(i) {
     return (prompts[i + 1]?.turnIndex ?? els.length) - 1;
+  }
+
+  /** Title and one-line preview, cached per prompt so a long thread's replies are not re-read on every render. */
+  function describe(p) {
+    const cached = described.get(p.id);
+    if (cached && cached.len === p.text.length) return cached;
+    let d = { len: p.text.length, ...describePrompt(p.text, "") };
+    // Only the newest prompt's reply can still be growing; its preview is final once long enough.
+    d.final = d.preview !== "" || p !== prompts.at(-1);
+    if (!d.preview) {
+      const reply = adapter.reply(els, p.turnIndex);
+      d = { ...d, ...describePrompt(p.text, reply?.textContent ?? "") };
+      d.final = p !== prompts.at(-1) || d.preview.length >= PREVIEW_MAX;
+    }
+    if (d.final) described.set(p.id, d);
+    return d;
+  }
+
+  /** The newest prompt's reply is still arriving: fill its row's preview in place until it is long enough. */
+  function refreshLastPreview() {
+    const p = prompts.at(-1);
+    if (!p || described.has(p.id)) return;
+    const d = describe(p);
+    const row = [...list.querySelectorAll(".gs-prompt")].find((b) => b.dataset.id === p.id);
+    const pv = row?.querySelector(".gs-preview");
+    if (pv && pv.textContent !== d.preview) pv.textContent = d.preview;
   }
 
   function renderList() {
@@ -189,7 +306,7 @@ export function createRail({ win, adapter, runtime }) {
       list.append(li);
     }
     for (const p of shown) {
-      const { title, preview } = describePrompt(p.text, els[p.turnIndex + 1]?.textContent ?? "");
+      const { title, preview } = describe(p);
       const li = doc.createElement("li");
       const b = doc.createElement("button");
       b.type = "button";
@@ -218,17 +335,24 @@ export function createRail({ win, adapter, runtime }) {
     if (listPinned) list.scrollTop = list.scrollHeight;
   }
 
+  /** Where the conversation viewport is, in page coordinates: the scroller clipped to the window. */
+  function measureView() {
+    const sTop = scroller.getBoundingClientRect().top;
+    const viewTop = Math.max(sTop, 0);
+    const viewBottom = Math.min(sTop + scrollerHeight(), win.innerHeight || Infinity);
+    const first = els.length ? firstElementBelow(viewTop + 1) : 0;
+    let last = first;
+    while (last + 1 < els.length && els[last + 1].getBoundingClientRect().top < viewBottom) last++;
+    const atBottom = scroller.scrollTop + scrollerHeight() >= scroller.scrollHeight - 2;
+    return { sTop, viewTop, viewBottom, first, last, atBottom };
+  }
+
   /** Prompts whose turn is on screen get a dot; only the changed rows are touched. */
-  function updateInView() {
+  function updateInView(m) {
     const next = new Set();
     if (els.length && prompts.length) {
-      const base = scroller.getBoundingClientRect().top;
-      const bottom = base + scrollerHeight();
-      const firstVisible = firstElementBelow(base + 1);
-      let lastVisible = firstVisible;
-      while (lastVisible + 1 < els.length && els[lastVisible + 1].getBoundingClientRect().top < bottom) lastVisible++;
       prompts.forEach((p, i) => {
-        if (p.turnIndex <= lastVisible && promptEnd(i) >= firstVisible) next.add(p.id);
+        if (p.turnIndex <= m.last && promptEnd(i) >= m.first) next.add(p.id);
       });
     }
     const changed = next.size !== viewSet.size || [...next].some((id) => !viewSet.has(id));
@@ -263,6 +387,8 @@ export function createRail({ win, adapter, runtime }) {
     }
   }
 
+  // ---- minimap ----------------------------------------------------------------------------
+
   function turnExtent() {
     const i = prompts.findIndex((p) => p.id === activeId);
     if (i < 0) return null;
@@ -272,7 +398,7 @@ export function createRail({ win, adapter, runtime }) {
     return { i, a, z };
   }
 
-  function renderMinimap() {
+  function renderMinimap(m) {
     const ext = turnExtent();
     if (!ext || overviewCard.dataset.gsCollapsed === "true") return;
     const key = `${activeId}:${els.slice(prompts[ext.i].turnIndex, promptEnd(ext.i) + 1).map((e) => e.textContent.length).join(",")}`;
@@ -300,20 +426,24 @@ export function createRail({ win, adapter, runtime }) {
         bars.append(d);
       }
     }
-    const sTop = scroller.getBoundingClientRect().top;
     const ind = viewportIndicator({
       turnTop: ext.a.getBoundingClientRect().top,
       turnBottom: ext.z.getBoundingClientRect().bottom,
-      viewTop: sTop,
-      viewBottom: sTop + scrollerHeight(),
+      viewTop: m.viewTop,
+      viewBottom: m.viewBottom,
     });
-    view.hidden = !ind;
+    if (view.hidden !== !ind) view.hidden = !ind;
     // Only write on change: any DOM write under body re-triggers the prompt-index observer.
     const text = `Drag to navigate • ${ind ? Math.round(ind.visible * 100) : 0}% visible`;
     if (caption.textContent !== text) caption.textContent = text;
     if (ind) {
-      view.style.top = `${(ind.top * 100).toFixed(2)}%`;
-      view.style.height = `${(ind.height * 100).toFixed(2)}%`;
+      const top = `${(ind.top * 100).toFixed(2)}%`;
+      const height = `${(ind.height * 100).toFixed(2)}%`;
+      if (viewBox !== `${top} ${height}`) {
+        viewBox = `${top} ${height}`;
+        view.style.top = top;
+        view.style.height = height;
+      }
       const now = String(Math.round(ind.top * 100));
       if (minimap.getAttribute("aria-valuenow") !== now) minimap.setAttribute("aria-valuenow", now);
     }
@@ -324,25 +454,34 @@ export function createRail({ win, adapter, runtime }) {
   }
 
   /** Active prompt = the one whose turn holds the first element on screen; the newest at the bottom. */
-  function detectActive() {
+  function detectActive(m = measureView()) {
     if (!els.length || !prompts.length) return null;
-    if (scroller.scrollTop + scrollerHeight() >= scroller.scrollHeight - 2) return prompts.at(-1).id;
-    const lo = firstElementBelow(scroller.getBoundingClientRect().top + 1);
+    if (m.atBottom) return prompts.at(-1).id;
     let found = prompts[0];
-    for (const p of prompts) if (p.turnIndex <= lo) found = p;
+    for (const p of prompts) if (p.turnIndex <= m.first) found = p;
     return found.id;
+  }
+
+  /** The reading position as an anchor: the first turn on screen and its offset from the scroller's top. */
+  function bookmarkOf(m) {
+    const el = els[m.first];
+    if (!el) return null;
+    return { id: adapter.turnId(el, m.first), offset: el.getBoundingClientRect().top - m.sTop, bottom: m.atBottom };
   }
 
   function update() {
     scheduled = false;
     if (disposed) return;
-    const next = detectActive();
+    const m = measureView();
+    const next = detectActive(m);
     if (next && next !== activeId) {
       activeId = next;
       markActive();
     }
-    updateInView();
-    renderMinimap();
+    updateInView(m);
+    renderMinimap(m);
+    refreshLastPreview();
+    persist(els.length ? bookmarkOf(m) : null);
   }
 
   function schedule() {
@@ -351,17 +490,32 @@ export function createRail({ win, adapter, runtime }) {
     win.requestAnimationFrame(update);
   }
 
+  /** A cheap, batched check of the page column; the full rail update is not needed for it. */
+  function scheduleLayout() {
+    if (layoutQueued || disposed) return;
+    layoutQueued = true;
+    win.requestAnimationFrame(() => {
+      layoutQueued = false;
+      if (!disposed) layout();
+    });
+  }
+
   function refresh(index) {
     els = adapter.turns(doc);
     const sig = index.map((p) => `${p.id}:${p.text.length}`).join("|");
     prompts = index;
-    if (sig !== signature) {
+    layout();
+    const restored = applyRestore();
+    if (sig !== signature || restored) {
       signature = sig;
       if (!prompts.some((p) => p.id === activeId)) activeId = null;
       activeId = activeId ?? detectActive();
       renderList();
     }
-    layout();
+    if (restored) {
+      finishRestore();
+      markActive();
+    }
     schedule();
   }
 
@@ -372,18 +526,28 @@ export function createRail({ win, adapter, runtime }) {
     const el = els[p.turnIndex];
     if (el) runtime.navigateTo(el, { offset: 0 });
     modelKey = "";
-    renderMinimap();
+    renderMinimap(measureView());
+    persist();
+  }
+
+  /** Wake a turn the virtualizer skipped before measuring it: its height is only a placeholder until then. */
+  function ensureRendered(ext) {
+    if (!runtime.isTurnActive(ext.a)) runtime.navigateTo(ext.a, { offset: 0 });
+  }
+
+  function turnGeometry(ext) {
+    const sRect = scroller.getBoundingClientRect();
+    const a = ext.a.getBoundingClientRect();
+    return { turnTop: scroller.scrollTop + (a.top - sRect.top), turnHeight: ext.z.getBoundingClientRect().bottom - a.top };
   }
 
   function jumpFromPointer(clientY) {
     const ext = turnExtent();
     if (!ext) return;
+    ensureRendered(ext);
     const r = minimap.getBoundingClientRect();
     const fraction = clamp(r.height ? (clientY - r.top) / r.height : 0, 0, 1);
-    const sRect = scroller.getBoundingClientRect();
-    const turnTop = scroller.scrollTop + (ext.a.getBoundingClientRect().top - sRect.top);
-    const turnHeight = ext.z.getBoundingClientRect().bottom - ext.a.getBoundingClientRect().top;
-    scroll.scrollTo("minimap", scrollTopForFraction({ fraction, turnTop, turnHeight, viewHeight: scrollerHeight() }));
+    scroll.scrollTo("minimap", scrollTopForFraction({ fraction, ...turnGeometry(ext), viewHeight: scrollerHeight() }));
   }
 
   on(minimap, "pointerdown", (e) => {
@@ -404,9 +568,8 @@ export function createRail({ win, adapter, runtime }) {
     const step = { ArrowUp: -0.1, ArrowDown: 0.1, PageUp: -0.3, PageDown: 0.3 }[e.key];
     if (!ext || (step === undefined && e.key !== "Home" && e.key !== "End")) return;
     e.preventDefault();
-    const sRect = scroller.getBoundingClientRect();
-    const turnTop = scroller.scrollTop + (ext.a.getBoundingClientRect().top - sRect.top);
-    const turnHeight = ext.z.getBoundingClientRect().bottom - ext.a.getBoundingClientRect().top;
+    ensureRendered(ext);
+    const { turnTop, turnHeight } = turnGeometry(ext);
     const viewH = scrollerHeight();
     const max = turnTop + Math.max(0, turnHeight - viewH);
     const next = e.key === "Home" ? turnTop : e.key === "End" ? max : scroller.scrollTop + step * Math.max(turnHeight, viewH);
@@ -433,12 +596,14 @@ export function createRail({ win, adapter, runtime }) {
   // Manual list scrolling is respected: only "at the bottom" re-pins it to the newest prompt.
   on(list, "scroll", () => {
     listPinned = list.scrollTop + list.clientHeight >= list.scrollHeight - 4;
+    persist();
   });
   for (const type of ["wheel", "touchmove", "pointerdown"]) on(list, type, () => (listManual = true), { passive: true });
   on(input, "input", () => {
     query = input.value;
     listPinned = !query.trim();
     renderList();
+    persist();
   });
   on(input, "keydown", (e) => {
     if (e.key === "Escape" && input.value) {
@@ -447,35 +612,28 @@ export function createRail({ win, adapter, runtime }) {
       e.stopPropagation();
     }
   });
-  on(toggle, "click", () => setOpen(!open));
+  on(toggle, "click", () => {
+    setOpen(!open);
+    persist();
+  });
   for (const head of root.querySelectorAll(".gs-card-head")) {
     on(head, "click", () => {
       const card = head.closest(".gs-card");
       const collapsed = card.dataset.gsCollapsed !== "true";
-      card.dataset.gsCollapsed = String(collapsed);
-      head.setAttribute("aria-expanded", String(!collapsed));
+      setCollapsed(card, collapsed);
       if (!collapsed) {
         modelKey = "";
         schedule();
-        if (card.classList.contains("gs-card-prompts") && listPinned) list.scrollTop = list.scrollHeight;
+        if (card === promptsCard && listPinned) list.scrollTop = list.scrollHeight;
       }
+      persist();
     });
   }
   on(filterBtn, "click", () => {
     inViewOnly = !inViewOnly;
     filterBtn.setAttribute("aria-pressed", String(inViewOnly));
     renderList();
-  });
-  on($(".gs-first"), "click", () => {
-    if (!prompts[0]) return;
-    select(prompts[0]);
-    list.scrollTop = 0;
-  });
-  on($(".gs-last"), "click", () => {
-    if (!prompts.length) return;
-    select(prompts.at(-1));
-    listPinned = true;
-    list.scrollTop = list.scrollHeight;
+    persist();
   });
   on(root, "keydown", (e) => {
     if (e.key === "Escape" && root.dataset.gsMode === "collapsed" && open && !input.value) {
@@ -483,19 +641,27 @@ export function createRail({ win, adapter, runtime }) {
       toggle.focus();
     }
   });
-  on(win, "resize", () => layout());
+  // The page column moves with the window and with ChatGPT's own sidebar (an animated width change).
+  on(win, "resize", scheduleLayout);
+  on(doc, "transitionend", (e) => !root.contains(e.target) && /width|margin|padding|left|right|transform/.test(e.propertyName ?? "") && scheduleLayout(), { capture: true, passive: true });
 
-  cleanups.push(scroll.onScroll(schedule));
+  cleanups.push(scroll.onScroll((kind) => {
+    if (kind === "user") userScrolled = true;
+    schedule();
+  }));
   cleanups.push(runtime.onIndexChange(refresh));
+  cleanups.push(runtime.onLayoutChange(scheduleLayout));
   cleanups.push(runtime.onFallback(() => api.dispose()));
   refresh(runtime.promptIndex);
-  listPinned = true;
-  list.scrollTop = list.scrollHeight;
+  if (!didRestore) {
+    listPinned = true;
+    list.scrollTop = list.scrollHeight;
+  }
   update();
 
   const api = {
     element: root,
-    state: () => ({ activeId, open, mode: root.dataset.gsMode, listPinned, query }),
+    state: () => ({ activeId, open, mode: root.dataset.gsMode, listPinned, query, reserve: railLayout.reserve() }),
     select: (id) => {
       const p = prompts.find((x) => x.id === id);
       if (p) select(p);
@@ -506,6 +672,7 @@ export function createRail({ win, adapter, runtime }) {
       disposed = true;
       if (trailing) win.clearTimeout(trailing);
       cleanups.forEach((fn) => fn());
+      railLayout.dispose();
       root.remove();
       style.remove();
     },

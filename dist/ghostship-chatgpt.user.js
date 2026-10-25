@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GhostShip ChatGPT
 // @namespace    https://github.com/ghostship-io/ghostship-userscripts
-// @version      0.6.1
+// @version      0.6.2
 // @description  Fast, queue-aware ChatGPT interface for the owner browser.
 // @match        https://chatgpt.com/*
 // @grant        none
@@ -451,6 +451,8 @@
     }
     capture();
     return {
+      /** The element this manager owns: the conversation's actual scroller. */
+      element: scroller,
       stats,
       capture,
       restore,
@@ -636,6 +638,8 @@
         scroll: { onScroll: none, scrollTo: () => false, navigateTo: () => false, stats: {} },
         onIndexChange: none,
         onFallback: none,
+        onLayoutChange: none,
+        isTurnActive: () => true,
         navigateTo: () => false,
         dispose: () => queue2.dispose()
       });
@@ -650,19 +654,21 @@
     };
     const indexListeners = /* @__PURE__ */ new Set();
     const fallbackListeners = /* @__PURE__ */ new Set();
+    const layoutListeners = /* @__PURE__ */ new Set();
     const failOpen = (reason) => {
       stop();
       indexListeners.clear();
+      layoutListeners.clear();
       fallbackListeners.forEach((fn) => fn(reason));
       fallbackListeners.clear();
       backend.unmount();
       observers.disposeAll();
       scroll.dispose();
-      Object.assign(runtime, { mode: "safe", scroll: void 0, observers: void 0, navigateTo: void 0, onIndexChange: void 0, dispose: () => queue.dispose() });
+      Object.assign(runtime, { mode: "safe", scroll: void 0, observers: void 0, navigateTo: void 0, onIndexChange: void 0, onLayoutChange: void 0, isTurnActive: void 0, dispose: () => queue.dispose() });
       diagnostics.count("virtualization.fallback");
       diagnostics.warnOnce("virtualization", `virtualization disabled (${reason}); running in safe mode`);
     };
-    const mounted = backend.mount({ doc: win.document, adapter, scroll, observers, config, diagnostics, fallback: failOpen });
+    const mounted = backend.mount({ doc: win.document, adapter, scroll, observers, config, diagnostics, fallback: failOpen, onLayout: () => layoutListeners.forEach((fn) => fn()) });
     if (mounted?.active === false) {
       failOpen(mounted.reason);
       return runtime;
@@ -687,6 +693,13 @@
         fallbackListeners.add(fn);
         return () => fallbackListeners.delete(fn);
       },
+      /** Subscribe to page-layout hints (a rendered turn changed size); returns an unsubscribe. */
+      onLayoutChange(fn) {
+        layoutListeners.add(fn);
+        return () => layoutListeners.delete(fn);
+      },
+      /** False for a turn the virtualizer currently skips (its height is a placeholder). */
+      isTurnActive: (el2) => backend.isTurnActive?.(el2) ?? true,
       /** The one explicit navigation entry: activates a virtualized-out turn, then scrolls to it. */
       navigateTo(el2, options) {
         return backend.navigateToElement?.(el2, options) || scroll.navigateTo(el2, options);
@@ -697,6 +710,7 @@
         queue.dispose();
         stop();
         indexListeners.clear();
+        layoutListeners.clear();
         observers.disposeAll();
         backend.unmount();
         scroll.dispose();
@@ -716,6 +730,9 @@
   var SEND = 'button[data-testid="send-button"]';
   var STOP = 'button[data-testid="stop-button"]';
   var SCROLLER = "[data-scroll-root], [data-app-action-timeline-scroll]";
+  var HEADER = "#page-header";
+  var ASSISTANT = '[data-message-author-role="assistant"], [data-conversation-role="assistant"]';
+  var SCROLLABLE = /* @__PURE__ */ new Set(["auto", "scroll", "overlay"]);
   var nonEmptyRole = (el2, sel, attr) => (el2.matches(sel) ? el2 : el2.querySelector(sel))?.getAttribute(attr) || null;
   var chatgptAdapter = {
     turns: (root) => [...root.querySelectorAll(TURN)],
@@ -733,7 +750,39 @@
     /** The element the queue panel is inserted directly before: the composer form, else the input itself. */
     composer: (doc) => doc.querySelector(COMPOSER)?.closest("form") ?? doc.querySelector(COMPOSER),
     conversationId: (win) => win.location.pathname.match(/^\/c\/([\w-]+)/)?.[1] ?? "new",
-    scroller: (doc) => doc.querySelector(SCROLLER) ?? doc.scrollingElement ?? doc.documentElement,
+    /**
+     * The element that actually scrolls the conversation. The known selector is trusted unless a nearer
+     * ancestor of the turns is itself scrollable and overflowing (the markup moved the scroll owner inward).
+     */
+    scroller(doc) {
+      const known = doc.querySelector(SCROLLER);
+      const win = doc.defaultView;
+      for (let el2 = doc.querySelector(TURN)?.parentElement; el2 && el2 !== doc.body && el2 !== doc.documentElement; el2 = el2.parentElement) {
+        if (el2 === known) break;
+        if (SCROLLABLE.has(win.getComputedStyle(el2).overflowY) && el2.scrollHeight > el2.clientHeight && (!known || known.contains(el2))) return el2;
+      }
+      return known ?? doc.scrollingElement ?? doc.documentElement;
+    },
+    /**
+     * The page column the right rail reserves space from: the smallest element holding the conversation
+     * scroller, the composer and the page header, so that shrinking it shifts all three together.
+     */
+    column(doc) {
+      const composer = this.composer(doc);
+      const scroller = this.scroller(doc);
+      if (!composer || !scroller) return null;
+      const header = doc.querySelector(HEADER);
+      let node = scroller;
+      while (node && !(node.contains(composer) && (!header || node.contains(header)))) node = node.parentElement;
+      return !node || node === doc.documentElement ? doc.body : node;
+    },
+    /** The assistant reply of turn `index` of `turns`: inside the turn element, else the next message element. */
+    reply(turns, index) {
+      const own = turns[index].querySelector(ASSISTANT);
+      if (own) return own;
+      const next = turns[index + 1];
+      return next && this.role(next) !== "user" ? next : null;
+    },
     /** Identity of the pieces the script attaches to; a change means the page re-rendered or navigated. */
     layout(doc, win) {
       const first = doc.querySelector(TURN);
@@ -2121,13 +2170,130 @@
     return Math.max(turnTop, Math.min(max, target));
   }
 
-  // src/chatgpt/rail/rail.js
+  // src/chatgpt/rail/rail-layout.js
   var RAIL_WIDTH = 296;
-  var DOCK_MIN_VIEWPORT = 1100;
+  var RAIL_EDGE = 12;
+  var RAIL_RESERVE = RAIL_WIDTH + 2 * RAIL_EDGE;
+  var DOCK_MIN_VIEWPORT = 1024;
+  var MIN_CONTENT = 560;
+  var LAYOUT_CSS = `
+[data-gs-column][data-gs-column]{box-sizing:border-box;padding-right:var(--gs-reserve,0px)}
+`;
+  function createRailLayout({ win, adapter, target }) {
+    const doc = win.document;
+    let column = null;
+    let known = null;
+    let applied = 0;
+    const findColumn = () => {
+      if (!known?.isConnected) known = adapter.column(doc);
+      return known;
+    };
+    function setReserve(col, px) {
+      if (column && column !== col) clear();
+      column = col;
+      if (px > 0) {
+        if (col.getAttribute("data-gs-column") === null) col.setAttribute("data-gs-column", "");
+        const v = `${Math.round(px)}px`;
+        if (col.style.getPropertyValue("--gs-reserve") !== v) col.style.setProperty("--gs-reserve", v);
+      } else if (applied > 0 || col.hasAttribute("data-gs-column")) {
+        col.removeAttribute("data-gs-column");
+        col.style.removeProperty("--gs-reserve");
+        if (!col.getAttribute("style")) col.removeAttribute("style");
+      }
+      applied = px > 0 ? Math.round(px) : 0;
+    }
+    function clear() {
+      if (!column) return;
+      column.removeAttribute("data-gs-column");
+      column.style.removeProperty("--gs-reserve");
+      if (!column.getAttribute("style")) column.removeAttribute("style");
+      column = null;
+      applied = 0;
+    }
+    function signature() {
+      const col = findColumn();
+      if (!col) return "none";
+      const r = col.getBoundingClientRect();
+      return `${win.innerWidth}|${Math.round(r.left)}|${Math.round(r.right + (col === column ? applied : 0))}`;
+    }
+    function evaluate() {
+      const col = findColumn();
+      const el2 = target() ?? adapter.composer(doc);
+      if (!col || !el2 || win.innerWidth < DOCK_MIN_VIEWPORT) {
+        if (col) setReserve(col, 0);
+        else clear();
+        return { docked: false, reserve: 0 };
+      }
+      setReserve(col, 0);
+      const room = Math.max(0, win.innerWidth - col.getBoundingClientRect().right);
+      const cap = Math.max(0, RAIL_RESERVE - room);
+      const limit = win.innerWidth - RAIL_RESERVE;
+      let rect = el2.getBoundingClientRect();
+      let reserve = 0;
+      if (rect.right > limit && cap > 0) {
+        reserve = Math.min(cap, 2 * (rect.right - limit));
+        for (let i = 0; i < 3; i++) {
+          setReserve(col, reserve);
+          rect = el2.getBoundingClientRect();
+          const over = rect.right - limit;
+          if (over <= 0.5 || reserve >= cap) break;
+          reserve = Math.min(cap, reserve + over);
+        }
+      }
+      const fits = rect.right <= limit + 0.5 && (reserve === 0 || rect.width >= MIN_CONTENT);
+      if (!fits) {
+        setReserve(col, 0);
+        return { docked: false, reserve: 0 };
+      }
+      return { docked: true, reserve };
+    }
+    return { evaluate, signature, reserve: () => applied, dispose: clear };
+  }
+
+  // src/chatgpt/rail/rail-state.js
+  var NEW_CHAT = "new";
+  function contentSignature(prompts) {
+    const first = prompts[0];
+    if (!first) return null;
+    let h = 5381;
+    for (let i = 0; i < Math.min(first.text.length, 200); i++) h = (h * 33 ^ first.text.charCodeAt(i)) >>> 0;
+    return `${first.id}|${h.toString(36)}`;
+  }
+  function createRailStateStore({ max = 24 } = {}) {
+    const slots = /* @__PURE__ */ new Map();
+    return {
+      /** The stored state for a conversation, or null. */
+      get: (id) => id === NEW_CHAT ? null : slots.get(id) ?? null,
+      /** The conversation whose stored content has this signature, or null. */
+      owner(sig) {
+        if (sig) {
+          for (const [id, slot] of slots) if (slot.sig === sig) return id;
+        }
+        return null;
+      },
+      /**
+       * Store `state` (with `sig`, the content signature) for `id`. Skipped when the content belongs to a
+       * different stored conversation: that means the page still shows the previous conversation's DOM.
+       */
+      save(id, state) {
+        if (id === NEW_CHAT) return false;
+        const owner = this.owner(state.sig);
+        if (owner && owner !== id) return false;
+        slots.delete(id);
+        slots.set(id, state);
+        while (slots.size > max) slots.delete(slots.keys().next().value);
+        return true;
+      },
+      forget: (id) => slots.delete(id),
+      size: () => slots.size
+    };
+  }
+
+  // src/chatgpt/rail/rail.js
   var STYLE_ID2 = "gs-rail-style";
   var ACCENT = "#19c37d";
   var CSS2 = `
-.gs-rail{position:fixed;right:12px;bottom:16px;z-index:40;display:flex;flex-direction:column;align-items:flex-end;gap:8px;max-width:calc(100vw - 24px);box-sizing:border-box;font:13px/1.35 system-ui,sans-serif;color:var(--text-primary,#ececec)}
+.gs-rail{position:fixed;right:${RAIL_EDGE}px;bottom:16px;z-index:40;display:flex;flex-direction:column;align-items:flex-end;gap:8px;max-width:calc(100vw - 24px);box-sizing:border-box;font:13px/1.35 system-ui,sans-serif;color:var(--text-primary,#ececec)}
 .gs-rail *{box-sizing:border-box}
 .gs-rail[data-gs-mode="collapsed"]{bottom:var(--gs-rail-bottom,96px)}
 .gs-rail-panel{display:flex;flex-direction:column;gap:12px;width:${RAIL_WIDTH}px;max-width:calc(100vw - 24px);max-height:min(calc(100vh - 72px),calc(100vh - var(--gs-rail-bottom,16px) - 72px));min-height:0}
@@ -2143,7 +2309,7 @@
 .gs-card-prompts .gs-card-body{flex:1 1 auto}
 .gs-card[data-gs-collapsed="true"] .gs-card-body{display:none}
 .gs-minimap{position:relative;flex:0 0 auto;height:min(250px,32vh);border:1px solid var(--border-light,rgba(128,128,128,.35));border-radius:8px;background:rgba(128,128,128,.08);cursor:pointer;touch-action:none;overflow:hidden}
-.gs-minimap:focus-visible,.gs-search input:focus-visible,.gs-prompt:focus-visible,.gs-rail-toggle:focus-visible,.gs-card-head:focus-visible,.gs-filter:focus-visible,.gs-jump:focus-visible{outline:2px solid ${ACCENT};outline-offset:1px}
+.gs-minimap:focus-visible,.gs-search input:focus-visible,.gs-prompt:focus-visible,.gs-rail-toggle:focus-visible,.gs-card-head:focus-visible,.gs-filter:focus-visible{outline:2px solid ${ACCENT};outline-offset:1px}
 .gs-bar{position:absolute;left:12%;min-height:2px;border-radius:2px;background:rgba(160,160,160,.5)}
 .gs-bar[data-kind="heading"]{background:rgba(220,220,220,.8)}
 .gs-bar[data-kind="code"]{background:rgba(106,169,255,.55)}
@@ -2159,7 +2325,7 @@
 .gs-search input{width:100%;min-height:36px;padding:4px 8px 4px 30px;border:1px solid var(--border-light,rgba(128,128,128,.35));border-radius:10px;background:rgba(128,128,128,.1);color:inherit;font:inherit}
 .gs-filter{flex:0 0 auto;width:36px;height:36px;border:1px solid var(--border-light,rgba(128,128,128,.35));border-radius:10px;background:rgba(128,128,128,.1);color:inherit;cursor:pointer}
 .gs-filter[aria-pressed="true"]{border-color:${ACCENT};color:${ACCENT}}
-.gs-prompts{flex:1 1 auto;min-height:60px;margin:0;padding:0;list-style:none;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain}
+.gs-prompts{flex:1 1 auto;min-height:60px;margin:0;padding:0;list-style:none;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
 .gs-prompt{position:relative;display:flex;gap:10px;width:100%;min-height:48px;padding:6px 26px 6px 10px;border:0;border-left:3px solid transparent;border-radius:8px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
 .gs-prompt:hover{background:rgba(128,128,128,.12)}
 .gs-prompt[aria-current="true"]{background:rgba(25,195,125,.16);border-left-color:${ACCENT}}
@@ -2169,12 +2335,9 @@
 .gs-title{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .gs-preview{font-size:12px;opacity:.65;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .gs-empty{padding:8px;opacity:.6}
-.gs-jumps{display:flex;flex:0 0 auto;flex-direction:column;gap:2px;margin-top:8px;padding-top:8px;border-top:1px solid var(--border-light,rgba(128,128,128,.25))}
-.gs-jump{display:flex;gap:8px;align-items:center;min-height:28px;padding:2px 4px;border:0;background:transparent;color:inherit;font:inherit;font-size:12px;opacity:.8;text-align:left;cursor:pointer}
-.gs-jump:hover{opacity:1;text-decoration:underline}
 .gs-rail-toggle{display:none;min-width:44px;min-height:44px;border:1px solid var(--border-light,rgba(128,128,128,.35));border-radius:22px;background:var(--main-surface-primary,#212121);color:inherit;cursor:pointer}
 .gs-rail[data-gs-mode="collapsed"] .gs-rail-toggle{display:block}
-`;
+${LAYOUT_CSS}`;
   function describePrompt(text, reply = "") {
     const clean = text.replace(/\s+/g, " ").trim();
     const m = clean.match(/^(.{1,60}?)(?:[.?!:]\s+|$)/);
@@ -2184,10 +2347,12 @@
     return { title, preview };
   }
   var clamp2 = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
-  function createRail({ win, adapter, runtime }) {
+  var PREVIEW_MAX = 100;
+  function createRail({ win, adapter, runtime, store = createRailStateStore() }) {
     const doc = win.document;
-    const scroller = adapter.scroller(doc);
     const scroll = runtime.scroll;
+    const scroller = scroll.element ?? adapter.scroller(doc);
+    const convId = adapter.conversationId(win);
     let els = [];
     let prompts = [];
     let signature = null;
@@ -2203,8 +2368,18 @@
     let forceModel = false;
     let trailing = null;
     let scheduled = false;
+    let layoutQueued = false;
+    let layoutSig = null;
     let disposed = false;
     let drag = false;
+    let userScrolled = false;
+    let ownSig = null;
+    let restore = store.get(convId);
+    let didRestore = false;
+    let viewBox = "";
+    let bookmarkToRestore = null;
+    let listTopToRestore = null;
+    const described = /* @__PURE__ */ new Map();
     const style = doc.createElement("style");
     style.id = STYLE_ID2;
     style.textContent = CSS2;
@@ -2228,48 +2403,131 @@
         <div class="gs-card-body" id="gs-prompts-body">
           <div class="gs-search"><div class="gs-search-field"><input type="search" placeholder="Search prompts..." aria-label="Search prompts"></div><button type="button" class="gs-filter" aria-pressed="false" aria-label="Only prompts in view" title="Only prompts in view">&#9776;</button></div>
           <ol class="gs-prompts" aria-label="Prompts, oldest first"></ol>
-          <div class="gs-jumps"><button type="button" class="gs-jump gs-first">&uarr; First prompt (oldest)</button><button type="button" class="gs-jump gs-last">&darr; Last prompt (newest)</button></div>
         </div>
       </section>
     </div>
     <button type="button" class="gs-rail-toggle" aria-controls="gs-rail-panel" aria-expanded="false" aria-label="Conversation navigator">&#9776;</button>`;
     doc.body.appendChild(root);
     const $ = (sel) => root.querySelector(sel);
-    const panel = $(".gs-rail-panel");
     const minimap = $(".gs-minimap");
     const bars = $(".gs-bars");
     const view = $(".gs-view");
     const overviewCard = $(".gs-card-overview");
+    const promptsCard = $(".gs-card-prompts");
     const caption = $(".gs-caption");
     const filterBtn = $(".gs-filter");
     const input = $(".gs-search input");
     const list = $(".gs-prompts");
     const toggle = $(".gs-rail-toggle");
+    const railLayout = createRailLayout({ win, adapter, target: () => els[0] });
     const cleanups = [];
     const on = (target, type, fn, opts) => {
       target.addEventListener(type, fn, opts);
       cleanups.push(() => target.removeEventListener(type, fn, opts));
+    };
+    const setCollapsed = (card, collapsed) => {
+      card.dataset.gsCollapsed = String(collapsed);
+      card.querySelector(".gs-card-head").setAttribute("aria-expanded", String(!collapsed));
     };
     function setOpen(next) {
       open = next;
       if (root.dataset.gsOpen !== String(next)) root.dataset.gsOpen = String(next);
       if (toggle.getAttribute("aria-expanded") !== String(next)) toggle.setAttribute("aria-expanded", String(next));
     }
+    if (restore) {
+      query = restore.ui.query;
+      input.value = query;
+      inViewOnly = restore.ui.inViewOnly;
+      filterBtn.setAttribute("aria-pressed", String(inViewOnly));
+      setCollapsed(overviewCard, restore.ui.overviewCollapsed);
+      setCollapsed(promptsCard, restore.ui.promptsCollapsed);
+    }
+    function persist(bookmark) {
+      if (disposed || restore || convId === "new") return;
+      const sig = contentSignature(prompts);
+      if (!sig) return;
+      if (ownSig === null) {
+        const owner = store.owner(sig);
+        if (owner && owner !== convId) return;
+        ownSig = sig;
+      } else if (sig !== ownSig) return;
+      const prev = store.get(convId);
+      store.save(convId, {
+        sig,
+        ui: { query, inViewOnly, open, overviewCollapsed: overviewCard.dataset.gsCollapsed === "true", promptsCollapsed: promptsCard.dataset.gsCollapsed === "true" },
+        activeId,
+        list: { top: list.scrollTop, pinned: listPinned },
+        bookmark: bookmark ?? prev?.bookmark ?? null
+      });
+    }
+    function applyRestore() {
+      if (!restore || !prompts.length) return false;
+      const sig = contentSignature(prompts);
+      if (sig !== restore.sig) {
+        const owner = store.owner(sig);
+        if (!owner || owner === convId) restore = null;
+        return false;
+      }
+      const saved = restore;
+      restore = null;
+      ownSig = sig;
+      if (saved.activeId && prompts.some((p) => p.id === saved.activeId)) activeId = saved.activeId;
+      listPinned = saved.list.pinned;
+      listManual = !saved.list.pinned;
+      if (saved.ui.open && root.dataset.gsMode === "collapsed") setOpen(true);
+      bookmarkToRestore = saved.bookmark;
+      listTopToRestore = saved.list.top;
+      didRestore = true;
+      return true;
+    }
+    function finishRestore() {
+      if (listTopToRestore !== null) list.scrollTop = listPinned ? list.scrollHeight : listTopToRestore;
+      listTopToRestore = null;
+      const mark = bookmarkToRestore;
+      bookmarkToRestore = null;
+      if (!mark || mark.bottom || userScrolled) return;
+      const el2 = els.find((e, i) => adapter.turnId(e, i) === mark.id);
+      if (el2) runtime.navigateTo(el2, { offset: mark.offset });
+    }
     function layout() {
-      const first = els[0];
-      const gutter = first ? win.innerWidth - first.getBoundingClientRect().right : win.innerWidth;
-      const docked = win.innerWidth >= DOCK_MIN_VIEWPORT && gutter >= RAIL_WIDTH + 24;
-      const was = root.dataset.gsMode;
-      if (was !== (docked ? "docked" : "collapsed")) root.dataset.gsMode = docked ? "docked" : "collapsed";
-      if (docked) setOpen(true);
-      else if (was === "docked") setOpen(false);
-      const composer = adapter.composer(doc);
-      const rect = composer?.getBoundingClientRect();
-      const bottom = rect?.height ? `${Math.max(16, Math.round(win.innerHeight - rect.top + 8))}px` : "96px";
-      if (root.style.getPropertyValue("--gs-rail-bottom") !== bottom) root.style.setProperty("--gs-rail-bottom", bottom);
+      const now = railLayout.signature();
+      if (now !== layoutSig) {
+        const { docked } = railLayout.evaluate();
+        const was = root.dataset.gsMode;
+        if (was !== (docked ? "docked" : "collapsed")) root.dataset.gsMode = docked ? "docked" : "collapsed";
+        if (docked) setOpen(true);
+        else if (was === "docked") setOpen(false);
+        layoutSig = railLayout.signature();
+      }
+      if (root.dataset.gsMode === "collapsed") {
+        const rect = adapter.composer(doc)?.getBoundingClientRect();
+        const bottom = rect?.height ? `${Math.max(16, Math.round(win.innerHeight - rect.top + 8))}px` : "96px";
+        if (root.style.getPropertyValue("--gs-rail-bottom") !== bottom) root.style.setProperty("--gs-rail-bottom", bottom);
+      }
     }
     function promptEnd(i) {
       return (prompts[i + 1]?.turnIndex ?? els.length) - 1;
+    }
+    function describe2(p) {
+      const cached = described.get(p.id);
+      if (cached && cached.len === p.text.length) return cached;
+      let d = { len: p.text.length, ...describePrompt(p.text, "") };
+      d.final = d.preview !== "" || p !== prompts.at(-1);
+      if (!d.preview) {
+        const reply = adapter.reply(els, p.turnIndex);
+        d = { ...d, ...describePrompt(p.text, reply?.textContent ?? "") };
+        d.final = p !== prompts.at(-1) || d.preview.length >= PREVIEW_MAX;
+      }
+      if (d.final) described.set(p.id, d);
+      return d;
+    }
+    function refreshLastPreview() {
+      const p = prompts.at(-1);
+      if (!p || described.has(p.id)) return;
+      const d = describe2(p);
+      const row = [...list.querySelectorAll(".gs-prompt")].find((b) => b.dataset.id === p.id);
+      const pv = row?.querySelector(".gs-preview");
+      if (pv && pv.textContent !== d.preview) pv.textContent = d.preview;
     }
     function renderList() {
       let shown = searchPrompts(prompts, query);
@@ -2282,7 +2540,7 @@
         list.append(li);
       }
       for (const p of shown) {
-        const { title, preview } = describePrompt(p.text, els[p.turnIndex + 1]?.textContent ?? "");
+        const { title, preview } = describe2(p);
         const li = doc.createElement("li");
         const b = doc.createElement("button");
         b.type = "button";
@@ -2310,16 +2568,21 @@
       }
       if (listPinned) list.scrollTop = list.scrollHeight;
     }
-    function updateInView() {
+    function measureView() {
+      const sTop = scroller.getBoundingClientRect().top;
+      const viewTop = Math.max(sTop, 0);
+      const viewBottom = Math.min(sTop + scrollerHeight(), win.innerHeight || Infinity);
+      const first = els.length ? firstElementBelow(viewTop + 1) : 0;
+      let last = first;
+      while (last + 1 < els.length && els[last + 1].getBoundingClientRect().top < viewBottom) last++;
+      const atBottom = scroller.scrollTop + scrollerHeight() >= scroller.scrollHeight - 2;
+      return { sTop, viewTop, viewBottom, first, last, atBottom };
+    }
+    function updateInView(m) {
       const next = /* @__PURE__ */ new Set();
       if (els.length && prompts.length) {
-        const base = scroller.getBoundingClientRect().top;
-        const bottom = base + scrollerHeight();
-        const firstVisible = firstElementBelow(base + 1);
-        let lastVisible = firstVisible;
-        while (lastVisible + 1 < els.length && els[lastVisible + 1].getBoundingClientRect().top < bottom) lastVisible++;
         prompts.forEach((p, i) => {
-          if (p.turnIndex <= lastVisible && promptEnd(i) >= firstVisible) next.add(p.id);
+          if (p.turnIndex <= m.last && promptEnd(i) >= m.first) next.add(p.id);
         });
       }
       const changed = next.size !== viewSet.size || [...next].some((id) => !viewSet.has(id));
@@ -2358,7 +2621,7 @@
       if (!a || !z) return null;
       return { i, a, z };
     }
-    function renderMinimap() {
+    function renderMinimap(m) {
       const ext = turnExtent();
       if (!ext || overviewCard.dataset.gsCollapsed === "true") return;
       const key = `${activeId}:${els.slice(prompts[ext.i].turnIndex, promptEnd(ext.i) + 1).map((e) => e.textContent.length).join(",")}`;
@@ -2385,19 +2648,23 @@
           bars.append(d);
         }
       }
-      const sTop = scroller.getBoundingClientRect().top;
       const ind = viewportIndicator({
         turnTop: ext.a.getBoundingClientRect().top,
         turnBottom: ext.z.getBoundingClientRect().bottom,
-        viewTop: sTop,
-        viewBottom: sTop + scrollerHeight()
+        viewTop: m.viewTop,
+        viewBottom: m.viewBottom
       });
-      view.hidden = !ind;
+      if (view.hidden !== !ind) view.hidden = !ind;
       const text = `Drag to navigate \u2022 ${ind ? Math.round(ind.visible * 100) : 0}% visible`;
       if (caption.textContent !== text) caption.textContent = text;
       if (ind) {
-        view.style.top = `${(ind.top * 100).toFixed(2)}%`;
-        view.style.height = `${(ind.height * 100).toFixed(2)}%`;
+        const top = `${(ind.top * 100).toFixed(2)}%`;
+        const height = `${(ind.height * 100).toFixed(2)}%`;
+        if (viewBox !== `${top} ${height}`) {
+          viewBox = `${top} ${height}`;
+          view.style.top = top;
+          view.style.height = height;
+        }
         const now2 = String(Math.round(ind.top * 100));
         if (minimap.getAttribute("aria-valuenow") !== now2) minimap.setAttribute("aria-valuenow", now2);
       }
@@ -2405,41 +2672,61 @@
     function scrollerHeight() {
       return scroller.clientHeight || scroller.getBoundingClientRect().height;
     }
-    function detectActive() {
+    function detectActive(m = measureView()) {
       if (!els.length || !prompts.length) return null;
-      if (scroller.scrollTop + scrollerHeight() >= scroller.scrollHeight - 2) return prompts.at(-1).id;
-      const lo = firstElementBelow(scroller.getBoundingClientRect().top + 1);
+      if (m.atBottom) return prompts.at(-1).id;
       let found = prompts[0];
-      for (const p of prompts) if (p.turnIndex <= lo) found = p;
+      for (const p of prompts) if (p.turnIndex <= m.first) found = p;
       return found.id;
+    }
+    function bookmarkOf(m) {
+      const el2 = els[m.first];
+      if (!el2) return null;
+      return { id: adapter.turnId(el2, m.first), offset: el2.getBoundingClientRect().top - m.sTop, bottom: m.atBottom };
     }
     function update() {
       scheduled = false;
       if (disposed) return;
-      const next = detectActive();
+      const m = measureView();
+      const next = detectActive(m);
       if (next && next !== activeId) {
         activeId = next;
         markActive();
       }
-      updateInView();
-      renderMinimap();
+      updateInView(m);
+      renderMinimap(m);
+      refreshLastPreview();
+      persist(els.length ? bookmarkOf(m) : null);
     }
     function schedule() {
       if (scheduled || disposed) return;
       scheduled = true;
       win.requestAnimationFrame(update);
     }
+    function scheduleLayout() {
+      if (layoutQueued || disposed) return;
+      layoutQueued = true;
+      win.requestAnimationFrame(() => {
+        layoutQueued = false;
+        if (!disposed) layout();
+      });
+    }
     function refresh(index) {
       els = adapter.turns(doc);
       const sig = index.map((p) => `${p.id}:${p.text.length}`).join("|");
       prompts = index;
-      if (sig !== signature) {
+      layout();
+      const restored = applyRestore();
+      if (sig !== signature || restored) {
         signature = sig;
         if (!prompts.some((p) => p.id === activeId)) activeId = null;
         activeId = activeId ?? detectActive();
         renderList();
       }
-      layout();
+      if (restored) {
+        finishRestore();
+        markActive();
+      }
       schedule();
     }
     function select(p) {
@@ -2449,17 +2736,24 @@
       const el2 = els[p.turnIndex];
       if (el2) runtime.navigateTo(el2, { offset: 0 });
       modelKey = "";
-      renderMinimap();
+      renderMinimap(measureView());
+      persist();
+    }
+    function ensureRendered(ext) {
+      if (!runtime.isTurnActive(ext.a)) runtime.navigateTo(ext.a, { offset: 0 });
+    }
+    function turnGeometry(ext) {
+      const sRect = scroller.getBoundingClientRect();
+      const a = ext.a.getBoundingClientRect();
+      return { turnTop: scroller.scrollTop + (a.top - sRect.top), turnHeight: ext.z.getBoundingClientRect().bottom - a.top };
     }
     function jumpFromPointer(clientY) {
       const ext = turnExtent();
       if (!ext) return;
+      ensureRendered(ext);
       const r = minimap.getBoundingClientRect();
       const fraction = clamp2(r.height ? (clientY - r.top) / r.height : 0, 0, 1);
-      const sRect = scroller.getBoundingClientRect();
-      const turnTop = scroller.scrollTop + (ext.a.getBoundingClientRect().top - sRect.top);
-      const turnHeight = ext.z.getBoundingClientRect().bottom - ext.a.getBoundingClientRect().top;
-      scroll.scrollTo("minimap", scrollTopForFraction({ fraction, turnTop, turnHeight, viewHeight: scrollerHeight() }));
+      scroll.scrollTo("minimap", scrollTopForFraction({ fraction, ...turnGeometry(ext), viewHeight: scrollerHeight() }));
     }
     on(minimap, "pointerdown", (e) => {
       drag = true;
@@ -2479,9 +2773,8 @@
       const step = { ArrowUp: -0.1, ArrowDown: 0.1, PageUp: -0.3, PageDown: 0.3 }[e.key];
       if (!ext || step === void 0 && e.key !== "Home" && e.key !== "End") return;
       e.preventDefault();
-      const sRect = scroller.getBoundingClientRect();
-      const turnTop = scroller.scrollTop + (ext.a.getBoundingClientRect().top - sRect.top);
-      const turnHeight = ext.z.getBoundingClientRect().bottom - ext.a.getBoundingClientRect().top;
+      ensureRendered(ext);
+      const { turnTop, turnHeight } = turnGeometry(ext);
       const viewH = scrollerHeight();
       const max = turnTop + Math.max(0, turnHeight - viewH);
       const next = e.key === "Home" ? turnTop : e.key === "End" ? max : scroller.scrollTop + step * Math.max(turnHeight, viewH);
@@ -2506,12 +2799,14 @@
     });
     on(list, "scroll", () => {
       listPinned = list.scrollTop + list.clientHeight >= list.scrollHeight - 4;
+      persist();
     });
     for (const type of ["wheel", "touchmove", "pointerdown"]) on(list, type, () => listManual = true, { passive: true });
     on(input, "input", () => {
       query = input.value;
       listPinned = !query.trim();
       renderList();
+      persist();
     });
     on(input, "keydown", (e) => {
       if (e.key === "Escape" && input.value) {
@@ -2520,35 +2815,28 @@
         e.stopPropagation();
       }
     });
-    on(toggle, "click", () => setOpen(!open));
+    on(toggle, "click", () => {
+      setOpen(!open);
+      persist();
+    });
     for (const head of root.querySelectorAll(".gs-card-head")) {
       on(head, "click", () => {
         const card = head.closest(".gs-card");
         const collapsed = card.dataset.gsCollapsed !== "true";
-        card.dataset.gsCollapsed = String(collapsed);
-        head.setAttribute("aria-expanded", String(!collapsed));
+        setCollapsed(card, collapsed);
         if (!collapsed) {
           modelKey = "";
           schedule();
-          if (card.classList.contains("gs-card-prompts") && listPinned) list.scrollTop = list.scrollHeight;
+          if (card === promptsCard && listPinned) list.scrollTop = list.scrollHeight;
         }
+        persist();
       });
     }
     on(filterBtn, "click", () => {
       inViewOnly = !inViewOnly;
       filterBtn.setAttribute("aria-pressed", String(inViewOnly));
       renderList();
-    });
-    on($(".gs-first"), "click", () => {
-      if (!prompts[0]) return;
-      select(prompts[0]);
-      list.scrollTop = 0;
-    });
-    on($(".gs-last"), "click", () => {
-      if (!prompts.length) return;
-      select(prompts.at(-1));
-      listPinned = true;
-      list.scrollTop = list.scrollHeight;
+      persist();
     });
     on(root, "keydown", (e) => {
       if (e.key === "Escape" && root.dataset.gsMode === "collapsed" && open && !input.value) {
@@ -2556,17 +2844,24 @@
         toggle.focus();
       }
     });
-    on(win, "resize", () => layout());
-    cleanups.push(scroll.onScroll(schedule));
+    on(win, "resize", scheduleLayout);
+    on(doc, "transitionend", (e) => !root.contains(e.target) && /width|margin|padding|left|right|transform/.test(e.propertyName ?? "") && scheduleLayout(), { capture: true, passive: true });
+    cleanups.push(scroll.onScroll((kind) => {
+      if (kind === "user") userScrolled = true;
+      schedule();
+    }));
     cleanups.push(runtime.onIndexChange(refresh));
+    cleanups.push(runtime.onLayoutChange(scheduleLayout));
     cleanups.push(runtime.onFallback(() => api.dispose()));
     refresh(runtime.promptIndex);
-    listPinned = true;
-    list.scrollTop = list.scrollHeight;
+    if (!didRestore) {
+      listPinned = true;
+      list.scrollTop = list.scrollHeight;
+    }
     update();
     const api = {
       element: root,
-      state: () => ({ activeId, open, mode: root.dataset.gsMode, listPinned, query }),
+      state: () => ({ activeId, open, mode: root.dataset.gsMode, listPinned, query, reserve: railLayout.reserve() }),
       select: (id) => {
         const p = prompts.find((x) => x.id === id);
         if (p) select(p);
@@ -2577,6 +2872,7 @@
         disposed = true;
         if (trailing) win.clearTimeout(trailing);
         cleanups.forEach((fn) => fn());
+        railLayout.dispose();
         root.remove();
         style.remove();
       }
@@ -2623,6 +2919,8 @@
       setWindow(turn, options) {
         return api?.navigateToTurn(turn, options) ?? false;
       },
+      /** True when `el` is a turn element whose content is currently rendered (not skipped). */
+      isTurnActive: (el2) => api?.turnIndexOf(el2) !== void 0 && el2.getAttribute(STATE) !== "inactive",
       /** Navigate to the turn that owns `el`; false when `el` is not a known turn element. */
       navigateToElement(el2, options) {
         const i = api?.turnIndexOf(el2);
@@ -2635,7 +2933,7 @@
       api: () => api
     };
   }
-  function mountTurns({ doc, adapter, scroll, observers, config, fallback }) {
+  function mountTurns({ doc, adapter, scroll, observers, config, fallback, onLayout }) {
     const win = doc.defaultView;
     const size = config.windowTurns ?? 10;
     const prefetch = config.prefetchTurns ?? 2;
@@ -2669,6 +2967,7 @@
     const ro = new win.ResizeObserver(() => {
       scroll.restore();
       schedule();
+      onLayout?.();
     });
     const stopObserving = observers.subscribe(parent, () => refresh(), { childList: true, subtree: true });
     function observe(el2, on) {
@@ -2825,14 +3124,15 @@
   var queueUi = persistentQueueUi(
     ({ win, adapter, diagnostics, config }) => createQueueUi({ win, adapter, diagnostics, dispatcher: selectDispatcher({ config, win, adapter }) })
   );
+  var railState = createRailStateStore();
   var boot = createBoot({
     win: window,
     adapter: chatgptAdapter,
-    version: "0.6.1",
+    version: "0.6.2",
     onDispose: () => queueUi.shutdown(),
     mount() {
       const runtime = createRuntime({ win: window, adapter: chatgptAdapter, backend: createTurnBackend(), queueUi });
-      const rail = runtime.mode === "active" || runtime.mode === "composer-only" ? createRail({ win: window, adapter: chatgptAdapter, runtime }) : null;
+      const rail = runtime.mode === "active" || runtime.mode === "composer-only" ? createRail({ win: window, adapter: chatgptAdapter, runtime, store: railState }) : null;
       return {
         runtime,
         dispose() {

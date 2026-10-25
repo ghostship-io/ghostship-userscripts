@@ -5,6 +5,7 @@ import { selectDispatcher } from "./queue/select.js";
 import { createQueueUi } from "./queue/controller.js";
 import { persistentQueueUi } from "./queue/persistent.js";
 import { createRail } from "./rail/rail.js";
+import { createRailStateStore } from "./rail/rail-state.js";
 import { createTurnBackend } from "./virtualization/backend.js";
 
 // Live by default; `config.dryRun` is an opt-in for testing (panel then shows "Dry run").
@@ -12,6 +13,9 @@ import { createTurnBackend } from "./virtualization/backend.js";
 const queueUi = persistentQueueUi(({ win, adapter, diagnostics, config }) =>
   createQueueUi({ win, adapter, diagnostics, dispatcher: selectDispatcher({ config, win, adapter }) }),
 );
+
+// Per-conversation rail state outlives each mount, so A -> B -> A restores A.
+const railState = createRailStateStore();
 
 // The layout renders after the script starts and changes with every in-app navigation,
 // so the boot controller starts, restarts and gives up (visibly) around one mount.
@@ -22,7 +26,7 @@ const boot = createBoot({
   onDispose: () => queueUi.shutdown(),
   mount() {
     const runtime = createRuntime({ win: window, adapter: chatgptAdapter, backend: createTurnBackend(), queueUi });
-    const rail = runtime.mode === "active" || runtime.mode === "composer-only" ? createRail({ win: window, adapter: chatgptAdapter, runtime }) : null;
+    const rail = runtime.mode === "active" || runtime.mode === "composer-only" ? createRail({ win: window, adapter: chatgptAdapter, runtime, store: railState }) : null;
     return {
       runtime,
       dispose() {

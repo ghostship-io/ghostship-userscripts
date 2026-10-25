@@ -14,6 +14,9 @@ const COMPOSER = '#prompt-textarea, [data-chatgpt-composer] [contenteditable="tr
 const SEND = 'button[data-testid="send-button"]';
 const STOP = 'button[data-testid="stop-button"]';
 const SCROLLER = "[data-scroll-root], [data-app-action-timeline-scroll]";
+const HEADER = "#page-header";
+const ASSISTANT = '[data-message-author-role="assistant"], [data-conversation-role="assistant"]';
+const SCROLLABLE = new Set(["auto", "scroll", "overlay"]);
 
 const nonEmptyRole = (el, sel, attr) => (el.matches(sel) ? el : el.querySelector(sel))?.getAttribute(attr) || null;
 
@@ -33,7 +36,39 @@ export const chatgptAdapter = {
   /** The element the queue panel is inserted directly before: the composer form, else the input itself. */
   composer: (doc) => doc.querySelector(COMPOSER)?.closest("form") ?? doc.querySelector(COMPOSER),
   conversationId: (win) => win.location.pathname.match(/^\/c\/([\w-]+)/)?.[1] ?? "new",
-  scroller: (doc) => doc.querySelector(SCROLLER) ?? doc.scrollingElement ?? doc.documentElement,
+  /**
+   * The element that actually scrolls the conversation. The known selector is trusted unless a nearer
+   * ancestor of the turns is itself scrollable and overflowing (the markup moved the scroll owner inward).
+   */
+  scroller(doc) {
+    const known = doc.querySelector(SCROLLER);
+    const win = doc.defaultView;
+    for (let el = doc.querySelector(TURN)?.parentElement; el && el !== doc.body && el !== doc.documentElement; el = el.parentElement) {
+      if (el === known) break;
+      if (SCROLLABLE.has(win.getComputedStyle(el).overflowY) && el.scrollHeight > el.clientHeight && (!known || known.contains(el))) return el;
+    }
+    return known ?? doc.scrollingElement ?? doc.documentElement;
+  },
+  /**
+   * The page column the right rail reserves space from: the smallest element holding the conversation
+   * scroller, the composer and the page header, so that shrinking it shifts all three together.
+   */
+  column(doc) {
+    const composer = this.composer(doc);
+    const scroller = this.scroller(doc);
+    if (!composer || !scroller) return null;
+    const header = doc.querySelector(HEADER);
+    let node = scroller;
+    while (node && !(node.contains(composer) && (!header || node.contains(header)))) node = node.parentElement;
+    return !node || node === doc.documentElement ? doc.body : node;
+  },
+  /** The assistant reply of turn `index` of `turns`: inside the turn element, else the next message element. */
+  reply(turns, index) {
+    const own = turns[index].querySelector(ASSISTANT);
+    if (own) return own;
+    const next = turns[index + 1];
+    return next && this.role(next) !== "user" ? next : null;
+  },
   /** Identity of the pieces the script attaches to; a change means the page re-rendered or navigated. */
   layout(doc, win) {
     const first = doc.querySelector(TURN);

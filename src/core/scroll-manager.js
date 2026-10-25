@@ -197,6 +197,8 @@ export function createScrollManager({ scroller, diagnostics, clock, intentMs = 3
   capture();
 
   return {
+    /** The element this manager owns: the conversation's actual scroller. */
+    element: scroller,
     stats,
     capture,
     restore,
