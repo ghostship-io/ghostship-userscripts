@@ -1,0 +1,16 @@
+{
+  "name": "ghostship-userscripts",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "bump": "node scripts/bump.mjs",
+    "test": "npm run build --silent && node --test \"tests/*.test.js\""
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "jsdom": "^26.0.0"
+  }
+}
