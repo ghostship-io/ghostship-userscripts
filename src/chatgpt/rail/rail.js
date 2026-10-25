@@ -1,62 +1,75 @@
 import { searchPrompts } from "../../core/prompt-index.js";
 import { buildTurnModel, layoutBars, scrollTopForFraction, viewportIndicator } from "./minimap-model.js";
-import { LAYOUT_CSS, RAIL_EDGE, RAIL_WIDTH, createRailLayout } from "./rail-layout.js";
-import { contentSignature, createRailStateStore } from "./rail-state.js";
+import { LAYOUT_CSS, RAIL_WIDTH, createRailLayout } from "./rail-layout.js";
+import { contentSignature, createPanePrefs, createRailStateStore } from "./rail-state.js";
 
-const STYLE_ID = "gs-rail-style";
-const ACCENT = "#19c37d";
+const STYLE_ID = "gs-pane-style";
 
-// Layout contract (approved concept): a right column of two collapsible cards,
-// "Conversation overview" (minimap) above "Prompts", anchored bottom-right and
-// growing upward. Docked, its column is reserved in the page layout (rail-layout.js shifts the
-// conversation and composer left by what it needs, never overlapping them); below the dock
-// threshold it collapses to a toggle that opens the same cards above the composer.
-// Nothing is wider than the viewport.
+// Layout contract: ONE right-side pane. Where ChatGPT mounts its own summary pane (Outputs / Sources) the
+// script's sections (current-turn overview above the searchable, chronological prompt list) are appended
+// to it, after Sources, and the native Outputs section gets a disclosure control; no native node is moved,
+// removed or re-created. Where it is absent, one docked fallback pane of the same shape stands in and
+// yields as soon as the native pane mounts. Either way the column is reserved once, in the page layout
+// (rail-layout.js). Below the dock threshold the fallback collapses to a toggle that opens the same
+// sections above the composer. Styling is ChatGPT's own tokens with theme-neutral fallbacks, no colors
+// of its own, so both themes and later token changes carry over. Nothing is wider than the viewport.
+const LINE = "var(--border-light,color-mix(in srgb,currentColor 14%,transparent))";
+const HOVER = "var(--surface-hover,color-mix(in srgb,currentColor 7%,transparent))";
+const SELECTED = "var(--interactive-bg-secondary-selected,color-mix(in srgb,currentColor 12%,transparent))";
+const FIELD = "var(--bg-elevated-secondary,color-mix(in srgb,currentColor 6%,transparent))";
+const MUTED = "var(--text-secondary,color-mix(in srgb,currentColor 65%,transparent))";
+const FOCUS = "outline:2px solid var(--border-heavy,currentColor);outline-offset:-2px";
+const CHEVRON = '<svg class="gs-chevron" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>';
+const MENU = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>';
+
 const CSS = `
-.gs-rail{position:fixed;right:${RAIL_EDGE}px;bottom:16px;z-index:40;display:flex;flex-direction:column;align-items:flex-end;gap:8px;max-width:calc(100vw - 24px);box-sizing:border-box;font:13px/1.35 system-ui,sans-serif;color:var(--text-primary,#ececec)}
-.gs-rail *{box-sizing:border-box}
-.gs-rail[data-gs-mode="collapsed"]{bottom:var(--gs-rail-bottom,96px)}
-.gs-rail-panel{display:flex;flex-direction:column;gap:12px;width:${RAIL_WIDTH}px;max-width:calc(100vw - 24px);max-height:min(calc(100vh - 72px),calc(100vh - var(--gs-rail-bottom,16px) - 72px));min-height:0}
-.gs-rail[data-gs-mode="docked"] .gs-rail-panel{max-height:calc(100vh - 72px)}
-.gs-rail[data-gs-open="false"] .gs-rail-panel{display:none}
-.gs-card{display:flex;flex-direction:column;min-height:0;border:1px solid var(--border-light,rgba(128,128,128,.35));border-radius:12px;background:var(--main-surface-primary,#212121)}
-.gs-card-prompts{flex:1 1 auto}
-.gs-card-head{display:flex;align-items:center;justify-content:space-between;width:100%;min-height:44px;padding:8px 14px;border:0;background:transparent;color:inherit;font:inherit;font-weight:600;font-size:14px;cursor:pointer}
-.gs-card-prompts .gs-card-title{color:#6aa9ff;text-decoration:underline;text-underline-offset:3px}
-.gs-chevron{display:inline-block;width:8px;height:8px;border:solid currentColor;border-width:2px 0 0 2px;transform:rotate(45deg) translate(2px,2px);transition:transform .15s}
-.gs-card[data-gs-collapsed="true"] .gs-chevron{transform:rotate(225deg) translate(2px,2px)}
-.gs-card-body{display:flex;flex-direction:column;min-height:0;padding:0 12px 12px}
-.gs-card-prompts .gs-card-body{flex:1 1 auto}
-.gs-card[data-gs-collapsed="true"] .gs-card-body{display:none}
-.gs-minimap{position:relative;flex:0 0 auto;height:min(250px,32vh);border:1px solid var(--border-light,rgba(128,128,128,.35));border-radius:8px;background:rgba(128,128,128,.08);cursor:pointer;touch-action:none;overflow:hidden}
-.gs-minimap:focus-visible,.gs-search input:focus-visible,.gs-prompt:focus-visible,.gs-rail-toggle:focus-visible,.gs-card-head:focus-visible,.gs-filter:focus-visible{outline:2px solid ${ACCENT};outline-offset:1px}
-.gs-bar{position:absolute;left:12%;min-height:2px;border-radius:2px;background:rgba(160,160,160,.5)}
-.gs-bar[data-kind="heading"]{background:rgba(220,220,220,.8)}
-.gs-bar[data-kind="code"]{background:rgba(106,169,255,.55)}
-.gs-bar[data-kind="table"]{background:rgba(25,195,125,.45)}
-.gs-bar[data-kind="image"]{background:rgba(255,160,90,.55)}
-.gs-view{position:absolute;left:4px;right:4px;border:2px solid ${ACCENT};border-radius:3px;background:rgba(25,195,125,.2);pointer-events:none}
-.gs-view::before,.gs-view::after{content:"";position:absolute;top:50%;width:6px;height:6px;margin-top:-3px;border-radius:50%;background:#fff;border:1px solid ${ACCENT}}
-.gs-view::before{left:-5px}.gs-view::after{right:-5px}
-.gs-caption{margin-top:8px;font-size:12px;opacity:.7}
+.gs-pane{position:fixed;right:0;top:var(--gs-pane-top,0px);bottom:0;z-index:30;display:flex;flex-direction:column;width:${RAIL_WIDTH}px;max-width:100vw;box-sizing:border-box;border-left:1px solid ${LINE};background:var(--main-surface-primary,Canvas);color:var(--text-primary,CanvasText);font:inherit;font-size:14px;line-height:20px}
+.gs-pane[hidden]{display:none}
+.gs-pane *,.gs-pane-slot *{box-sizing:border-box}
+.gs-pane[data-gs-mode="collapsed"]{top:auto;right:8px;bottom:var(--gs-pane-bottom,96px);width:min(${RAIL_WIDTH}px,calc(100vw - 16px));height:min(520px,calc(100vh - var(--gs-pane-bottom,96px) - 16px));border:1px solid ${LINE};border-radius:16px;overflow:hidden}
+.gs-pane[data-gs-mode="collapsed"][data-gs-open="false"]{display:none}
+.gs-pane-slot{display:flex;flex:1 1 auto;flex-direction:column;min-height:min(360px,60vh);max-height:100%;border-top:1px solid ${LINE};font-size:14px;line-height:20px}
+.gs-pane-body{display:flex;flex:1 1 auto;flex-direction:column;min-height:0;overflow:hidden}
+.gs-sec{display:flex;flex:0 0 auto;flex-direction:column;min-height:0}
+.gs-sec-prompts{flex:1 1 auto}
+.gs-sec-head{display:flex;align-items:center;justify-content:space-between;width:100%;min-height:40px;padding:8px 16px;border:0;background:transparent;color:inherit;font:inherit;font-weight:600;text-align:left;cursor:pointer}
+.gs-sec-head:hover,.gs-outputs-toggle:hover{background:${HOVER}}
+.gs-chevron{flex:0 0 auto;transition:transform .15s}
+.gs-sec[data-gs-collapsed="true"] .gs-chevron,[data-gs-outputs][data-gs-collapsed="true"] .gs-chevron{transform:rotate(-90deg)}
+.gs-sec-body{display:flex;flex-direction:column;min-height:0;padding:0 16px 12px}
+.gs-sec-prompts .gs-sec-body{flex:1 1 auto}
+.gs-sec[data-gs-collapsed="true"] .gs-sec-body{display:none}
+.gs-minimap{position:relative;flex:0 0 auto;height:min(220px,28vh);border:1px solid ${LINE};border-radius:8px;background:${FIELD};cursor:pointer;touch-action:none;overflow:hidden}
+.gs-minimap:focus-visible,.gs-search input:focus-visible,.gs-prompt:focus-visible,.gs-pane-toggle:focus-visible,.gs-sec-head:focus-visible,.gs-filter:focus-visible,.gs-outputs-toggle:focus-visible{${FOCUS}}
+.gs-bar{position:absolute;left:12%;min-height:2px;border-radius:2px;background:currentColor;opacity:.3}
+.gs-bar[data-kind="heading"]{opacity:.7}
+.gs-bar[data-kind="code"]{opacity:.45}
+.gs-bar[data-kind="table"]{opacity:.5}
+.gs-bar[data-kind="image"]{opacity:.55}
+.gs-view{position:absolute;left:2px;right:2px;border:1px solid var(--text-secondary,currentColor);border-radius:4px;background:${SELECTED};pointer-events:none}
+.gs-caption{margin-top:8px;font-size:12px;line-height:16px;color:${MUTED}}
 .gs-search{display:flex;flex:0 0 auto;gap:6px;align-items:center;margin-bottom:8px}
 .gs-search-field{position:relative;flex:1 1 auto;min-width:0}
-.gs-search-field::before{content:"";position:absolute;left:10px;top:50%;width:9px;height:9px;margin-top:-6px;border:2px solid currentColor;border-radius:50%;opacity:.6;pointer-events:none}
-.gs-search input{width:100%;min-height:36px;padding:4px 8px 4px 30px;border:1px solid var(--border-light,rgba(128,128,128,.35));border-radius:10px;background:rgba(128,128,128,.1);color:inherit;font:inherit}
-.gs-filter{flex:0 0 auto;width:36px;height:36px;border:1px solid var(--border-light,rgba(128,128,128,.35));border-radius:10px;background:rgba(128,128,128,.1);color:inherit;cursor:pointer}
-.gs-filter[aria-pressed="true"]{border-color:${ACCENT};color:${ACCENT}}
+.gs-search-field::before{content:"";position:absolute;left:10px;top:50%;width:9px;height:9px;margin-top:-6px;border:2px solid currentColor;border-radius:50%;opacity:.55;pointer-events:none}
+.gs-search input{width:100%;min-height:36px;padding:4px 8px 4px 30px;border:1px solid ${LINE};border-radius:10px;background:transparent;color:inherit;font:inherit}
+.gs-filter{flex:0 0 auto;display:flex;align-items:center;justify-content:center;width:36px;height:36px;border:1px solid ${LINE};border-radius:10px;background:transparent;color:${MUTED};cursor:pointer}
+.gs-filter:hover{background:${HOVER}}
+.gs-filter[aria-pressed="true"]{background:${SELECTED};color:inherit}
 .gs-prompts{flex:1 1 auto;min-height:60px;margin:0;padding:0;list-style:none;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
-.gs-prompt{position:relative;display:flex;gap:10px;width:100%;min-height:48px;padding:6px 26px 6px 10px;border:0;border-left:3px solid transparent;border-radius:8px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
-.gs-prompt:hover{background:rgba(128,128,128,.12)}
-.gs-prompt[aria-current="true"]{background:rgba(25,195,125,.16);border-left-color:${ACCENT}}
-.gs-prompt[data-in-view="true"]::after{content:"";position:absolute;right:10px;top:50%;width:6px;height:6px;margin-top:-3px;border-radius:50%;background:${ACCENT}}
-.gs-n{flex:0 0 auto;min-width:3ch;opacity:.75}
+.gs-prompt{position:relative;display:flex;gap:10px;width:100%;min-height:48px;padding:6px 24px 6px 10px;border:0;border-radius:8px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.gs-prompt:hover{background:${HOVER}}
+.gs-prompt[aria-current="true"]{background:${SELECTED}}
+.gs-prompt[data-in-view="true"]::after{content:"";position:absolute;right:10px;top:50%;width:6px;height:6px;margin-top:-3px;border-radius:50%;background:currentColor;opacity:.5}
+.gs-n{flex:0 0 auto;min-width:3ch;color:${MUTED}}
 .gs-copy{display:flex;flex:1 1 auto;flex-direction:column;min-width:0}
-.gs-title{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.gs-preview{font-size:12px;opacity:.65;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.gs-empty{padding:8px;opacity:.6}
-.gs-rail-toggle{display:none;min-width:44px;min-height:44px;border:1px solid var(--border-light,rgba(128,128,128,.35));border-radius:22px;background:var(--main-surface-primary,#212121);color:inherit;cursor:pointer}
-.gs-rail[data-gs-mode="collapsed"] .gs-rail-toggle{display:block}
+.gs-title{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gs-preview{font-size:12px;line-height:16px;color:${MUTED};white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gs-empty{padding:8px;color:${MUTED}}
+.gs-pane-toggle{display:none;position:fixed;right:8px;bottom:var(--gs-pane-bottom,96px);z-index:30;align-items:center;justify-content:center;min-width:44px;min-height:44px;border:1px solid ${LINE};border-radius:22px;background:var(--main-surface-primary,Canvas);color:inherit;cursor:pointer}
+.gs-pane-toggle[data-gs-mode="collapsed"]{display:flex}
+.gs-pane-toggle[hidden]{display:none}
+.gs-outputs-toggle{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:28px;height:28px;margin-left:auto;padding:0;border:0;border-radius:8px;background:transparent;color:inherit;cursor:pointer}
+[data-gs-outputs][data-gs-collapsed="true"]>:not([data-gs-outputs-head]){display:none}
 ${LAYOUT_CSS}`;
 
 /** Title = first sentence of the prompt; preview = what follows, else the start of the reply. */
@@ -73,18 +86,19 @@ const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
 const PREVIEW_MAX = 100;
 
 /**
- * Right rail: current-turn minimap on top, searchable chronological prompt list
+ * The right pane: current-turn minimap on top, searchable chronological prompt list
  * below (oldest first, newest last, list kept scrolled to the bottom while the
  * latest is in view). It never writes scroll position itself: every jump goes
  * through `runtime.navigateTo` (prompt selection, which also activates
  * virtualized-out turns) or `runtime.scroll.scrollTo` (minimap, keyboard).
  * Re-renders follow the runtime's prompt index; no observers of its own.
  *
- * Each conversation keeps its own state (selected prompt, search, filter, card and panel
- * expansion, prompt-list scroll, conversation scroll bookmark) in `store`, which outlives the
- * rail: the boot controller rebuilds the rail on every route change.
+ * Each conversation keeps its own state (selected prompt, search, filter, section and Outputs
+ * collapse, prompt-list scroll, conversation scroll bookmark) in `store`, which outlives the
+ * pane: the boot controller rebuilds it on every route change. The collapse states also
+ * survive a reload (`prefs`).
  */
-export function createRail({ win, adapter, runtime, store = createRailStateStore() }) {
+export function createRail({ win, adapter, runtime, store = createRailStateStore(), prefs = createPanePrefs(win.localStorage) }) {
   const doc = win.document;
   const scroll = runtime.scroll;
   const scroller = scroll.element ?? adapter.scroller(doc);
@@ -115,6 +129,10 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
   let viewBox = "";
   let bookmarkToRestore = null;
   let listTopToRestore = null;
+  let outputsCollapsed = false;
+  let lastHost = null;
+  let outputsHost = null; // { section, head } of the native Outputs section we added the disclosure to
+  let slot = null;
   const described = new Map();
 
   const style = doc.createElement("style");
@@ -123,42 +141,60 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
   doc.head.appendChild(style);
 
   const root = doc.createElement("aside");
-  root.className = "gs-rail";
-  root.setAttribute("aria-label", "Conversation navigator");
+  root.className = "gs-pane";
+  root.dataset.gsUi = "";
+  root.setAttribute("aria-label", "Conversation summary");
+  root.dataset.gsHost = "fallback";
   root.dataset.gsMode = "docked";
   root.dataset.gsOpen = "true";
-  root.innerHTML = `
-    <div class="gs-rail-panel" id="gs-rail-panel">
-      <section class="gs-card gs-card-overview" data-gs-collapsed="false">
-        <button type="button" class="gs-card-head" aria-expanded="true" aria-controls="gs-overview-body"><span class="gs-card-title">Conversation overview</span><span class="gs-chevron" aria-hidden="true"></span></button>
-        <div class="gs-card-body" id="gs-overview-body">
+  const body = doc.createElement("div");
+  body.className = "gs-pane-body";
+  body.dataset.gsUi = "";
+  body.innerHTML = `
+      <section class="gs-sec gs-sec-overview" data-gs-collapsed="false">
+        <button type="button" class="gs-sec-head" aria-expanded="true" aria-controls="gs-overview-body"><span class="gs-sec-title">Overview</span>${CHEVRON}</button>
+        <div class="gs-sec-body" id="gs-overview-body">
           <div class="gs-minimap" tabindex="0" role="slider" aria-orientation="vertical" aria-label="Current turn overview" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="gs-bars"></div><div class="gs-view" hidden></div></div>
           <div class="gs-caption" aria-live="off">Drag to navigate • 0% visible</div>
         </div>
       </section>
-      <section class="gs-card gs-card-prompts" data-gs-collapsed="false">
-        <button type="button" class="gs-card-head" aria-expanded="true" aria-controls="gs-prompts-body"><span class="gs-card-title">Prompts</span><span class="gs-chevron" aria-hidden="true"></span></button>
-        <div class="gs-card-body" id="gs-prompts-body">
-          <div class="gs-search"><div class="gs-search-field"><input type="search" placeholder="Search prompts..." aria-label="Search prompts"></div><button type="button" class="gs-filter" aria-pressed="false" aria-label="Only prompts in view" title="Only prompts in view">&#9776;</button></div>
+      <section class="gs-sec gs-sec-prompts" data-gs-collapsed="false">
+        <button type="button" class="gs-sec-head" aria-expanded="true" aria-controls="gs-prompts-body"><span class="gs-sec-title">Prompts</span>${CHEVRON}</button>
+        <div class="gs-sec-body" id="gs-prompts-body">
+          <div class="gs-search"><div class="gs-search-field"><input type="search" placeholder="Search prompts..." aria-label="Search prompts"></div><button type="button" class="gs-filter" aria-pressed="false" aria-label="Only prompts in view" title="Only prompts in view">${MENU}</button></div>
           <ol class="gs-prompts" aria-label="Prompts, oldest first"></ol>
         </div>
-      </section>
-    </div>
-    <button type="button" class="gs-rail-toggle" aria-controls="gs-rail-panel" aria-expanded="false" aria-label="Conversation navigator">&#9776;</button>`;
-  doc.body.appendChild(root);
+      </section>`;
+  root.append(body);
+  const toggle = doc.createElement("button");
+  toggle.type = "button";
+  toggle.className = "gs-pane-toggle";
+  toggle.dataset.gsUi = "";
+  toggle.setAttribute("aria-expanded", "false");
+  toggle.setAttribute("aria-label", "Conversation summary");
+  toggle.innerHTML = MENU;
+  toggle.dataset.gsMode = "docked";
+  doc.body.append(root, toggle);
 
-  const $ = (sel) => root.querySelector(sel);
+  const outputsBtn = doc.createElement("button");
+  outputsBtn.type = "button";
+  outputsBtn.className = "gs-outputs-toggle";
+  outputsBtn.dataset.gsUi = "";
+  outputsBtn.setAttribute("aria-label", "Outputs");
+  outputsBtn.innerHTML = CHEVRON;
+
+  const $ = (sel) => body.querySelector(sel);
   const minimap = $(".gs-minimap");
   const bars = $(".gs-bars");
   const view = $(".gs-view");
-  const overviewCard = $(".gs-card-overview");
-  const promptsCard = $(".gs-card-prompts");
+  const overviewCard = $(".gs-sec-overview");
+  const promptsCard = $(".gs-sec-prompts");
   const caption = $(".gs-caption");
   const filterBtn = $(".gs-filter");
   const input = $(".gs-search input");
   const list = $(".gs-prompts");
-  const toggle = $(".gs-rail-toggle");
   const railLayout = createRailLayout({ win, adapter, target: () => els[0] });
+
 
   const cleanups = [];
   const on = (target, type, fn, opts) => {
@@ -168,8 +204,10 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
 
   const setCollapsed = (card, collapsed) => {
     card.dataset.gsCollapsed = String(collapsed);
-    card.querySelector(".gs-card-head").setAttribute("aria-expanded", String(!collapsed));
+    card.querySelector(".gs-sec-head").setAttribute("aria-expanded", String(!collapsed));
   };
+  const savePrefs = () =>
+    prefs.set(convId, { outputs: outputsCollapsed, overview: overviewCard.dataset.gsCollapsed === "true", prompts: promptsCard.dataset.gsCollapsed === "true" });
 
   // Change-only DOM writes everywhere: an idle or streaming page must see no writes from the rail.
   function setOpen(next) {
@@ -181,7 +219,14 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
   // ---- per-conversation state -------------------------------------------------------------
 
   // The conversation's own panel state needs no DOM: apply it right away.
+  const stored = prefs.get(convId);
+  if (stored) {
+    outputsCollapsed = stored.outputs;
+    setCollapsed(overviewCard, stored.overview);
+    setCollapsed(promptsCard, stored.prompts);
+  }
   if (restore) {
+    outputsCollapsed = restore.ui.outputsCollapsed ?? outputsCollapsed;
     query = restore.ui.query;
     input.value = query;
     inViewOnly = restore.ui.inViewOnly;
@@ -203,7 +248,7 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
     const prev = store.get(convId);
     store.save(convId, {
       sig,
-      ui: { query, inViewOnly, open, overviewCollapsed: overviewCard.dataset.gsCollapsed === "true", promptsCollapsed: promptsCard.dataset.gsCollapsed === "true" },
+      ui: { query, inViewOnly, open, outputsCollapsed, overviewCollapsed: overviewCard.dataset.gsCollapsed === "true", promptsCollapsed: promptsCard.dataset.gsCollapsed === "true" },
       activeId,
       list: { top: list.scrollTop, pinned: listPinned },
       bookmark: bookmark ?? prev?.bookmark ?? null,
@@ -245,21 +290,80 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
 
   // ---- layout -----------------------------------------------------------------------------
 
-  /** Reserve the rail's column in the page (or collapse to the toggle) when the page layout changed. */
+  /** Change-only write of a pane position variable (the fallback pane and its toggle both read it). */
+  function setVar(name, value) {
+    for (const el of [root, toggle]) if (el.style.getPropertyValue(name) !== value) el.style.setProperty(name, value);
+  }
+
+  function setMode(mode) {
+    if (root.dataset.gsMode !== mode) root.dataset.gsMode = mode;
+    if (toggle.dataset.gsMode !== mode) toggle.dataset.gsMode = mode;
+  }
+
+  /** Remove the disclosure from the native Outputs section and the attributes that drive its collapse. */
+  function releaseOutputs() {
+    if (outputsHost) {
+      outputsHost.section.removeAttribute("data-gs-outputs");
+      outputsHost.section.removeAttribute("data-gs-collapsed");
+      outputsHost.head.removeAttribute("data-gs-outputs-head");
+    }
+    outputsBtn.remove();
+    outputsHost = null;
+  }
+
+  /** Native Outputs: a disclosure in its title row hides the rest of the section; nothing is moved or removed. */
+  function syncOutputs(host) {
+    const o = host?.outputs ?? null;
+    if (outputsHost && (!o || o.section !== outputsHost.section || o.head !== outputsHost.head)) releaseOutputs();
+    if (!o) return;
+    outputsHost = o;
+    if (!o.section.hasAttribute("data-gs-outputs")) o.section.setAttribute("data-gs-outputs", "");
+    if (!o.head.hasAttribute("data-gs-outputs-head")) o.head.setAttribute("data-gs-outputs-head", "");
+    if (outputsBtn.parentElement !== o.head) o.head.append(outputsBtn);
+    const collapsed = String(outputsCollapsed);
+    if (o.section.getAttribute("data-gs-collapsed") !== collapsed) o.section.setAttribute("data-gs-collapsed", collapsed);
+    const expanded = String(!outputsCollapsed);
+    if (outputsBtn.getAttribute("aria-expanded") !== expanded) outputsBtn.setAttribute("aria-expanded", expanded);
+  }
+
+  /** Our sections live in ChatGPT's own pane when it is mounted, else in the one fallback pane. */
+  function place(host) {
+    const hostKind = host ? "native" : "fallback";
+    if (host) {
+      slot ??= Object.assign(doc.createElement("div"), { className: "gs-pane-slot" });
+      slot.dataset.gsUi = "";
+      if (slot.parentElement !== host.container) host.container.append(slot);
+      if (body.parentElement !== slot) slot.append(body);
+    } else {
+      if (body.parentElement !== root) root.append(body);
+      slot?.remove();
+    }
+    if (root.dataset.gsHost !== hostKind) root.dataset.gsHost = hostKind;
+    if (root.hidden !== !!host) root.hidden = !!host;
+    if (toggle.hidden !== !!host) toggle.hidden = !!host;
+    syncOutputs(host);
+  }
+
+  /** Reserve the pane's column in the page (or collapse to the toggle) when the page layout changed. */
   function layout() {
-    const now = railLayout.signature();
+    const host = adapter.nativeSummary(doc);
+    lastHost = host;
+    place(host);
+    const now = railLayout.signature(host?.left);
     if (now !== layoutSig) {
-      const { docked } = railLayout.evaluate();
+      const { docked } = railLayout.evaluate(host?.left);
       const was = root.dataset.gsMode;
-      if (was !== (docked ? "docked" : "collapsed")) root.dataset.gsMode = docked ? "docked" : "collapsed";
+      setMode(docked ? "docked" : "collapsed");
       if (docked) setOpen(true);
       else if (was === "docked") setOpen(false);
-      layoutSig = railLayout.signature();
+      layoutSig = railLayout.signature(host?.left);
     }
+    if (host) return;
     if (root.dataset.gsMode === "collapsed") {
       const rect = adapter.composer(doc)?.getBoundingClientRect();
-      const bottom = rect?.height ? `${Math.max(16, Math.round(win.innerHeight - rect.top + 8))}px` : "96px";
-      if (root.style.getPropertyValue("--gs-rail-bottom") !== bottom) root.style.setProperty("--gs-rail-bottom", bottom);
+      setVar("--gs-pane-bottom", rect?.height ? `${Math.max(16, Math.round(win.innerHeight - rect.top + 8))}px` : "96px");
+    } else {
+      setVar("--gs-pane-top", `${Math.max(0, Math.round(adapter.headerBottom(doc)))}px`);
     }
   }
 
@@ -616,9 +720,16 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
     setOpen(!open);
     persist();
   });
-  for (const head of root.querySelectorAll(".gs-card-head")) {
+  on(outputsBtn, "click", (e) => {
+    e.stopPropagation(); // the native title row has handlers of its own
+    outputsCollapsed = !outputsCollapsed;
+    syncOutputs(lastHost);
+    persist();
+    savePrefs();
+  });
+  for (const head of body.querySelectorAll(".gs-sec-head")) {
     on(head, "click", () => {
-      const card = head.closest(".gs-card");
+      const card = head.closest(".gs-sec");
       const collapsed = card.dataset.gsCollapsed !== "true";
       setCollapsed(card, collapsed);
       if (!collapsed) {
@@ -627,6 +738,7 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
         if (card === promptsCard && listPinned) list.scrollTop = list.scrollHeight;
       }
       persist();
+      savePrefs();
     });
   }
   on(filterBtn, "click", () => {
@@ -643,7 +755,7 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
   });
   // The page column moves with the window and with ChatGPT's own sidebar (an animated width change).
   on(win, "resize", scheduleLayout);
-  on(doc, "transitionend", (e) => !root.contains(e.target) && /width|margin|padding|left|right|transform/.test(e.propertyName ?? "") && scheduleLayout(), { capture: true, passive: true });
+  on(doc, "transitionend", (e) => !root.contains(e.target) && !body.contains(e.target) && /width|margin|padding|left|right|transform/.test(e.propertyName ?? "") && scheduleLayout(), { capture: true, passive: true });
 
   cleanups.push(scroll.onScroll((kind) => {
     if (kind === "user") userScrolled = true;
@@ -661,7 +773,9 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
 
   const api = {
     element: root,
-    state: () => ({ activeId, open, mode: root.dataset.gsMode, listPinned, query, reserve: railLayout.reserve() }),
+    state: () => ({ activeId, open, mode: root.dataset.gsMode, host: root.dataset.gsHost, outputsCollapsed, listPinned, query, reserve: railLayout.reserve() }),
+    /** Structure only, safe to expose: no ids, search text or prompts. */
+    shape: () => ({ host: root.dataset.gsHost, mode: root.dataset.gsMode, open, outputsCollapsible: !!outputsHost, outputsCollapsed, reserve: railLayout.reserve() }),
     select: (id) => {
       const p = prompts.find((x) => x.id === id);
       if (p) select(p);
@@ -673,7 +787,10 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
       if (trailing) win.clearTimeout(trailing);
       cleanups.forEach((fn) => fn());
       railLayout.dispose();
+      releaseOutputs();
+      slot?.remove();
       root.remove();
+      toggle.remove();
       style.remove();
     },
   };

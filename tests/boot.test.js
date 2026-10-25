@@ -93,7 +93,7 @@ function setup(fx, { maxWaitMs = 30000, queueUi: customQueueUi } = {}) {
   return { boot, timers, log, live, flush, layoutCalls, health: boot.health };
 }
 
-const rails = (fx) => fx.doc.querySelectorAll(".gs-rail").length;
+const rails = (fx) => fx.doc.querySelectorAll(".gs-pane").length;
 const promptRows = (fx) => fx.doc.querySelectorAll(".gs-prompt").length;
 
 test("turns that render after the script started: waits (untouched page), then goes active", async () => {
@@ -189,7 +189,7 @@ test("the conversation root replaced without a URL change re-initializes", async
   assert.equal(log.mounts, 2);
   assert.equal(health.mode, "active");
   assert.equal(promptRows(fx), 9);
-  assert.equal(fx.doc.querySelectorAll(".gs-rail").length, 1);
+  assert.equal(fx.doc.querySelectorAll(".gs-pane").length, 1);
 });
 
 test("bounded wait: gives up visibly after the cap, stops observing, and a route change re-arms it", async () => {

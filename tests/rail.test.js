@@ -42,12 +42,12 @@ test("layout: minimap on top, prompts chronological oldest-first, newest last, l
   const fx = createFixture({ turns: 30, width: 1600 });
   const { q, list } = mount(fx);
   await fx.settle();
-  const cards = [...q(".gs-rail-panel").children].map((c) => c.className.split(" ")[1]);
-  assert.deepEqual(cards, ["gs-card-overview", "gs-card-prompts"], "overview card above the prompts card");
-  assert.deepEqual([...q(".gs-card-overview .gs-card-body").children].map((c) => c.className), ["gs-minimap", "gs-caption"]);
-  assert.deepEqual([...q(".gs-card-prompts .gs-card-body").children].map((c) => c.className), ["gs-search", "gs-prompts"]);
-  assert.equal(q(".gs-card-overview .gs-card-title").textContent, "Conversation overview");
-  assert.equal(q(".gs-card-prompts .gs-card-title").textContent, "Prompts");
+  const cards = [...q(".gs-pane-body").children].map((c) => c.className.split(" ")[1]);
+  assert.deepEqual(cards, ["gs-sec-overview", "gs-sec-prompts"], "overview card above the prompts card");
+  assert.deepEqual([...q(".gs-sec-overview .gs-sec-body").children].map((c) => c.className), ["gs-minimap", "gs-caption"]);
+  assert.deepEqual([...q(".gs-sec-prompts .gs-sec-body").children].map((c) => c.className), ["gs-search", "gs-prompts"]);
+  assert.equal(q(".gs-sec-overview .gs-sec-title").textContent, "Overview");
+  assert.equal(q(".gs-sec-prompts .gs-sec-title").textContent, "Prompts");
   assert.equal(q(".gs-search input").placeholder, "Search prompts...");
   const buttons = items(fx);
   assert.equal(buttons.length, 30);
@@ -56,7 +56,7 @@ test("layout: minimap on top, prompts chronological oldest-first, newest last, l
   assert.match(buttons.at(-1).textContent, /Prompt 29 about/);
   assert.equal(list.scrollTop, list.scrollHeight - 200, "scrolled to the newest prompt");
   assert.equal(buttons.at(-1).getAttribute("aria-current"), "true", "latest is active when viewing latest");
-  assert.equal(q(".gs-rail").dataset.gsMode, "docked");
+  assert.equal(q(".gs-pane").dataset.gsMode, "docked");
   assert.ok(q(".gs-bar"), "minimap shows the active turn");
   assert.ok(fx.doc.querySelectorAll(".gs-bar").length <= 120);
 });
@@ -203,20 +203,20 @@ test("minimap: viewport indicator, click and drag navigate the active turn throu
 test("responsive: docked from the dock threshold, collapsed toggle on narrow viewports", async () => {
   const wide = createFixture({ turns: 12, width: 1600 });
   mount(wide);
-  const dock = wide.doc.querySelector(".gs-rail");
+  const dock = wide.doc.querySelector(".gs-pane");
   assert.equal(dock.dataset.gsMode, "docked");
   assert.equal(dock.dataset.gsOpen, "true");
 
   // 1280 leaves a 256px natural gutter: docked by shifting the page column, not by overlapping it.
   const tight = createFixture({ turns: 12, width: 1280 });
   mount(tight);
-  assert.equal(tight.doc.querySelector(".gs-rail").dataset.gsMode, "docked");
+  assert.equal(tight.doc.querySelector(".gs-pane").dataset.gsMode, "docked");
   assert.ok(tight.reserve() > 0);
 
   const narrow = createFixture({ turns: 12, width: 390 });
   const { q } = mount(narrow);
-  const rail = q(".gs-rail");
-  const toggle = q(".gs-rail-toggle");
+  const rail = q(".gs-pane");
+  const toggle = q(".gs-pane-toggle");
   assert.equal(rail.dataset.gsMode, "collapsed");
   assert.equal(rail.dataset.gsOpen, "false");
   assert.equal(toggle.getAttribute("aria-expanded"), "false");
@@ -234,19 +234,23 @@ test("responsive: docked from the dock threshold, collapsed toggle on narrow vie
   assert.equal(rail.dataset.gsOpen, "true");
 });
 
-test("styles keep the rail inside the viewport and anchored bottom-right, growing upward", async () => {
+test("styles: one docked pane inside the viewport, native tokens only, no bespoke chrome", async () => {
   const fx = createFixture({ turns: 5, width: 1600 });
   mount(fx);
-  const css = fx.doc.getElementById("gs-rail-style").textContent;
-  assert.match(css, /\.gs-rail\{position:fixed;right:\d+px;bottom:\d+px/);
-  assert.match(css, /\.gs-rail\{[^}]*max-width:calc\(100vw - 24px\)/);
-  assert.match(css, /\.gs-rail-panel\{[^}]*max-width:calc\(100vw - 24px\)[^}]*max-height:min\(calc\(100vh/);
+  const css = fx.doc.getElementById("gs-pane-style").textContent;
+  assert.match(css, /\.gs-pane\{position:fixed;right:0;top:var\(--gs-pane-top,0px\);bottom:0;/);
+  assert.match(css, /\.gs-pane\{[^}]*max-width:100vw/);
   assert.match(css, /\.gs-prompts\{[^}]*overflow-x:hidden;overflow-y:auto/);
   assert.match(css, /\.gs-title\{[^}]*white-space:nowrap[^}]*text-overflow:ellipsis/);
   assert.match(css, /\.gs-preview\{[^}]*white-space:nowrap[^}]*text-overflow:ellipsis/);
   assert.doesNotMatch(css, /overflow-x:(auto|scroll)/);
-  assert.doesNotMatch(css, /position:(sticky|absolute)[^}]*\.gs-rail\b/);
   assert.match(css, /focus-visible/);
+  // Native visual system: colors come from ChatGPT's tokens (or the current color / system colors), so both
+  // themes and later token changes carry over; no fixed colors, underlined titles, shadows or card shells.
+  assert.doesNotMatch(css, /#[0-9a-f]{3,8}\b|rgba?\(|hsla?\(/i, "no literal colors");
+  assert.doesNotMatch(css, /text-decoration|box-shadow|drop-shadow/);
+  assert.doesNotMatch(css, /\.gs-(rail|card)/);
+  for (const token of ["--main-surface-primary", "--text-primary", "--border-light", "--text-secondary"]) assert.ok(css.includes(token), token);
 });
 
 test("keyboard: arrows rove through prompts and Enter-click activates", async () => {
@@ -269,7 +273,7 @@ test("fail-open removes the rail; dispose leaves the DOM as it was", async () =>
   const before = fx.doc.documentElement.outerHTML;
   const { runtime, rail } = mount(fx);
   await fx.settle();
-  assert.ok(fx.doc.querySelector(".gs-rail"));
+  assert.ok(fx.doc.querySelector(".gs-pane"));
   rail.dispose();
   runtime.dispose();
   assert.equal(fx.doc.documentElement.outerHTML, before);
@@ -280,8 +284,8 @@ test("fail-open removes the rail; dispose leaves the DOM as it was", async () =>
   fx2.elements().forEach((e) => e.removeAttribute("data-testid"));
   fx2.thread.append(fx2.doc.createElement("div"));
   await fx2.settle();
-  assert.equal(fx2.doc.querySelector(".gs-rail"), null);
-  assert.equal(fx2.doc.getElementById("gs-rail-style"), null);
+  assert.equal(fx2.doc.querySelector(".gs-pane"), null);
+  assert.equal(fx2.doc.getElementById("gs-pane-style"), null);
 });
 
 test("reference layout: collapsible cards, caption percentage, green in-view dots, filter", async () => {
@@ -289,7 +293,7 @@ test("reference layout: collapsible cards, caption percentage, green in-view dot
   const { q, list, minimap } = mount(fx);
   fixMinimapRect(minimap);
   await fx.settle();
-  const head = (cls) => q(`.${cls} .gs-card-head`);
+  const head = (cls) => q(`.${cls} .gs-sec-head`);
   assert.match(q(".gs-caption").textContent, /^Drag to navigate • \d+% visible$/);
 
   // Rows: #N, bold title, one-line preview; the newest row is last.
@@ -319,7 +323,7 @@ test("reference layout: collapsible cards, caption percentage, green in-view dot
   assert.equal(q(".gs-first"), null);
   assert.equal(q(".gs-last"), null);
   assert.equal(q(".gs-jumps"), null);
-  assert.doesNotMatch(q(".gs-rail").textContent, /First prompt|Last prompt/);
+  assert.doesNotMatch(q(".gs-pane").textContent, /First prompt|Last prompt/);
   items(fx)[0].click();
   await fx.settle();
   assert.equal(fx.rawTop(), 0);
@@ -331,7 +335,7 @@ test("reference layout: collapsible cards, caption percentage, green in-view dot
   assert.equal(fx.blankInViewport().length, 0);
 
   // Chevron headers collapse and expand each card.
-  for (const cls of ["gs-card-overview", "gs-card-prompts"]) {
+  for (const cls of ["gs-sec-overview", "gs-sec-prompts"]) {
     const card = q(`.${cls}`);
     assert.equal(head(cls).getAttribute("aria-expanded"), "true");
     head(cls).click();
@@ -340,7 +344,7 @@ test("reference layout: collapsible cards, caption percentage, green in-view dot
     head(cls).click();
     assert.equal(card.dataset.gsCollapsed, "false");
   }
-  assert.match(fx.doc.getElementById("gs-rail-style").textContent, /\.gs-card\[data-gs-collapsed="true"\] \.gs-card-body\{display:none\}/);
+  assert.match(fx.doc.getElementById("gs-pane-style").textContent, /\.gs-sec\[data-gs-collapsed="true"\] \.gs-sec-body\{display:none\}/);
 });
 
 test("minimap caption reports the visible share of the turn", async () => {

@@ -93,7 +93,7 @@ test("measure.js: with the script enabled the same drive renders far fewer nodes
   const on = await session({ withScript: true });
   assert.equal(on.result.env.scriptMode, "active");
   // content-visibility keeps every conversation node; the only extra nodes are the script's own style elements and the rail.
-  const own = on.fx.doc.querySelectorAll("#gs-virtualization-style, #gs-rail-style, .gs-rail, .gs-rail *").length;
+  const own = on.fx.doc.querySelectorAll("#gs-virtualization-style, #gs-pane-style, .gs-pane, .gs-pane *, .gs-pane-toggle, .gs-pane-toggle *").length;
   assert.ok(own > 2);
   assert.equal(on.result.dom.end.totalNodes, off.result.dom.end.totalNodes + own);
   assert.equal(on.result.scroll.unsolicitedEvents, 0);

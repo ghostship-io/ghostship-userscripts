@@ -11,7 +11,11 @@ import { JSDOM } from "jsdom";
  */
 // `overlay` (markup "real"): the page column is the scroller itself and the composer sits in an
 // absolutely positioned overlay inside it, as on chatgpt.com, so padding on the scroller does not move it.
-export function createFixture({ turns = 40, viewport = 800, markup = "chatgpt", width = 1024, nav = 0, overlay = false } = {}) {
+// `pane` (width, reserves, outputs, sources): ChatGPT's own right-side summary pane is mounted, with Outputs and
+// Sources sections. `reserves: true` (default) makes it take its width out of the page column, as a flex sibling
+// would; `reserves: false` makes it float over the right edge. `mountPane()` / `unmountPane()` / `hidePane()`
+// emulate React rendering it, removing it and keeping it mounted but not displayed.
+export function createFixture({ turns = 40, viewport = 800, markup = "chatgpt", width = 1024, nav = 0, overlay = false, pane = null } = {}) {
   const dom = new JSDOM(
     `<!doctype html><html><head></head><body>
       ${overlay
@@ -68,14 +72,25 @@ export function createFixture({ turns = 40, viewport = 800, markup = "chatgpt", 
   let navWidth = nav;
   const reservedOf = (el) => parseFloat(el.style.getPropertyValue("--gs-reserve")) || 0;
   const reserved = () => reservedOf(overlay ? scroller : doc.body);
-  const columnRect = (el = overlay ? scroller : doc.body) => ({ left: navWidth, right: win.innerWidth - reservedOf(el) });
+  const paneState = { opts: { width: 360, reserves: true, outputs: true, sources: true, ...pane }, el: null, shown: true };
+  const paneTaken = () => (paneState.el?.isConnected && paneState.shown && paneState.opts.reserves ? paneState.opts.width : 0);
+  const columnRect = (el = overlay ? scroller : doc.body) => ({ left: navWidth, right: win.innerWidth - paneTaken() - reservedOf(el) });
   const contentRect = (top, height, el) => {
     const col = columnRect(el);
     const width = Math.min(768, col.right - col.left - 32);
     const left = col.left + (col.right - col.left - width) / 2;
     return { top, bottom: top + height, height, left, right: left + width, width, x: left, y: top };
   };
+  const inPane = (el) => !!paneState.el && paneState.el.contains(el);
   EP.getBoundingClientRect = function () {
+    if (inPane(this) && !this.closest("[data-gs-ui]")) {
+      if (!paneState.shown) return { top: 0, bottom: 0, height: 0, left: 0, right: 0, width: 0, x: 0, y: 0 };
+      const left = win.innerWidth - paneState.opts.width;
+      const rect = this === paneState.el
+        ? { top: 0, bottom: viewport, height: viewport, left, right: win.innerWidth, width: paneState.opts.width }
+        : { top: 40, bottom: 64, height: 24, left: left + 16, right: left + 216, width: 200 };
+      return { ...rect, x: rect.left, y: rect.top };
+    }
     if (this === doc.body || (overlay && this === scroller)) {
       const col = columnRect(this);
       return { top: 0, bottom: viewport, height: viewport, left: col.left, right: col.right, width: col.right - col.left, x: col.left, y: 0 };
@@ -121,6 +136,27 @@ export function createFixture({ turns = 40, viewport = 800, markup = "chatgpt", 
   });
   Object.defineProperty(EP, "offsetTop", { configurable: true, get() { return this.classList?.contains("gs-prompt") ? [...this.parentElement.parentElement.children].indexOf(this.parentElement) * 40 : 0; } });
   Object.defineProperty(EP, "offsetHeight", { configurable: true, get() { return this.classList?.contains("gs-prompt") ? 40 : 0; } });
+
+  const buildPane = () => {
+    const { outputs, sources } = paneState.opts;
+    const el = doc.createElement("aside");
+    el.id = "native-pane";
+    el.setAttribute("aria-label", "Summary");
+    if (paneState.opts.html) {
+      el.innerHTML = paneState.opts.html;
+      return el;
+    }
+    el.innerHTML =
+      `<div class="pane-content">` +
+      (outputs ? `<section id="native-outputs"><div class="sec-head"><h3>Outputs</h3></div><ul><li><a href="#out-1">Report</a></li><li><a href="#out-2">Notes</a></li></ul></section>` : "") +
+      (sources ? `<section id="native-sources"><div class="sec-head"><h3>Sources</h3></div><ul><li><a href="#src-1">Example source</a></li></ul></section>` : "") +
+      `</div>`;
+    return el;
+  };
+  if (pane) {
+    paneState.el = buildPane();
+    doc.body.append(paneState.el);
+  }
 
   win.requestAnimationFrame = (fn) => rafQueue.push(fn);
   // The observer hub flushes on a timer; queue it so settle() delivers it deterministically.
@@ -225,6 +261,25 @@ export function createFixture({ turns = 40, viewport = 800, markup = "chatgpt", 
       navWidth = w;
     },
     reserve: reserved,
+    get pane() {
+      return paneState.el;
+    },
+    paneWidth: () => paneState.opts.width,
+    mountPane(opts) {
+      Object.assign(paneState.opts, opts);
+      paneState.el?.remove();
+      paneState.el = buildPane();
+      paneState.shown = true;
+      doc.body.append(paneState.el);
+      return paneState.el;
+    },
+    unmountPane() {
+      paneState.el?.remove();
+    },
+    /** Mounted but not displayed (a closed pane): no box, nothing visible. */
+    hidePane(hidden = true) {
+      paneState.shown = !hidden;
+    },
     /** Swap the whole conversation root, as a route change does; returns the previous one. */
     swapThread(next) {
       const prev = thread;

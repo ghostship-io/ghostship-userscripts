@@ -23,6 +23,32 @@ const ABSOLUTE = new Set(["absolute", "fixed"]);
 const ACTIVE_PAGE = '[data-app-shell-active-page="true"]';
 const scope = (root) => (root.nodeType === 9 ? root.querySelector(ACTIVE_PAGE) ?? root : root);
 
+// ChatGPT's own pinned right-side summary pane (Outputs / Sources). Detected structurally, never by one
+// class or test id: a visible, right-side region holding a heading or disclosure button titled
+// "Outputs" or "Sources" outside the conversation. Everything else is derived from those titles.
+const SUMMARY_TITLE = /^(outputs?|sources?)$/i;
+const HEADINGS = 'h1,h2,h3,h4,h5,h6,[role="heading"]';
+const SUMMARY_REGION = 'aside,[role="complementary"],[role="region"],[aria-label*="summary" i],[data-testid*="summary" i]';
+// Titles are headings anywhere, or disclosure buttons inside a region; one native query, so a page with a long
+// conversation list in its sidebar does not cost a JS loop per button on every layout check.
+const SUMMARY_TITLES = `${HEADINGS},${SUMMARY_REGION.split(",").map((r) => `${r} button,${r} [role="button"]`).join(",")}`;
+const OWN_UI = "[data-gs-ui]";
+
+const commonAncestor = (a, b) => {
+  for (let el = a; el; el = el.parentElement) if (el.contains(b)) return el;
+  return null;
+};
+
+const nativeChildren = (el) => [...el.children].filter((c) => !c.matches(OWN_UI)).length;
+
+/** The section holding `title` and its title row: climb until the parent has native siblings of its own. */
+function summarySection(title, pane) {
+  let head = title;
+  while (head.parentElement && head.parentElement !== pane && nativeChildren(head.parentElement) < 2) head = head.parentElement;
+  const section = head.parentElement;
+  return !section || section === pane || section === head ? null : { section, head };
+}
+
 const nonEmptyRole = (el, sel, attr) => (el.matches(sel) ? el : el.querySelector(sel))?.getAttribute(attr) || null;
 
 export const chatgptAdapter = {
@@ -81,6 +107,47 @@ export const chatgptAdapter = {
       if (column.contains(el) && ABSOLUTE.has(win.getComputedStyle(el).position)) return [column, el];
     }
     return [column];
+  },
+  /**
+   * ChatGPT's mounted, visible summary pane, or null (the script then shows its one fallback pane).
+   * `container` is where the script's own section is appended (a child of the pane's sections, after
+   * Sources); `outputs` is the native Outputs section and its title row when its list can be collapsed
+   * by hiding the section's other children, else null. Nothing here changes the page.
+   */
+  nativeSummary(doc) {
+    const page = scope(doc);
+    const win = doc.defaultView;
+    const found = [];
+    let outputs = null;
+    for (const title of page.querySelectorAll(SUMMARY_TITLES)) {
+      const name = title.textContent.trim();
+      if (name.length > 12 || !SUMMARY_TITLE.test(name) || title.closest(TURN) || title.closest(ROLE) || title.closest(OWN_UI)) continue;
+      const rect = title.getBoundingClientRect();
+      if (!rect.width || !rect.height || rect.right <= win.innerWidth / 2) continue; // hidden, or on the left
+      found.push(title);
+      if (/^outputs?$/i.test(name) && !outputs) outputs = title;
+    }
+    if (!found.length) return null;
+    const apart = (el) => !el.contains(this.composer(doc)) && !el.querySelector(TURN) && !el.matches(TURN);
+    let lca = found[0];
+    for (const t of found.slice(1)) lca = commonAncestor(lca, t) ?? lca;
+    if (lca === found[0]) lca = found[0].parentElement;
+    const region = lca?.closest(SUMMARY_REGION);
+    const pane = region && apart(region) ? region : lca;
+    if (!pane || !apart(pane)) return null;
+    const rect = pane.getBoundingClientRect();
+    if (!rect.width || !rect.height) return null;
+    const sections = found.map((t) => summarySection(t, pane)).filter(Boolean);
+    let container = sections[0]?.section.parentElement ?? pane;
+    for (const s of sections.slice(1)) container = commonAncestor(container, s.section.parentElement) ?? container;
+    const own = outputs && summarySection(outputs, pane);
+    const others = found.filter((t) => t !== outputs);
+    const collapsible = !!own && nativeChildren(own.section) > 1 && !others.some((t) => own.section.contains(t));
+    return { pane, container, left: rect.left, outputs: collapsible ? own : null };
+  },
+  /** Bottom edge of the page header (0 without one): the fallback pane docks below it. */
+  headerBottom(doc) {
+    return scope(doc).querySelector(HEADER)?.getBoundingClientRect().bottom ?? 0;
   },
   /** The assistant reply of turn `index` of `turns`: inside the turn element, else the next message element. */
   reply(turns, index) {

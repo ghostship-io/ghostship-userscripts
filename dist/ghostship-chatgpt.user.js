@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GhostShip ChatGPT
 // @namespace    https://github.com/ghostship-io/ghostship-userscripts
-// @version      0.6.3
+// @version      0.7.0
 // @description  Fast, queue-aware ChatGPT interface for the owner browser.
 // @match        https://chatgpt.com/*
 // @grant        none
@@ -736,6 +736,22 @@
   var ABSOLUTE = /* @__PURE__ */ new Set(["absolute", "fixed"]);
   var ACTIVE_PAGE = '[data-app-shell-active-page="true"]';
   var scope = (root) => root.nodeType === 9 ? root.querySelector(ACTIVE_PAGE) ?? root : root;
+  var SUMMARY_TITLE = /^(outputs?|sources?)$/i;
+  var HEADINGS = 'h1,h2,h3,h4,h5,h6,[role="heading"]';
+  var SUMMARY_REGION = 'aside,[role="complementary"],[role="region"],[aria-label*="summary" i],[data-testid*="summary" i]';
+  var SUMMARY_TITLES = `${HEADINGS},${SUMMARY_REGION.split(",").map((r) => `${r} button,${r} [role="button"]`).join(",")}`;
+  var OWN_UI = "[data-gs-ui]";
+  var commonAncestor = (a, b) => {
+    for (let el2 = a; el2; el2 = el2.parentElement) if (el2.contains(b)) return el2;
+    return null;
+  };
+  var nativeChildren = (el2) => [...el2.children].filter((c) => !c.matches(OWN_UI)).length;
+  function summarySection(title, pane2) {
+    let head = title;
+    while (head.parentElement && head.parentElement !== pane2 && nativeChildren(head.parentElement) < 2) head = head.parentElement;
+    const section = head.parentElement;
+    return !section || section === pane2 || section === head ? null : { section, head };
+  }
   var nonEmptyRole = (el2, sel, attr) => (el2.matches(sel) ? el2 : el2.querySelector(sel))?.getAttribute(attr) || null;
   var chatgptAdapter = {
     turns: (root) => [...scope(root).querySelectorAll(TURN)],
@@ -793,6 +809,47 @@
         if (column.contains(el2) && ABSOLUTE.has(win.getComputedStyle(el2).position)) return [column, el2];
       }
       return [column];
+    },
+    /**
+     * ChatGPT's mounted, visible summary pane, or null (the script then shows its one fallback pane).
+     * `container` is where the script's own section is appended (a child of the pane's sections, after
+     * Sources); `outputs` is the native Outputs section and its title row when its list can be collapsed
+     * by hiding the section's other children, else null. Nothing here changes the page.
+     */
+    nativeSummary(doc) {
+      const page = scope(doc);
+      const win = doc.defaultView;
+      const found = [];
+      let outputs = null;
+      for (const title of page.querySelectorAll(SUMMARY_TITLES)) {
+        const name = title.textContent.trim();
+        if (name.length > 12 || !SUMMARY_TITLE.test(name) || title.closest(TURN) || title.closest(ROLE) || title.closest(OWN_UI)) continue;
+        const rect2 = title.getBoundingClientRect();
+        if (!rect2.width || !rect2.height || rect2.right <= win.innerWidth / 2) continue;
+        found.push(title);
+        if (/^outputs?$/i.test(name) && !outputs) outputs = title;
+      }
+      if (!found.length) return null;
+      const apart = (el2) => !el2.contains(this.composer(doc)) && !el2.querySelector(TURN) && !el2.matches(TURN);
+      let lca = found[0];
+      for (const t of found.slice(1)) lca = commonAncestor(lca, t) ?? lca;
+      if (lca === found[0]) lca = found[0].parentElement;
+      const region = lca?.closest(SUMMARY_REGION);
+      const pane2 = region && apart(region) ? region : lca;
+      if (!pane2 || !apart(pane2)) return null;
+      const rect = pane2.getBoundingClientRect();
+      if (!rect.width || !rect.height) return null;
+      const sections = found.map((t) => summarySection(t, pane2)).filter(Boolean);
+      let container = sections[0]?.section.parentElement ?? pane2;
+      for (const s of sections.slice(1)) container = commonAncestor(container, s.section.parentElement) ?? container;
+      const own = outputs && summarySection(outputs, pane2);
+      const others = found.filter((t) => t !== outputs);
+      const collapsible = !!own && nativeChildren(own.section) > 1 && !others.some((t) => own.section.contains(t));
+      return { pane: pane2, container, left: rect.left, outputs: collapsible ? own : null };
+    },
+    /** Bottom edge of the page header (0 without one): the fallback pane docks below it. */
+    headerBottom(doc) {
+      return scope(doc).querySelector(HEADER)?.getBoundingClientRect().bottom ?? 0;
     },
     /** The assistant reply of turn `index` of `turns`: inside the turn element, else the next message element. */
     reply(turns, index) {
@@ -2190,8 +2247,8 @@
   }
 
   // src/chatgpt/rail/rail-layout.js
-  var RAIL_WIDTH = 296;
-  var RAIL_EDGE = 12;
+  var RAIL_WIDTH = 320;
+  var RAIL_EDGE = 0;
   var RAIL_RESERVE = RAIL_WIDTH + 2 * RAIL_EDGE;
   var DOCK_MIN_VIEWPORT = 1024;
   var MIN_CONTENT = 560;
@@ -2229,25 +2286,27 @@
       written = [];
       applied = 0;
     }
-    function signature() {
+    function signature(paneLeft) {
       const cols = findColumns();
       if (!cols.length) return "none";
       const r = cols[0].getBoundingClientRect();
-      return `${win.innerWidth}|${Math.round(r.left)}|${Math.round(r.right + (written.includes(cols[0]) ? applied : 0))}|${cols.length}`;
+      return `${win.innerWidth}|${Math.round(r.left)}|${Math.round(r.right + (written.includes(cols[0]) ? applied : 0))}|${cols.length}|${paneLeft == null ? "-" : Math.round(paneLeft)}`;
     }
-    function evaluate() {
+    function evaluate(paneLeft) {
+      const native = paneLeft != null;
       const cols = findColumns();
       const el2 = target() ?? adapter.composer(doc);
       const edge = () => Math.max(el2.getBoundingClientRect().right, adapter.composer(doc)?.getBoundingClientRect().right ?? 0);
-      if (!cols.length || !el2 || win.innerWidth < DOCK_MIN_VIEWPORT) {
+      if (!cols.length || !el2 || !native && win.innerWidth < DOCK_MIN_VIEWPORT) {
         if (cols.length) setReserve(cols, 0);
         else clear();
-        return { docked: false, reserve: 0 };
+        return { docked: native && !!cols.length, reserve: 0 };
       }
       setReserve(cols, 0);
+      const limit = native ? paneLeft : win.innerWidth - RAIL_RESERVE;
+      const need = Math.max(0, win.innerWidth - limit);
       const room = Math.max(0, win.innerWidth - cols[0].getBoundingClientRect().right);
-      const cap = Math.max(0, RAIL_RESERVE - room);
-      const limit = win.innerWidth - RAIL_RESERVE;
+      const cap = Math.max(0, need - room);
       let right = edge();
       let reserve = 0;
       if (right > limit && cap > 0) {
@@ -2263,7 +2322,7 @@
       const fits = right <= limit + 0.5 && (reserve === 0 || el2.getBoundingClientRect().width >= MIN_CONTENT);
       if (!fits) {
         setReserve(cols, 0);
-        return { docked: false, reserve: 0 };
+        return { docked: native, reserve: 0 };
       }
       return { docked: true, reserve };
     }
@@ -2308,55 +2367,92 @@
       size: () => slots.size
     };
   }
+  function createPanePrefs(storage, { max = 50, key = "gs.pane.prefs" } = {}) {
+    const read = () => {
+      try {
+        const data = JSON.parse(storage?.getItem(key) ?? "{}");
+        return data && typeof data === "object" && !Array.isArray(data) ? data : {};
+      } catch {
+        return {};
+      }
+    };
+    return {
+      get(id) {
+        const p = id === NEW_CHAT ? null : read()[id];
+        return p && typeof p === "object" ? { outputs: !!p.outputs, overview: !!p.overview, prompts: !!p.prompts } : null;
+      },
+      set(id, prefs) {
+        if (id === NEW_CHAT) return;
+        const data = read();
+        delete data[id];
+        data[id] = { outputs: !!prefs.outputs, overview: !!prefs.overview, prompts: !!prefs.prompts };
+        for (const old of Object.keys(data).slice(0, Math.max(0, Object.keys(data).length - max))) delete data[old];
+        try {
+          storage?.setItem(key, JSON.stringify(data));
+        } catch {
+        }
+      }
+    };
+  }
 
   // src/chatgpt/rail/rail.js
-  var STYLE_ID2 = "gs-rail-style";
-  var ACCENT = "#19c37d";
+  var STYLE_ID2 = "gs-pane-style";
+  var LINE = "var(--border-light,color-mix(in srgb,currentColor 14%,transparent))";
+  var HOVER = "var(--surface-hover,color-mix(in srgb,currentColor 7%,transparent))";
+  var SELECTED = "var(--interactive-bg-secondary-selected,color-mix(in srgb,currentColor 12%,transparent))";
+  var FIELD = "var(--bg-elevated-secondary,color-mix(in srgb,currentColor 6%,transparent))";
+  var MUTED = "var(--text-secondary,color-mix(in srgb,currentColor 65%,transparent))";
+  var FOCUS = "outline:2px solid var(--border-heavy,currentColor);outline-offset:-2px";
+  var CHEVRON = '<svg class="gs-chevron" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>';
+  var MENU = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>';
   var CSS2 = `
-.gs-rail{position:fixed;right:${RAIL_EDGE}px;bottom:16px;z-index:40;display:flex;flex-direction:column;align-items:flex-end;gap:8px;max-width:calc(100vw - 24px);box-sizing:border-box;font:13px/1.35 system-ui,sans-serif;color:var(--text-primary,#ececec)}
-.gs-rail *{box-sizing:border-box}
-.gs-rail[data-gs-mode="collapsed"]{bottom:var(--gs-rail-bottom,96px)}
-.gs-rail-panel{display:flex;flex-direction:column;gap:12px;width:${RAIL_WIDTH}px;max-width:calc(100vw - 24px);max-height:min(calc(100vh - 72px),calc(100vh - var(--gs-rail-bottom,16px) - 72px));min-height:0}
-.gs-rail[data-gs-mode="docked"] .gs-rail-panel{max-height:calc(100vh - 72px)}
-.gs-rail[data-gs-open="false"] .gs-rail-panel{display:none}
-.gs-card{display:flex;flex-direction:column;min-height:0;border:1px solid var(--border-light,rgba(128,128,128,.35));border-radius:12px;background:var(--main-surface-primary,#212121)}
-.gs-card-prompts{flex:1 1 auto}
-.gs-card-head{display:flex;align-items:center;justify-content:space-between;width:100%;min-height:44px;padding:8px 14px;border:0;background:transparent;color:inherit;font:inherit;font-weight:600;font-size:14px;cursor:pointer}
-.gs-card-prompts .gs-card-title{color:#6aa9ff;text-decoration:underline;text-underline-offset:3px}
-.gs-chevron{display:inline-block;width:8px;height:8px;border:solid currentColor;border-width:2px 0 0 2px;transform:rotate(45deg) translate(2px,2px);transition:transform .15s}
-.gs-card[data-gs-collapsed="true"] .gs-chevron{transform:rotate(225deg) translate(2px,2px)}
-.gs-card-body{display:flex;flex-direction:column;min-height:0;padding:0 12px 12px}
-.gs-card-prompts .gs-card-body{flex:1 1 auto}
-.gs-card[data-gs-collapsed="true"] .gs-card-body{display:none}
-.gs-minimap{position:relative;flex:0 0 auto;height:min(250px,32vh);border:1px solid var(--border-light,rgba(128,128,128,.35));border-radius:8px;background:rgba(128,128,128,.08);cursor:pointer;touch-action:none;overflow:hidden}
-.gs-minimap:focus-visible,.gs-search input:focus-visible,.gs-prompt:focus-visible,.gs-rail-toggle:focus-visible,.gs-card-head:focus-visible,.gs-filter:focus-visible{outline:2px solid ${ACCENT};outline-offset:1px}
-.gs-bar{position:absolute;left:12%;min-height:2px;border-radius:2px;background:rgba(160,160,160,.5)}
-.gs-bar[data-kind="heading"]{background:rgba(220,220,220,.8)}
-.gs-bar[data-kind="code"]{background:rgba(106,169,255,.55)}
-.gs-bar[data-kind="table"]{background:rgba(25,195,125,.45)}
-.gs-bar[data-kind="image"]{background:rgba(255,160,90,.55)}
-.gs-view{position:absolute;left:4px;right:4px;border:2px solid ${ACCENT};border-radius:3px;background:rgba(25,195,125,.2);pointer-events:none}
-.gs-view::before,.gs-view::after{content:"";position:absolute;top:50%;width:6px;height:6px;margin-top:-3px;border-radius:50%;background:#fff;border:1px solid ${ACCENT}}
-.gs-view::before{left:-5px}.gs-view::after{right:-5px}
-.gs-caption{margin-top:8px;font-size:12px;opacity:.7}
+.gs-pane{position:fixed;right:0;top:var(--gs-pane-top,0px);bottom:0;z-index:30;display:flex;flex-direction:column;width:${RAIL_WIDTH}px;max-width:100vw;box-sizing:border-box;border-left:1px solid ${LINE};background:var(--main-surface-primary,Canvas);color:var(--text-primary,CanvasText);font:inherit;font-size:14px;line-height:20px}
+.gs-pane[hidden]{display:none}
+.gs-pane *,.gs-pane-slot *{box-sizing:border-box}
+.gs-pane[data-gs-mode="collapsed"]{top:auto;right:8px;bottom:var(--gs-pane-bottom,96px);width:min(${RAIL_WIDTH}px,calc(100vw - 16px));height:min(520px,calc(100vh - var(--gs-pane-bottom,96px) - 16px));border:1px solid ${LINE};border-radius:16px;overflow:hidden}
+.gs-pane[data-gs-mode="collapsed"][data-gs-open="false"]{display:none}
+.gs-pane-slot{display:flex;flex:1 1 auto;flex-direction:column;min-height:min(360px,60vh);max-height:100%;border-top:1px solid ${LINE};font-size:14px;line-height:20px}
+.gs-pane-body{display:flex;flex:1 1 auto;flex-direction:column;min-height:0;overflow:hidden}
+.gs-sec{display:flex;flex:0 0 auto;flex-direction:column;min-height:0}
+.gs-sec-prompts{flex:1 1 auto}
+.gs-sec-head{display:flex;align-items:center;justify-content:space-between;width:100%;min-height:40px;padding:8px 16px;border:0;background:transparent;color:inherit;font:inherit;font-weight:600;text-align:left;cursor:pointer}
+.gs-sec-head:hover,.gs-outputs-toggle:hover{background:${HOVER}}
+.gs-chevron{flex:0 0 auto;transition:transform .15s}
+.gs-sec[data-gs-collapsed="true"] .gs-chevron,[data-gs-outputs][data-gs-collapsed="true"] .gs-chevron{transform:rotate(-90deg)}
+.gs-sec-body{display:flex;flex-direction:column;min-height:0;padding:0 16px 12px}
+.gs-sec-prompts .gs-sec-body{flex:1 1 auto}
+.gs-sec[data-gs-collapsed="true"] .gs-sec-body{display:none}
+.gs-minimap{position:relative;flex:0 0 auto;height:min(220px,28vh);border:1px solid ${LINE};border-radius:8px;background:${FIELD};cursor:pointer;touch-action:none;overflow:hidden}
+.gs-minimap:focus-visible,.gs-search input:focus-visible,.gs-prompt:focus-visible,.gs-pane-toggle:focus-visible,.gs-sec-head:focus-visible,.gs-filter:focus-visible,.gs-outputs-toggle:focus-visible{${FOCUS}}
+.gs-bar{position:absolute;left:12%;min-height:2px;border-radius:2px;background:currentColor;opacity:.3}
+.gs-bar[data-kind="heading"]{opacity:.7}
+.gs-bar[data-kind="code"]{opacity:.45}
+.gs-bar[data-kind="table"]{opacity:.5}
+.gs-bar[data-kind="image"]{opacity:.55}
+.gs-view{position:absolute;left:2px;right:2px;border:1px solid var(--text-secondary,currentColor);border-radius:4px;background:${SELECTED};pointer-events:none}
+.gs-caption{margin-top:8px;font-size:12px;line-height:16px;color:${MUTED}}
 .gs-search{display:flex;flex:0 0 auto;gap:6px;align-items:center;margin-bottom:8px}
 .gs-search-field{position:relative;flex:1 1 auto;min-width:0}
-.gs-search-field::before{content:"";position:absolute;left:10px;top:50%;width:9px;height:9px;margin-top:-6px;border:2px solid currentColor;border-radius:50%;opacity:.6;pointer-events:none}
-.gs-search input{width:100%;min-height:36px;padding:4px 8px 4px 30px;border:1px solid var(--border-light,rgba(128,128,128,.35));border-radius:10px;background:rgba(128,128,128,.1);color:inherit;font:inherit}
-.gs-filter{flex:0 0 auto;width:36px;height:36px;border:1px solid var(--border-light,rgba(128,128,128,.35));border-radius:10px;background:rgba(128,128,128,.1);color:inherit;cursor:pointer}
-.gs-filter[aria-pressed="true"]{border-color:${ACCENT};color:${ACCENT}}
+.gs-search-field::before{content:"";position:absolute;left:10px;top:50%;width:9px;height:9px;margin-top:-6px;border:2px solid currentColor;border-radius:50%;opacity:.55;pointer-events:none}
+.gs-search input{width:100%;min-height:36px;padding:4px 8px 4px 30px;border:1px solid ${LINE};border-radius:10px;background:transparent;color:inherit;font:inherit}
+.gs-filter{flex:0 0 auto;display:flex;align-items:center;justify-content:center;width:36px;height:36px;border:1px solid ${LINE};border-radius:10px;background:transparent;color:${MUTED};cursor:pointer}
+.gs-filter:hover{background:${HOVER}}
+.gs-filter[aria-pressed="true"]{background:${SELECTED};color:inherit}
 .gs-prompts{flex:1 1 auto;min-height:60px;margin:0;padding:0;list-style:none;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
-.gs-prompt{position:relative;display:flex;gap:10px;width:100%;min-height:48px;padding:6px 26px 6px 10px;border:0;border-left:3px solid transparent;border-radius:8px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
-.gs-prompt:hover{background:rgba(128,128,128,.12)}
-.gs-prompt[aria-current="true"]{background:rgba(25,195,125,.16);border-left-color:${ACCENT}}
-.gs-prompt[data-in-view="true"]::after{content:"";position:absolute;right:10px;top:50%;width:6px;height:6px;margin-top:-3px;border-radius:50%;background:${ACCENT}}
-.gs-n{flex:0 0 auto;min-width:3ch;opacity:.75}
+.gs-prompt{position:relative;display:flex;gap:10px;width:100%;min-height:48px;padding:6px 24px 6px 10px;border:0;border-radius:8px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.gs-prompt:hover{background:${HOVER}}
+.gs-prompt[aria-current="true"]{background:${SELECTED}}
+.gs-prompt[data-in-view="true"]::after{content:"";position:absolute;right:10px;top:50%;width:6px;height:6px;margin-top:-3px;border-radius:50%;background:currentColor;opacity:.5}
+.gs-n{flex:0 0 auto;min-width:3ch;color:${MUTED}}
 .gs-copy{display:flex;flex:1 1 auto;flex-direction:column;min-width:0}
-.gs-title{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.gs-preview{font-size:12px;opacity:.65;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.gs-empty{padding:8px;opacity:.6}
-.gs-rail-toggle{display:none;min-width:44px;min-height:44px;border:1px solid var(--border-light,rgba(128,128,128,.35));border-radius:22px;background:var(--main-surface-primary,#212121);color:inherit;cursor:pointer}
-.gs-rail[data-gs-mode="collapsed"] .gs-rail-toggle{display:block}
+.gs-title{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gs-preview{font-size:12px;line-height:16px;color:${MUTED};white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gs-empty{padding:8px;color:${MUTED}}
+.gs-pane-toggle{display:none;position:fixed;right:8px;bottom:var(--gs-pane-bottom,96px);z-index:30;align-items:center;justify-content:center;min-width:44px;min-height:44px;border:1px solid ${LINE};border-radius:22px;background:var(--main-surface-primary,Canvas);color:inherit;cursor:pointer}
+.gs-pane-toggle[data-gs-mode="collapsed"]{display:flex}
+.gs-pane-toggle[hidden]{display:none}
+.gs-outputs-toggle{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:28px;height:28px;margin-left:auto;padding:0;border:0;border-radius:8px;background:transparent;color:inherit;cursor:pointer}
+[data-gs-outputs][data-gs-collapsed="true"]>:not([data-gs-outputs-head]){display:none}
 ${LAYOUT_CSS}`;
   function describePrompt(text, reply = "") {
     const clean = text.replace(/\s+/g, " ").trim();
@@ -2368,7 +2464,7 @@ ${LAYOUT_CSS}`;
   }
   var clamp2 = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
   var PREVIEW_MAX = 100;
-  function createRail({ win, adapter, runtime, store = createRailStateStore() }) {
+  function createRail({ win, adapter, runtime, store = createRailStateStore(), prefs = createPanePrefs(win.localStorage) }) {
     const doc = win.document;
     const scroll = runtime.scroll;
     const scroller = scroll.element ?? adapter.scroller(doc);
@@ -2399,46 +2495,66 @@ ${LAYOUT_CSS}`;
     let viewBox = "";
     let bookmarkToRestore = null;
     let listTopToRestore = null;
+    let outputsCollapsed = false;
+    let lastHost = null;
+    let outputsHost = null;
+    let slot = null;
     const described = /* @__PURE__ */ new Map();
     const style = doc.createElement("style");
     style.id = STYLE_ID2;
     style.textContent = CSS2;
     doc.head.appendChild(style);
     const root = doc.createElement("aside");
-    root.className = "gs-rail";
-    root.setAttribute("aria-label", "Conversation navigator");
+    root.className = "gs-pane";
+    root.dataset.gsUi = "";
+    root.setAttribute("aria-label", "Conversation summary");
+    root.dataset.gsHost = "fallback";
     root.dataset.gsMode = "docked";
     root.dataset.gsOpen = "true";
-    root.innerHTML = `
-    <div class="gs-rail-panel" id="gs-rail-panel">
-      <section class="gs-card gs-card-overview" data-gs-collapsed="false">
-        <button type="button" class="gs-card-head" aria-expanded="true" aria-controls="gs-overview-body"><span class="gs-card-title">Conversation overview</span><span class="gs-chevron" aria-hidden="true"></span></button>
-        <div class="gs-card-body" id="gs-overview-body">
+    const body = doc.createElement("div");
+    body.className = "gs-pane-body";
+    body.dataset.gsUi = "";
+    body.innerHTML = `
+      <section class="gs-sec gs-sec-overview" data-gs-collapsed="false">
+        <button type="button" class="gs-sec-head" aria-expanded="true" aria-controls="gs-overview-body"><span class="gs-sec-title">Overview</span>${CHEVRON}</button>
+        <div class="gs-sec-body" id="gs-overview-body">
           <div class="gs-minimap" tabindex="0" role="slider" aria-orientation="vertical" aria-label="Current turn overview" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="gs-bars"></div><div class="gs-view" hidden></div></div>
           <div class="gs-caption" aria-live="off">Drag to navigate \u2022 0% visible</div>
         </div>
       </section>
-      <section class="gs-card gs-card-prompts" data-gs-collapsed="false">
-        <button type="button" class="gs-card-head" aria-expanded="true" aria-controls="gs-prompts-body"><span class="gs-card-title">Prompts</span><span class="gs-chevron" aria-hidden="true"></span></button>
-        <div class="gs-card-body" id="gs-prompts-body">
-          <div class="gs-search"><div class="gs-search-field"><input type="search" placeholder="Search prompts..." aria-label="Search prompts"></div><button type="button" class="gs-filter" aria-pressed="false" aria-label="Only prompts in view" title="Only prompts in view">&#9776;</button></div>
+      <section class="gs-sec gs-sec-prompts" data-gs-collapsed="false">
+        <button type="button" class="gs-sec-head" aria-expanded="true" aria-controls="gs-prompts-body"><span class="gs-sec-title">Prompts</span>${CHEVRON}</button>
+        <div class="gs-sec-body" id="gs-prompts-body">
+          <div class="gs-search"><div class="gs-search-field"><input type="search" placeholder="Search prompts..." aria-label="Search prompts"></div><button type="button" class="gs-filter" aria-pressed="false" aria-label="Only prompts in view" title="Only prompts in view">${MENU}</button></div>
           <ol class="gs-prompts" aria-label="Prompts, oldest first"></ol>
         </div>
-      </section>
-    </div>
-    <button type="button" class="gs-rail-toggle" aria-controls="gs-rail-panel" aria-expanded="false" aria-label="Conversation navigator">&#9776;</button>`;
-    doc.body.appendChild(root);
-    const $ = (sel) => root.querySelector(sel);
+      </section>`;
+    root.append(body);
+    const toggle = doc.createElement("button");
+    toggle.type = "button";
+    toggle.className = "gs-pane-toggle";
+    toggle.dataset.gsUi = "";
+    toggle.setAttribute("aria-expanded", "false");
+    toggle.setAttribute("aria-label", "Conversation summary");
+    toggle.innerHTML = MENU;
+    toggle.dataset.gsMode = "docked";
+    doc.body.append(root, toggle);
+    const outputsBtn = doc.createElement("button");
+    outputsBtn.type = "button";
+    outputsBtn.className = "gs-outputs-toggle";
+    outputsBtn.dataset.gsUi = "";
+    outputsBtn.setAttribute("aria-label", "Outputs");
+    outputsBtn.innerHTML = CHEVRON;
+    const $ = (sel) => body.querySelector(sel);
     const minimap = $(".gs-minimap");
     const bars = $(".gs-bars");
     const view = $(".gs-view");
-    const overviewCard = $(".gs-card-overview");
-    const promptsCard = $(".gs-card-prompts");
+    const overviewCard = $(".gs-sec-overview");
+    const promptsCard = $(".gs-sec-prompts");
     const caption = $(".gs-caption");
     const filterBtn = $(".gs-filter");
     const input = $(".gs-search input");
     const list = $(".gs-prompts");
-    const toggle = $(".gs-rail-toggle");
     const railLayout = createRailLayout({ win, adapter, target: () => els[0] });
     const cleanups = [];
     const on = (target, type, fn, opts) => {
@@ -2447,14 +2563,22 @@ ${LAYOUT_CSS}`;
     };
     const setCollapsed = (card, collapsed) => {
       card.dataset.gsCollapsed = String(collapsed);
-      card.querySelector(".gs-card-head").setAttribute("aria-expanded", String(!collapsed));
+      card.querySelector(".gs-sec-head").setAttribute("aria-expanded", String(!collapsed));
     };
+    const savePrefs = () => prefs.set(convId, { outputs: outputsCollapsed, overview: overviewCard.dataset.gsCollapsed === "true", prompts: promptsCard.dataset.gsCollapsed === "true" });
     function setOpen(next) {
       open = next;
       if (root.dataset.gsOpen !== String(next)) root.dataset.gsOpen = String(next);
       if (toggle.getAttribute("aria-expanded") !== String(next)) toggle.setAttribute("aria-expanded", String(next));
     }
+    const stored = prefs.get(convId);
+    if (stored) {
+      outputsCollapsed = stored.outputs;
+      setCollapsed(overviewCard, stored.overview);
+      setCollapsed(promptsCard, stored.prompts);
+    }
     if (restore) {
+      outputsCollapsed = restore.ui.outputsCollapsed ?? outputsCollapsed;
       query = restore.ui.query;
       input.value = query;
       inViewOnly = restore.ui.inViewOnly;
@@ -2474,7 +2598,7 @@ ${LAYOUT_CSS}`;
       const prev = store.get(convId);
       store.save(convId, {
         sig,
-        ui: { query, inViewOnly, open, overviewCollapsed: overviewCard.dataset.gsCollapsed === "true", promptsCollapsed: promptsCard.dataset.gsCollapsed === "true" },
+        ui: { query, inViewOnly, open, outputsCollapsed, overviewCollapsed: overviewCard.dataset.gsCollapsed === "true", promptsCollapsed: promptsCard.dataset.gsCollapsed === "true" },
         activeId,
         list: { top: list.scrollTop, pinned: listPinned },
         bookmark: bookmark ?? prev?.bookmark ?? null
@@ -2509,20 +2633,70 @@ ${LAYOUT_CSS}`;
       const el2 = els.find((e, i) => adapter.turnId(e, i) === mark.id);
       if (el2) runtime.navigateTo(el2, { offset: mark.offset });
     }
+    function setVar(name, value) {
+      for (const el2 of [root, toggle]) if (el2.style.getPropertyValue(name) !== value) el2.style.setProperty(name, value);
+    }
+    function setMode(mode) {
+      if (root.dataset.gsMode !== mode) root.dataset.gsMode = mode;
+      if (toggle.dataset.gsMode !== mode) toggle.dataset.gsMode = mode;
+    }
+    function releaseOutputs() {
+      if (outputsHost) {
+        outputsHost.section.removeAttribute("data-gs-outputs");
+        outputsHost.section.removeAttribute("data-gs-collapsed");
+        outputsHost.head.removeAttribute("data-gs-outputs-head");
+      }
+      outputsBtn.remove();
+      outputsHost = null;
+    }
+    function syncOutputs(host) {
+      const o = host?.outputs ?? null;
+      if (outputsHost && (!o || o.section !== outputsHost.section || o.head !== outputsHost.head)) releaseOutputs();
+      if (!o) return;
+      outputsHost = o;
+      if (!o.section.hasAttribute("data-gs-outputs")) o.section.setAttribute("data-gs-outputs", "");
+      if (!o.head.hasAttribute("data-gs-outputs-head")) o.head.setAttribute("data-gs-outputs-head", "");
+      if (outputsBtn.parentElement !== o.head) o.head.append(outputsBtn);
+      const collapsed = String(outputsCollapsed);
+      if (o.section.getAttribute("data-gs-collapsed") !== collapsed) o.section.setAttribute("data-gs-collapsed", collapsed);
+      const expanded = String(!outputsCollapsed);
+      if (outputsBtn.getAttribute("aria-expanded") !== expanded) outputsBtn.setAttribute("aria-expanded", expanded);
+    }
+    function place(host) {
+      const hostKind = host ? "native" : "fallback";
+      if (host) {
+        slot ??= Object.assign(doc.createElement("div"), { className: "gs-pane-slot" });
+        slot.dataset.gsUi = "";
+        if (slot.parentElement !== host.container) host.container.append(slot);
+        if (body.parentElement !== slot) slot.append(body);
+      } else {
+        if (body.parentElement !== root) root.append(body);
+        slot?.remove();
+      }
+      if (root.dataset.gsHost !== hostKind) root.dataset.gsHost = hostKind;
+      if (root.hidden !== !!host) root.hidden = !!host;
+      if (toggle.hidden !== !!host) toggle.hidden = !!host;
+      syncOutputs(host);
+    }
     function layout() {
-      const now = railLayout.signature();
+      const host = adapter.nativeSummary(doc);
+      lastHost = host;
+      place(host);
+      const now = railLayout.signature(host?.left);
       if (now !== layoutSig) {
-        const { docked } = railLayout.evaluate();
+        const { docked } = railLayout.evaluate(host?.left);
         const was = root.dataset.gsMode;
-        if (was !== (docked ? "docked" : "collapsed")) root.dataset.gsMode = docked ? "docked" : "collapsed";
+        setMode(docked ? "docked" : "collapsed");
         if (docked) setOpen(true);
         else if (was === "docked") setOpen(false);
-        layoutSig = railLayout.signature();
+        layoutSig = railLayout.signature(host?.left);
       }
+      if (host) return;
       if (root.dataset.gsMode === "collapsed") {
         const rect = adapter.composer(doc)?.getBoundingClientRect();
-        const bottom = rect?.height ? `${Math.max(16, Math.round(win.innerHeight - rect.top + 8))}px` : "96px";
-        if (root.style.getPropertyValue("--gs-rail-bottom") !== bottom) root.style.setProperty("--gs-rail-bottom", bottom);
+        setVar("--gs-pane-bottom", rect?.height ? `${Math.max(16, Math.round(win.innerHeight - rect.top + 8))}px` : "96px");
+      } else {
+        setVar("--gs-pane-top", `${Math.max(0, Math.round(adapter.headerBottom(doc)))}px`);
       }
     }
     function promptEnd(i) {
@@ -2839,9 +3013,16 @@ ${LAYOUT_CSS}`;
       setOpen(!open);
       persist();
     });
-    for (const head of root.querySelectorAll(".gs-card-head")) {
+    on(outputsBtn, "click", (e) => {
+      e.stopPropagation();
+      outputsCollapsed = !outputsCollapsed;
+      syncOutputs(lastHost);
+      persist();
+      savePrefs();
+    });
+    for (const head of body.querySelectorAll(".gs-sec-head")) {
       on(head, "click", () => {
-        const card = head.closest(".gs-card");
+        const card = head.closest(".gs-sec");
         const collapsed = card.dataset.gsCollapsed !== "true";
         setCollapsed(card, collapsed);
         if (!collapsed) {
@@ -2850,6 +3031,7 @@ ${LAYOUT_CSS}`;
           if (card === promptsCard && listPinned) list.scrollTop = list.scrollHeight;
         }
         persist();
+        savePrefs();
       });
     }
     on(filterBtn, "click", () => {
@@ -2865,7 +3047,7 @@ ${LAYOUT_CSS}`;
       }
     });
     on(win, "resize", scheduleLayout);
-    on(doc, "transitionend", (e) => !root.contains(e.target) && /width|margin|padding|left|right|transform/.test(e.propertyName ?? "") && scheduleLayout(), { capture: true, passive: true });
+    on(doc, "transitionend", (e) => !root.contains(e.target) && !body.contains(e.target) && /width|margin|padding|left|right|transform/.test(e.propertyName ?? "") && scheduleLayout(), { capture: true, passive: true });
     cleanups.push(scroll.onScroll((kind) => {
       if (kind === "user") userScrolled = true;
       schedule();
@@ -2881,7 +3063,9 @@ ${LAYOUT_CSS}`;
     update();
     const api = {
       element: root,
-      state: () => ({ activeId, open, mode: root.dataset.gsMode, listPinned, query, reserve: railLayout.reserve() }),
+      state: () => ({ activeId, open, mode: root.dataset.gsMode, host: root.dataset.gsHost, outputsCollapsed, listPinned, query, reserve: railLayout.reserve() }),
+      /** Structure only, safe to expose: no ids, search text or prompts. */
+      shape: () => ({ host: root.dataset.gsHost, mode: root.dataset.gsMode, open, outputsCollapsible: !!outputsHost, outputsCollapsed, reserve: railLayout.reserve() }),
       select: (id) => {
         const p = prompts.find((x) => x.id === id);
         if (p) select(p);
@@ -2893,7 +3077,10 @@ ${LAYOUT_CSS}`;
         if (trailing) win.clearTimeout(trailing);
         cleanups.forEach((fn) => fn());
         railLayout.dispose();
+        releaseOutputs();
+        slot?.remove();
         root.remove();
+        toggle.remove();
         style.remove();
       }
     };
@@ -3145,22 +3332,26 @@ ${LAYOUT_CSS}`;
     ({ win, adapter, diagnostics, config }) => createQueueUi({ win, adapter, diagnostics, dispatcher: selectDispatcher({ config, win, adapter }) })
   );
   var railState = createRailStateStore();
+  var pane = null;
   var boot = createBoot({
     win: window,
     adapter: chatgptAdapter,
-    version: "0.6.3",
+    version: "0.7.0",
     onDispose: () => queueUi.shutdown(),
     mount() {
       const runtime = createRuntime({ win: window, adapter: chatgptAdapter, backend: createTurnBackend(), queueUi });
       const rail = runtime.mode === "active" || runtime.mode === "composer-only" ? createRail({ win: window, adapter: chatgptAdapter, runtime, store: railState }) : null;
+      pane = rail;
       return {
         runtime,
         dispose() {
           rail?.dispose();
+          if (pane === rail) pane = null;
           runtime.dispose();
         }
       };
     }
   });
+  Object.defineProperty(boot.health, "pane", { enumerable: true, get: () => pane?.shape() ?? null });
   window.__ghostshipUserscripts = boot.health;
 })();

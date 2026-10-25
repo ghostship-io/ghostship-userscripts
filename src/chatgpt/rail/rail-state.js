@@ -40,3 +40,36 @@ export function createRailStateStore({ max = 24 } = {}) {
     size: () => slots.size,
   };
 }
+
+/**
+ * Which sections of a conversation's pane the user collapsed, remembered across reloads (bounded, most
+ * recent last). Only these booleans are stored, under the conversation id, in the page's own storage.
+ */
+export function createPanePrefs(storage, { max = 50, key = "gs.pane.prefs" } = {}) {
+  const read = () => {
+    try {
+      const data = JSON.parse(storage?.getItem(key) ?? "{}");
+      return data && typeof data === "object" && !Array.isArray(data) ? data : {};
+    } catch {
+      return {};
+    }
+  };
+  return {
+    get(id) {
+      const p = id === NEW_CHAT ? null : read()[id];
+      return p && typeof p === "object" ? { outputs: !!p.outputs, overview: !!p.overview, prompts: !!p.prompts } : null;
+    },
+    set(id, prefs) {
+      if (id === NEW_CHAT) return;
+      const data = read();
+      delete data[id];
+      data[id] = { outputs: !!prefs.outputs, overview: !!prefs.overview, prompts: !!prefs.prompts };
+      for (const old of Object.keys(data).slice(0, Math.max(0, Object.keys(data).length - max))) delete data[old];
+      try {
+        storage?.setItem(key, JSON.stringify(data));
+      } catch {
+        // storage full or blocked: the in-memory state still works
+      }
+    },
+  };
+}

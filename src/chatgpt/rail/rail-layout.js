@@ -1,10 +1,12 @@
-// Reserves the right rail's column in the page layout instead of floating over the conversation.
-// The page column (conversation, header, composer and queue panel together) gets right padding, so
-// the centered conversation and the composer shift left by exactly what the rail needs: nothing
-// when the natural right gutter already fits it. Below a viewport threshold, or when the shifted
-// conversation would become too narrow, the rail collapses to a toggle and the page is untouched.
-export const RAIL_WIDTH = 296;
-export const RAIL_EDGE = 12; // gap between the rail and the window edge
+// The one owner of the right pane's column in the page layout. The page column (conversation, header,
+// composer and queue panel together) gets right padding, so the centered conversation and the composer
+// shift left by exactly what the pane needs: nothing when the natural right gutter already fits it, and
+// nothing at all when ChatGPT's own summary pane is mounted and already reserves its width (`paneLeft`
+// is then that pane's measured left edge: the page is only shifted by what still overlaps it). For our
+// own fallback pane, below a viewport threshold or when the shifted conversation would become too
+// narrow, the pane collapses to a toggle and the page is untouched.
+export const RAIL_WIDTH = 320;
+export const RAIL_EDGE = 0; // the docked pane sits against the window edge, like the native one
 export const RAIL_RESERVE = RAIL_WIDTH + 2 * RAIL_EDGE;
 export const DOCK_MIN_VIEWPORT = 1024;
 export const MIN_CONTENT = 560;
@@ -17,7 +19,10 @@ export const LAYOUT_CSS = `
  * @param {object} o
  * @param {Window} o.win
  * @param {object} o.adapter column(doc), composer(doc)
- * @param {() => Element|undefined} o.target element whose right edge must clear the rail (a turn); the composer when absent
+ * @param {() => Element|undefined} o.target element whose right edge must clear the pane (a turn); the composer when absent
+ *
+ * `evaluate(paneLeft)` / `signature(paneLeft)`: `paneLeft` is the left edge of ChatGPT's mounted summary pane,
+ * or null/undefined when our own fallback pane is the one docked on the right.
  */
 export function createRailLayout({ win, adapter, target }) {
   const doc = win.document;
@@ -56,28 +61,30 @@ export function createRailLayout({ win, adapter, target }) {
   }
 
   /** What decides the layout independent of the reserve we applied; a change means re-evaluate. */
-  function signature() {
+  function signature(paneLeft) {
     const cols = findColumns();
     if (!cols.length) return "none";
     const r = cols[0].getBoundingClientRect();
-    return `${win.innerWidth}|${Math.round(r.left)}|${Math.round(r.right + (written.includes(cols[0]) ? applied : 0))}|${cols.length}`;
+    return `${win.innerWidth}|${Math.round(r.left)}|${Math.round(r.right + (written.includes(cols[0]) ? applied : 0))}|${cols.length}|${paneLeft == null ? "-" : Math.round(paneLeft)}`;
   }
 
-  /** Measure the natural layout, then reserve what the rail needs. Returns `{ docked, reserve }`. */
-  function evaluate() {
+  /** Measure the natural layout, then reserve what the pane still needs. Returns `{ docked, reserve }`. */
+  function evaluate(paneLeft) {
+    const native = paneLeft != null;
     const cols = findColumns();
     const el = target() ?? adapter.composer(doc);
     // Both the conversation and the composer must clear the rail; they can sit in different boxes.
     const edge = () => Math.max(el.getBoundingClientRect().right, adapter.composer(doc)?.getBoundingClientRect().right ?? 0);
-    if (!cols.length || !el || win.innerWidth < DOCK_MIN_VIEWPORT) {
+    if (!cols.length || !el || (!native && win.innerWidth < DOCK_MIN_VIEWPORT)) {
       if (cols.length) setReserve(cols, 0);
       else clear();
-      return { docked: false, reserve: 0 };
+      return { docked: native && !!cols.length, reserve: 0 };
     }
     setReserve(cols, 0);
+    const limit = native ? paneLeft : win.innerWidth - RAIL_RESERVE; // the conversation and composer must end here
+    const need = Math.max(0, win.innerWidth - limit);
     const room = Math.max(0, win.innerWidth - cols[0].getBoundingClientRect().right); // free space outside the column
-    const cap = Math.max(0, RAIL_RESERVE - room);
-    const limit = win.innerWidth - RAIL_RESERVE;
+    const cap = Math.max(0, need - room);
     let right = edge();
     let reserve = 0;
     if (right > limit && cap > 0) {
@@ -94,7 +101,7 @@ export function createRailLayout({ win, adapter, target }) {
     const fits = right <= limit + 0.5 && (reserve === 0 || el.getBoundingClientRect().width >= MIN_CONTENT);
     if (!fits) {
       setReserve(cols, 0);
-      return { docked: false, reserve: 0 };
+      return { docked: native, reserve: 0 };
     }
     return { docked: true, reserve };
   }
