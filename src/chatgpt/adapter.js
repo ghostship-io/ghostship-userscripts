@@ -38,10 +38,13 @@ const scope = (root) => (root.nodeType === 9 ? root.querySelector(ACTIVE_PAGE) ?
 // "Outputs" or "Sources" outside the conversation. Everything else is derived from those titles.
 const SUMMARY_TITLE = /^(outputs?|sources?)$/i;
 const HEADINGS = 'h1,h2,h3,h4,h5,h6,[role="heading"]';
-const SUMMARY_REGION = 'aside,[role="complementary"],[role="region"],[aria-label*="summary" i],[data-testid*="summary" i]';
+// ChatGPT marks its summary pane with data-summary-panel-* attributes (seen on the real page); they are one more
+// hint for the region, never the only one.
+const SUMMARY_HINT = "[data-summary-panel-variant],[data-summary-panel-density]";
+const SUMMARY_REGION = `aside,[role="complementary"],[role="region"],[aria-label*="summary" i],[data-testid*="summary" i],${SUMMARY_HINT}`;
 // Titles are headings anywhere, or disclosure buttons inside a region (queried per region, never page-wide).
 const BUTTONS = 'button,[role="button"]';
-const BUTTON_REGION = 'aside,[role="complementary"],[role="region"]';
+const BUTTON_REGION = `aside,[role="complementary"],[role="region"],${SUMMARY_HINT}`;
 const OWN_UI = "[data-gs-ui]";
 
 const commonAncestor = (a, b) => {
@@ -65,6 +68,17 @@ const LOAD_ERROR = /could not load this chatgpt conversation/i;
 const RETRY_LABEL = /^try again$/i;
 
 const nonEmptyRole = (el, sel, attr) => (el.matches(sel) ? el : el.querySelector(sel))?.getAttribute(attr) || null;
+
+/** A summary pane that carries ChatGPT's own hint but none of the titles we know (a thread with only other sections). */
+function hintedPane(page, win, composer) {
+  for (const pane of page.querySelectorAll(SUMMARY_HINT)) {
+    if (pane.matches(TURN) || pane.closest(TURN) || pane.closest(OWN_UI) || pane.contains(composer) || pane.querySelector(TURN)) continue;
+    const rect = pane.getBoundingClientRect();
+    if (!rect.width || !rect.height || rect.right <= win.innerWidth / 2) continue;
+    return { pane, container: pane, left: rect.left, outputs: null };
+  }
+  return null;
+}
 
 export const chatgptAdapter = {
   turns: (root) => [...scope(root).querySelectorAll(TURN)],
@@ -115,7 +129,7 @@ export const chatgptAdapter = {
   turnRoot: (doc) => scope(doc).querySelector(TURN_ROOT) ?? scope(doc).querySelector(TURN)?.parentElement ?? null,
   /** The element the queue panel is inserted directly before: the composer form, else the input itself. */
   composer: (doc) => scope(doc).querySelector(COMPOSER)?.closest("form") ?? scope(doc).querySelector(COMPOSER),
-  conversationId: (win) => win.location.pathname.match(/^\/c\/([\w-]+)/)?.[1] ?? "new",
+  conversationId: (win) => win.location.pathname.match(/^(?:\/g\/[^/]+)?\/c\/([\w-]+)/)?.[1] ?? "new",
   /**
    * The element that actually scrolls the conversation. The known selector is trusted unless a nearer
    * ancestor of the turns is itself scrollable and overflowing (the markup moved the scroll owner inward).
@@ -144,18 +158,24 @@ export const chatgptAdapter = {
     return !node || node === doc.documentElement ? doc.body : node;
   },
   /**
-   * Everything the rail's reservation must be written to: the page column and, when the composer sits in an
-   * absolutely positioned overlay inside it (chatgpt.com does), that overlay, which padding on the column
-   * cannot move.
+   * Where the panels' room is measured and written: `frame` is the page column (its box is what the panels anchor
+   * to) and gets the side padding, `header` is its page header (given opposite margins so it keeps the full width and
+   * its buttons stay in the top-right corner) and, when the composer sits in an absolutely positioned overlay inside
+   * the column (chatgpt.com does), that overlay is padded too, which padding on the column cannot move.
    */
   columns(doc) {
-    const column = this.column(doc);
-    if (!column) return [];
+    const frame = this.column(doc);
+    if (!frame) return null;
     const win = doc.defaultView;
-    for (let el = this.composer(doc)?.parentElement; el && el !== column; el = el.parentElement) {
-      if (column.contains(el) && ABSOLUTE.has(win.getComputedStyle(el).position)) return [column, el];
+    const pads = [frame];
+    for (let el = this.composer(doc)?.parentElement; el && el !== frame; el = el.parentElement) {
+      if (frame.contains(el) && ABSOLUTE.has(win.getComputedStyle(el).position)) {
+        pads.push(el);
+        break;
+      }
     }
-    return [column];
+    const header = scope(doc).querySelector(HEADER);
+    return { frame, pads, header: header && frame.contains(header) && header !== frame ? header : null };
   },
   /**
    * ChatGPT's mounted, visible summary pane, or null (the script then shows its one fallback pane).
@@ -167,18 +187,21 @@ export const chatgptAdapter = {
     const page = scope(doc);
     const win = doc.defaultView;
     const found = [];
-    let outputs = null;
     const candidates = [...page.querySelectorAll(HEADINGS)];
     for (const region of page.querySelectorAll(BUTTON_REGION)) if (!region.matches(TURN) && !region.closest(TURN)) candidates.push(...region.querySelectorAll(BUTTONS));
+    // The real pane's section titles are plain elements: inside a hinted pane, a leaf whose text is the title counts.
+    for (const region of page.querySelectorAll(SUMMARY_HINT)) if (!region.matches(TURN) && !region.closest(TURN)) candidates.push(...[...region.querySelectorAll("*")].filter((el) => !el.firstElementChild));
     for (const title of new Set(candidates)) {
       const name = title.textContent.trim();
       if (name.length > 12 || !SUMMARY_TITLE.test(name) || title.closest(TURN) || title.closest(ROLE) || title.closest(OWN_UI)) continue;
       const rect = title.getBoundingClientRect();
       if (!rect.width || !rect.height || rect.right <= win.innerWidth / 2) continue; // hidden, or on the left
+      if (found.some((t) => t.contains(title))) continue; // a leaf inside a title we already have
+      for (let i = found.length - 1; i >= 0; i--) if (title.contains(found[i])) found.splice(i, 1);
       found.push(title);
-      if (/^outputs?$/i.test(name) && !outputs) outputs = title;
     }
-    if (!found.length) return null;
+    const outputs = found.find((t) => /^outputs?$/i.test(t.textContent.trim())) ?? null;
+    if (!found.length) return hintedPane(page, win, this.composer(doc));
     const apart = (el) => !el.contains(this.composer(doc)) && !el.querySelector(TURN) && !el.matches(TURN);
     let lca = found[0];
     for (const t of found.slice(1)) lca = commonAncestor(lca, t) ?? lca;
@@ -195,6 +218,22 @@ export const chatgptAdapter = {
     const others = found.filter((t) => t !== outputs);
     const collapsible = !!own && nativeChildren(own.section) > 1 && !others.some((t) => own.section.contains(t));
     return { pane, container, left: rect.left, outputs: collapsible ? own : null };
+  },
+  /**
+   * Where the panel buttons go in the page header's button area: just before the right-most header button, as
+   * `{ parent, before }`; null when there is no header or no button in it (the buttons then float top-right).
+   */
+  headerActions(doc) {
+    const header = scope(doc).querySelector(HEADER);
+    if (!header) return null;
+    const win = doc.defaultView;
+    let best = null;
+    for (const b of header.querySelectorAll("button,a[href]")) {
+      if (b.closest(OWN_UI)) continue;
+      const r = b.getBoundingClientRect();
+      if (r.width && r.right > win.innerWidth / 2 && (!best || r.right > best.right)) best = { el: b, right: r.right };
+    }
+    return best ? { parent: best.el.parentElement, before: best.el } : null;
   },
   /** Bottom edge of the page header (0 without one): the fallback pane docks below it. */
   headerBottom(doc) {

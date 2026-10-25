@@ -15,7 +15,7 @@ import { JSDOM } from "jsdom";
 // Sources sections. `reserves: true` (default) makes it take its width out of the page column, as a flex sibling
 // would; `reserves: false` makes it float over the right edge. `mountPane()` / `unmountPane()` / `hidePane()`
 // emulate React rendering it, removing it and keeping it mounted but not displayed.
-export function createFixture({ turns = 40, viewport = 800, markup = "chatgpt", width = 1024, nav = 0, overlay = false, pane = null } = {}) {
+export function createFixture({ turns = 40, viewport = 800, markup = "chatgpt", width = 1024, nav = 0, overlay = false, pane = null, header = false } = {}) {
   const dom = new JSDOM(
     `<!doctype html><html><head></head><body>
       ${overlay
@@ -29,6 +29,7 @@ export function createFixture({ turns = 40, viewport = 800, markup = "chatgpt", 
   win.innerWidth = width;
   win.innerHeight = viewport;
   const doc = win.document;
+  if (header) doc.body.insertAdjacentHTML("afterbegin", '<header id="page-header"><div class="t">ChatGPT</div><div class="acts"><button type="button">Share</button><button type="button">More</button></div></header>');
   const scroller = doc.getElementById("scroller");
   let thread = doc.getElementById("thread");
   const clock = { t: 0, now: () => clock.t };
@@ -71,18 +72,36 @@ export function createFixture({ turns = 40, viewport = 800, markup = "chatgpt", 
   // rail's reserved padding, and the centered conversation/composer (768 wide at most) follow it.
   let navWidth = nav;
   const reservedOf = (el) => parseFloat(el.style.getPropertyValue("--gs-reserve")) || 0;
+  const reservedLeftOf = (el) => parseFloat(el.style.getPropertyValue("--gs-reserve-left")) || 0;
   const reserved = () => reservedOf(overlay ? scroller : doc.body);
   const paneState = { opts: { width: 360, reserves: true, outputs: true, sources: true, ...pane }, el: null, shown: true };
   const paneTaken = () => (paneState.el?.isConnected && paneState.shown && paneState.opts.reserves ? paneState.opts.width : 0);
-  const columnRect = (el = overlay ? scroller : doc.body) => ({ left: navWidth, right: win.innerWidth - paneTaken() - reservedOf(el) });
+  // The column's own box does not move with our padding (as in a browser); only the content inside it does.
+  const columnRect = () => ({ left: navWidth, right: win.innerWidth - paneTaken() });
+  const paddedRect = (el = overlay ? scroller : doc.body) => ({ left: navWidth + reservedLeftOf(el), right: win.innerWidth - paneTaken() - reservedOf(el) });
   const contentRect = (top, height, el) => {
-    const col = columnRect(el);
+    const col = paddedRect(el);
     const width = Math.min(768, col.right - col.left - 32);
     const left = col.left + (col.right - col.left - width) / 2;
     return { top, bottom: top + height, height, left, right: left + width, width, x: left, y: top };
   };
   const inPane = (el) => !!paneState.el && paneState.el.contains(el);
+  const headerEl = () => doc.getElementById("page-header");
   EP.getBoundingClientRect = function () {
+    const head = headerEl();
+    if (head && (this === head || head.contains(this)) && !this.closest("[data-gs-ui]")) {
+      const col = columnRect();
+      if (this === head) return { top: 0, bottom: 56, height: 56, left: col.left, right: col.right, width: col.right - col.left, x: col.left, y: 0 };
+      const btns = [...head.querySelectorAll("button")];
+      const i = btns.indexOf(this);
+      if (i >= 0) {
+        const right = col.right - 16 - (btns.length - 1 - i) * 44;
+        return { top: 8, bottom: 48, height: 40, left: right - 40, right, width: 40, x: right - 40, y: 8 };
+      }
+    }
+    return baseRect.call(this);
+  };
+  const baseRect = function () {
     if (inPane(this) && !this.closest("[data-gs-ui]")) {
       if (!paneState.shown) return { top: 0, bottom: 0, height: 0, left: 0, right: 0, width: 0, x: 0, y: 0 };
       const left = win.innerWidth - paneState.opts.width;
@@ -92,7 +111,7 @@ export function createFixture({ turns = 40, viewport = 800, markup = "chatgpt", 
       return { ...rect, x: rect.left, y: rect.top };
     }
     if (this === doc.body || (overlay && this === scroller)) {
-      const col = columnRect(this);
+      const col = columnRect();
       return { top: 0, bottom: viewport, height: viewport, left: col.left, right: col.right, width: col.right - col.left, x: col.left, y: 0 };
     }
     if (this.id === "composer") return contentRect(viewport - 120, 100, overlay ? doc.getElementById("overlay") : doc.body);
@@ -139,9 +158,10 @@ export function createFixture({ turns = 40, viewport = 800, markup = "chatgpt", 
 
   const buildPane = () => {
     const { outputs, sources } = paneState.opts;
-    const el = doc.createElement("aside");
+    const el = doc.createElement(paneState.opts.tag ?? "aside");
     el.id = "native-pane";
-    el.setAttribute("aria-label", "Summary");
+    if (!paneState.opts.tag) el.setAttribute("aria-label", "Summary");
+    for (const [name, value] of Object.entries(paneState.opts.attrs ?? {})) el.setAttribute(name, value);
     if (paneState.opts.html) {
       el.innerHTML = paneState.opts.html;
       return el;
@@ -261,6 +281,7 @@ export function createFixture({ turns = 40, viewport = 800, markup = "chatgpt", 
       navWidth = w;
     },
     reserve: reserved,
+    reserveLeft: () => reservedLeftOf(overlay ? scroller : doc.body),
     get pane() {
       return paneState.el;
     },

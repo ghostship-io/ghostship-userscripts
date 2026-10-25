@@ -1,18 +1,19 @@
 import { searchPrompts } from "../../core/prompt-index.js";
 import { blockKind, buildTurnModel, layoutBars, scrollTopForFraction, silhouette, viewportIndicator } from "./minimap-model.js";
-import { LAYOUT_CSS, RAIL_WIDTH, createRailLayout } from "./rail-layout.js";
-import { contentSignature, createPanePrefs, createRailStateStore } from "./rail-state.js";
+import { LAYOUT_CSS, PANEL_GAP, PANEL_WIDTH, createRailLayout } from "./rail-layout.js";
+import { contentSignature, createPanePrefs, createPanelPrefs, createRailStateStore } from "./rail-state.js";
 
 const STYLE_ID = "gs-pane-style";
 
-// Layout contract: ONE right-side pane. Where ChatGPT mounts its own summary pane (Outputs / Sources) the
-// script's sections (current-turn overview above the searchable, chronological prompt list) are appended
-// to it, after Sources, and the native Outputs section gets a disclosure control; no native node is moved,
-// removed or re-created. Where it is absent, one docked fallback pane of the same shape stands in and
-// yields as soon as the native pane mounts. Either way the column is reserved once, in the page layout
-// (rail-layout.js). Below the dock threshold the fallback collapses to a toggle that opens the same
-// sections above the composer. Styling is ChatGPT's own tokens with theme-neutral fallbacks, no colors
-// of its own, so both themes and later token changes carry over. Nothing is wider than the viewport.
+// Layout contract: two pinned panels in ChatGPT's own chrome. The conversation view (minimap) is pinned
+// top-right and grows downward with the conversation's real shape; the prompt list is pinned bottom-left
+// and grows upward as prompts are added. The page column is padded (rail-layout.js, the one layout owner)
+// so the conversation and composer re-center in the space the panels leave, around any native side pane
+// or sidebar. Each panel collapses to a button in ChatGPT's header button area, and the same button
+// restores it; the choice is remembered per browser. Without room (narrow windows) the panels become
+// drawers opened by those buttons, never covering the composer or header. ChatGPT's own Outputs section
+// only gets a disclosure control (no native node is moved, removed or re-created). Styling is ChatGPT's own
+// tokens with theme-neutral fallbacks, no colors of its own, so both themes and later token changes carry over.
 const LINE = "var(--border-light,color-mix(in srgb,currentColor 14%,transparent))";
 const HOVER = "var(--surface-hover,color-mix(in srgb,currentColor 7%,transparent))";
 const SELECTED = "var(--interactive-bg-secondary-selected,color-mix(in srgb,currentColor 12%,transparent))";
@@ -25,28 +26,32 @@ const ACCENT = "var(--interactive-bg-accent-default,AccentColor)";
 const MUTED = "var(--text-secondary,color-mix(in srgb,currentColor 65%,transparent))";
 const FOCUS = "outline:2px solid var(--border-heavy,currentColor);outline-offset:-2px";
 const CHEVRON = '<svg class="gs-chevron" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>';
+const CLOSE = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>';
+const MAP_ICON = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M8.5 8h7M8.5 11.5h7M8.5 15h4"/></svg>';
+const LIST_ICON = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"/></svg>';
 const MENU = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>';
 
 const CSS = `
-.gs-pane{position:fixed;right:0;top:var(--gs-pane-top,0px);bottom:0;z-index:30;display:flex;flex-direction:column;width:${RAIL_WIDTH}px;max-width:100vw;box-sizing:border-box;border-left:1px solid ${LINE};background:var(--main-surface-primary,Canvas);color:var(--text-primary,CanvasText);font:inherit;font-size:14px;line-height:20px}
-.gs-pane[hidden]{display:none}
-.gs-pane *,.gs-pane-slot *{box-sizing:border-box}
-.gs-pane[data-gs-mode="collapsed"]{top:auto;right:8px;bottom:var(--gs-pane-bottom,96px);width:min(${RAIL_WIDTH}px,calc(100vw - 16px));height:min(520px,calc(100vh - var(--gs-pane-bottom,96px) - 16px));border:1px solid ${LINE};border-radius:16px;overflow:hidden}
-.gs-pane[data-gs-mode="collapsed"][data-gs-open="false"]{display:none}
-.gs-pane-slot{display:flex;flex:1 1 auto;flex-direction:column;min-height:min(360px,60vh);max-height:100%;border-top:1px solid ${LINE};font-size:14px;line-height:20px}
-.gs-pane-body{display:flex;flex:1 1 auto;flex-direction:column;min-height:0;overflow:hidden}
-.gs-sec{display:flex;flex:0 0 auto;flex-direction:column;min-height:0}
-.gs-sec-prompts{flex:1 1 auto}
-.gs-sec-head{display:flex;align-items:center;justify-content:space-between;width:100%;min-height:40px;padding:8px 16px;border:0;background:transparent;color:inherit;font:inherit;font-weight:600;text-align:left;cursor:pointer}
-.gs-sec-head:hover,.gs-outputs-toggle:hover{background:${HOVER}}
+.gs-panel{position:fixed;z-index:30;display:flex;flex-direction:column;width:min(${PANEL_WIDTH}px,calc(100vw - 16px));box-sizing:border-box;border:1px solid ${LINE};border-radius:16px;background:var(--main-surface-primary,Canvas);color:var(--text-primary,CanvasText);font:inherit;font-size:14px;line-height:20px;overflow:hidden}
+.gs-panel[hidden]{display:none}
+.gs-panel *,.gs-hbtns *{box-sizing:border-box}
+.gs-panel-map{top:var(--gs-top,8px);right:var(--gs-right,12px);max-height:calc(100vh - var(--gs-top,8px) - var(--gs-map-bottom,16px))}
+.gs-panel-prompts{left:var(--gs-left,12px);bottom:var(--gs-bottom,16px);max-height:calc(100vh - 96px - var(--gs-bottom,16px))}
+.gs-panel[data-gs-drawer="true"]{max-width:calc(100vw - 16px)}
+.gs-panel-head{display:flex;flex:0 0 auto;align-items:center;justify-content:space-between;min-height:44px;padding:8px 8px 8px 16px;font-weight:600}
+.gs-panel-body{display:flex;flex:1 1 auto;flex-direction:column;min-height:0;padding:0 16px 12px}
+.gs-collapse,.gs-hbtn{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;padding:0;border:0;background:transparent;color:inherit;cursor:pointer}
+.gs-collapse{width:28px;height:28px;border-radius:8px}
+.gs-hbtns{display:inline-flex;align-items:center;gap:2px;margin:0 4px}
+.gs-hbtns[data-gs-float]{position:fixed;top:8px;right:8px;z-index:31;margin:0}
+.gs-hbtn{width:36px;height:36px;border-radius:8px;color:var(--text-secondary,currentColor)}
+.gs-hbtn[aria-pressed="true"]{color:var(--text-primary,currentColor);background:${SELECTED}}
+.gs-collapse:hover,.gs-hbtn:hover,.gs-outputs-toggle:hover{background:${HOVER}}
 .gs-chevron{flex:0 0 auto;transition:transform .15s}
-.gs-sec[data-gs-collapsed="true"] .gs-chevron,[data-gs-outputs][data-gs-collapsed="true"] .gs-chevron{transform:rotate(-90deg)}
-.gs-sec-body{display:flex;flex-direction:column;min-height:0;padding:0 16px 12px}
-.gs-sec-prompts .gs-sec-body{flex:1 1 auto}
-.gs-sec[data-gs-collapsed="true"] .gs-sec-body{display:none}
-.gs-minimap{position:relative;display:flex;justify-content:center;align-items:flex-start;flex:0 0 auto;height:min(240px,30vh);padding:8px;border:1px solid ${LINE};border-radius:8px;background:${FIELD};cursor:pointer;touch-action:none;overflow:hidden}
-.gs-frame{position:relative;flex:0 0 auto;width:100%;height:100%;border:1px solid ${INK};border-radius:4px;background:var(--main-surface-primary,Canvas)}
-.gs-minimap:focus-visible,.gs-search input:focus-visible,.gs-prompt:focus-visible,.gs-pane-toggle:focus-visible,.gs-sec-head:focus-visible,.gs-filter:focus-visible,.gs-outputs-toggle:focus-visible{${FOCUS}}
+[data-gs-outputs][data-gs-collapsed="true"] .gs-chevron{transform:rotate(-90deg)}
+.gs-minimap{position:relative;display:flex;justify-content:center;align-items:flex-start;flex:0 0 auto;min-height:56px;padding:8px;border:1px solid ${LINE};border-radius:8px;background:${FIELD};cursor:pointer;touch-action:none;overflow:hidden}
+.gs-frame{position:relative;flex:0 0 auto;width:100%;height:120px;border:1px solid ${INK};border-radius:4px;background:var(--main-surface-primary,Canvas)}
+.gs-minimap:focus-visible,.gs-search input:focus-visible,.gs-prompt:focus-visible,.gs-hbtn:focus-visible,.gs-collapse:focus-visible,.gs-filter:focus-visible,.gs-outputs-toggle:focus-visible{${FOCUS}}
 .gs-bars{position:absolute;inset:0;--gs-lh:4px}
 .gs-bar{position:absolute;min-height:2px;border-radius:2px;pointer-events:none}
 .gs-bar[data-kind="text"]{background-image:linear-gradient(${INK_FAINT} 0 50%,transparent 50%);background-size:100% var(--gs-lh)}
@@ -74,9 +79,6 @@ const CSS = `
 .gs-title{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .gs-preview{font-size:12px;line-height:16px;color:${MUTED};white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .gs-empty{padding:8px;color:${MUTED}}
-.gs-pane-toggle{display:none;position:fixed;right:8px;bottom:var(--gs-pane-bottom,96px);z-index:30;align-items:center;justify-content:center;min-width:44px;min-height:44px;border:1px solid ${LINE};border-radius:22px;background:var(--main-surface-primary,Canvas);color:inherit;cursor:pointer}
-.gs-pane-toggle[data-gs-mode="collapsed"]{display:flex}
-.gs-pane-toggle[hidden]{display:none}
 .gs-outputs-toggle{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:28px;height:28px;margin-left:auto;padding:0;border:0;border-radius:8px;background:transparent;color:inherit;cursor:pointer}
 [data-gs-outputs][data-gs-collapsed="true"]>:not([data-gs-outputs-head]){display:none}
 ${LAYOUT_CSS}`;
@@ -96,11 +98,11 @@ const PREVIEW_MAX = 100;
 const OPEN_SETTLE_MS = 500; // the prompt list unchanged this long: the page has settled
 const OPEN_FOLLOW_MS = 1500; // after selecting, further prompts loading within this window re-target
 const SCAN_MS = 400; // at most one page scan for ChatGPT's pane per this long
-const BLOCK_CAP = 800;
+const BLOCK_CAP = 800; // rendered blocks measured per rebuild
 const CONTENT_W = 768; // the conversation column's usual width, when it cannot be measured
 const MAP_PAD = 18; // the track's padding and borders
-const MAP_W = 270;
-const MAP_H = 222; // rendered blocks measured per rebuild
+const MAP_CHROME = 120; // the minimap panel's header, caption and padding around the frame
+const MAP_W = 244; // the track's width when it cannot be measured
 
 /**
  * The right pane: current-turn minimap on top, searchable chronological prompt list
@@ -115,7 +117,7 @@ const MAP_H = 222; // rendered blocks measured per rebuild
  * pane: the boot controller rebuilds it on every route change. The collapse states also
  * survive a reload (`prefs`).
  */
-export function createRail({ win, adapter, runtime, store = createRailStateStore(), prefs = createPanePrefs(win.localStorage) }) {
+export function createRail({ win, adapter, runtime, store = createRailStateStore(), prefs = createPanePrefs(win.localStorage), layoutPrefs = createPanelPrefs(win.localStorage) }) {
   const doc = win.document;
   const scroll = runtime.scroll;
   const scroller = scroll.element ?? adapter.scroller(doc);
@@ -125,7 +127,9 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
   let signature = null;
   let query = "";
   let activeId = null;
-  let open = false;
+  let docked = { minimap: true, prompts: true }; // the panels that have room beside the conversation; the others are drawers opened on request
+  let drawer = null; // the panel open as a drawer ("minimap" | "prompts")
+  const shown = layoutPrefs.get(); // which panels the user wants docked: remembered per browser
   let inViewOnly = false;
   let viewSet = new Set();
   let listPinned = true;
@@ -157,7 +161,6 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
   let scannedAt = -Infinity;
   let scanTimer = null;
   let outputsHost = null; // { section, head } of the native Outputs section we added the disclosure to
-  let slot = null;
   const described = new Map();
 
   const style = doc.createElement("style");
@@ -165,41 +168,46 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
   style.textContent = CSS;
   doc.head.appendChild(style);
 
-  const root = doc.createElement("aside");
-  root.className = "gs-pane";
-  root.dataset.gsUi = "";
-  root.setAttribute("aria-label", "Conversation summary");
-  root.dataset.gsHost = "fallback";
-  root.dataset.gsMode = "docked";
-  root.dataset.gsOpen = "true";
-  const body = doc.createElement("div");
-  body.className = "gs-pane-body";
-  body.dataset.gsUi = "";
-  body.innerHTML = `
-      <section class="gs-sec gs-sec-overview" data-gs-collapsed="false">
-        <button type="button" class="gs-sec-head" aria-expanded="true" aria-controls="gs-overview-body"><span class="gs-sec-title">Conversation view</span>${CHEVRON}</button>
-        <div class="gs-sec-body" id="gs-overview-body">
-          <div class="gs-minimap" tabindex="0" role="slider" aria-orientation="vertical" aria-label="Current turn overview" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="gs-frame"><div class="gs-bars"></div><div class="gs-view" hidden></div></div></div>
-          <div class="gs-caption" aria-live="off">Drag to navigate • 0% visible</div>
-        </div>
-      </section>
-      <section class="gs-sec gs-sec-prompts" data-gs-collapsed="false">
-        <button type="button" class="gs-sec-head" aria-expanded="true" aria-controls="gs-prompts-body"><span class="gs-sec-title">Prompts</span>${CHEVRON}</button>
-        <div class="gs-sec-body" id="gs-prompts-body">
-          <div class="gs-search"><div class="gs-search-field"><input type="search" placeholder="Search prompts..." aria-label="Search prompts"></div><button type="button" class="gs-filter" aria-pressed="false" aria-label="Only prompts in view" title="Only prompts in view">${MENU}</button></div>
-          <ol class="gs-prompts" aria-label="Prompts, oldest first"></ol>
-        </div>
-      </section>`;
-  root.append(body);
-  const toggle = doc.createElement("button");
-  toggle.type = "button";
-  toggle.className = "gs-pane-toggle";
-  toggle.dataset.gsUi = "";
-  toggle.setAttribute("aria-expanded", "false");
-  toggle.setAttribute("aria-label", "Conversation summary");
-  toggle.innerHTML = MENU;
-  toggle.dataset.gsMode = "docked";
-  doc.body.append(root, toggle);
+  const panel = (name, label, inner) => {
+    const el = doc.createElement("aside");
+    el.className = `gs-panel gs-panel-${name === "minimap" ? "map" : "prompts"}`;
+    el.dataset.gsUi = "";
+    el.dataset.gsPanel = name;
+    el.setAttribute("aria-label", label);
+    el.innerHTML = `<div class="gs-panel-head"><span class="gs-panel-title">${label}</span><button type="button" class="gs-collapse" aria-label="Hide ${label.toLowerCase()}" title="Hide ${label.toLowerCase()}">${CLOSE}</button></div><div class="gs-panel-body">${inner}</div>`;
+    return el;
+  };
+  const mapPanel = panel(
+    "minimap",
+    "Conversation view",
+    `<div class="gs-minimap" tabindex="0" role="slider" aria-orientation="vertical" aria-label="Current turn overview" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="gs-frame"><div class="gs-bars"></div><div class="gs-view" hidden></div></div></div><div class="gs-caption" aria-live="off">Drag to navigate • 0% visible</div>`,
+  );
+  const promptsPanel = panel(
+    "prompts",
+    "Prompts",
+    `<div class="gs-search"><div class="gs-search-field"><input type="search" placeholder="Search prompts..." aria-label="Search prompts"></div><button type="button" class="gs-filter" aria-pressed="false" aria-label="Only prompts in view" title="Only prompts in view">${MENU}</button></div><ol class="gs-prompts" aria-label="Prompts, oldest first"></ol>`,
+  );
+  const panels = { minimap: mapPanel, prompts: promptsPanel };
+  const root = { querySelector: (sel) => mapPanel.querySelector(sel) ?? promptsPanel.querySelector(sel), contains: (n) => mapPanel.contains(n) || promptsPanel.contains(n) };
+  // The buttons that collapse and restore the panels live in ChatGPT's header button area.
+  const actions = doc.createElement("span");
+  actions.className = "gs-hbtns";
+  actions.dataset.gsUi = "";
+  const buttons = {};
+  for (const [name, label, icon] of [["minimap", "Conversation view", MAP_ICON], ["prompts", "Prompts", LIST_ICON]]) {
+    const b = doc.createElement("button");
+    b.type = "button";
+    b.className = "gs-hbtn";
+    b.dataset.gsPanel = name;
+    b.dataset.gsUi = "";
+    b.setAttribute("aria-label", label);
+    b.title = label;
+    b.setAttribute("aria-pressed", "false");
+    b.innerHTML = icon;
+    actions.append(b);
+    buttons[name] = b;
+  }
+  doc.body.append(mapPanel, promptsPanel);
 
   const outputsBtn = doc.createElement("button");
   outputsBtn.type = "button";
@@ -208,19 +216,16 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
   outputsBtn.setAttribute("aria-label", "Outputs");
   outputsBtn.innerHTML = CHEVRON;
 
-  const $ = (sel) => body.querySelector(sel);
+  const $ = (sel) => root.querySelector(sel);
   const minimap = $(".gs-minimap");
   const frame = $(".gs-frame");
   const bars = $(".gs-bars");
   const view = $(".gs-view");
-  const overviewCard = $(".gs-sec-overview");
-  const promptsCard = $(".gs-sec-prompts");
   const caption = $(".gs-caption");
   const filterBtn = $(".gs-filter");
   const input = $(".gs-search input");
   const list = $(".gs-prompts");
   const railLayout = createRailLayout({ win, adapter, target: () => els[0] });
-
 
   const cleanups = [];
   const on = (target, type, fn, opts) => {
@@ -228,37 +233,19 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
     cleanups.push(() => target.removeEventListener(type, fn, opts));
   };
 
-  const setCollapsed = (card, collapsed) => {
-    card.dataset.gsCollapsed = String(collapsed);
-    card.querySelector(".gs-sec-head").setAttribute("aria-expanded", String(!collapsed));
-  };
-  const savePrefs = () =>
-    prefs.set(convId, { outputs: outputsCollapsed, overview: overviewCard.dataset.gsCollapsed === "true", prompts: promptsCard.dataset.gsCollapsed === "true" });
-
-  // Change-only DOM writes everywhere: an idle or streaming page must see no writes from the rail.
-  function setOpen(next) {
-    open = next;
-    if (root.dataset.gsOpen !== String(next)) root.dataset.gsOpen = String(next);
-    if (toggle.getAttribute("aria-expanded") !== String(next)) toggle.setAttribute("aria-expanded", String(next));
-  }
+  const savePrefs = () => prefs.set(convId, { outputs: outputsCollapsed });
 
   // ---- per-conversation state -------------------------------------------------------------
 
   // The conversation's own panel state needs no DOM: apply it right away.
   const stored = prefs.get(convId);
-  if (stored) {
-    outputsCollapsed = stored.outputs;
-    setCollapsed(overviewCard, stored.overview);
-    setCollapsed(promptsCard, stored.prompts);
-  }
+  if (stored) outputsCollapsed = stored.outputs;
   if (restore) {
     outputsCollapsed = restore.ui.outputsCollapsed ?? outputsCollapsed;
     query = restore.ui.query;
     input.value = query;
     inViewOnly = restore.ui.inViewOnly;
     filterBtn.setAttribute("aria-pressed", String(inViewOnly));
-    setCollapsed(overviewCard, restore.ui.overviewCollapsed);
-    setCollapsed(promptsCard, restore.ui.promptsCollapsed);
   }
 
   /** Remember this conversation's state; never from another conversation's (stale) DOM. */
@@ -274,7 +261,7 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
     const prev = store.get(convId);
     store.save(convId, {
       sig,
-      ui: { query, inViewOnly, open, outputsCollapsed, overviewCollapsed: overviewCard.dataset.gsCollapsed === "true", promptsCollapsed: promptsCard.dataset.gsCollapsed === "true" },
+      ui: { query, inViewOnly, outputsCollapsed },
       activeId,
       list: { top: list.scrollTop, pinned: listPinned },
       bookmark: bookmark ?? prev?.bookmark ?? null,
@@ -296,7 +283,6 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
     if (saved.activeId && prompts.some((p) => p.id === saved.activeId)) activeId = saved.activeId;
     listPinned = saved.list.pinned;
     listManual = !saved.list.pinned;
-    if (saved.ui.open && root.dataset.gsMode === "collapsed") setOpen(true);
     bookmarkToRestore = saved.bookmark;
     listTopToRestore = saved.list.top;
     didRestore = true;
@@ -363,14 +349,9 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
 
   // ---- layout -----------------------------------------------------------------------------
 
-  /** Change-only write of a pane position variable (the fallback pane and its toggle both read it). */
+  /** Change-only write of a panel position variable. */
   function setVar(name, value) {
-    for (const el of [root, toggle]) if (el.style.getPropertyValue(name) !== value) el.style.setProperty(name, value);
-  }
-
-  function setMode(mode) {
-    if (root.dataset.gsMode !== mode) root.dataset.gsMode = mode;
-    if (toggle.dataset.gsMode !== mode) toggle.dataset.gsMode = mode;
+    for (const el of [mapPanel, promptsPanel]) if (el.style.getPropertyValue(name) !== value) el.style.setProperty(name, value);
   }
 
   /** Remove the disclosure from the native Outputs section and the attributes that drive its collapse. */
@@ -399,27 +380,60 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
     if (outputsBtn.getAttribute("aria-expanded") !== expanded) outputsBtn.setAttribute("aria-expanded", expanded);
   }
 
-  /** Our sections live in ChatGPT's own pane when it is mounted, else in the one fallback pane. */
-  function place(host) {
-    const hostKind = host ? "native" : "fallback";
-    if (host) {
-      slot ??= Object.assign(doc.createElement("div"), { className: "gs-pane-slot" });
-      slot.dataset.gsUi = "";
-      if (slot.parentElement !== host.container) host.container.append(slot);
-      if (body.parentElement !== slot) slot.append(body);
-    } else {
-      if (body.parentElement !== root) root.append(body);
-      slot?.remove();
+  const visible = (name) => docked[name] || drawer === name;
+
+  /** Panels and their header buttons follow the room (docked or drawer) and the remembered choice. */
+  function applyVisibility() {
+    for (const name of ["minimap", "prompts"]) {
+      const on = visible(name);
+      if (panels[name].hidden === on) panels[name].hidden = !on;
+      const pressed = String(on);
+      if (buttons[name].getAttribute("aria-pressed") !== pressed) buttons[name].setAttribute("aria-pressed", pressed);
+      const drawerMode = String(!docked[name]);
+      if (panels[name].dataset.gsDrawer !== drawerMode) panels[name].dataset.gsDrawer = drawerMode;
     }
-    if (root.dataset.gsHost !== hostKind) root.dataset.gsHost = hostKind;
-    if (root.hidden !== !!host) root.hidden = !!host;
-    if (toggle.hidden !== !!host) toggle.hidden = !!host;
-    syncOutputs(host);
+    if (visible("minimap")) {
+      modelKey = "";
+      schedule();
+    }
   }
 
-  /** Reserve the pane's column in the page (or collapse to the toggle) when the page layout changed. */
+  /** Put the panel buttons in ChatGPT's header button area (before its right-most button); floating when there is none. */
+  function placeButtons() {
+    const spot = adapter.headerActions(doc);
+    if (spot) {
+      if (actions.parentElement !== spot.parent || actions.nextElementSibling !== spot.before) spot.parent.insertBefore(actions, spot.before);
+      if (actions.hasAttribute("data-gs-float")) actions.removeAttribute("data-gs-float");
+    } else {
+      if (actions.parentElement !== doc.body) doc.body.append(actions);
+      if (!actions.hasAttribute("data-gs-float")) actions.setAttribute("data-gs-float", "");
+    }
+  }
+
+  /** The same button collapses and restores a panel: docked, it is the remembered choice; with no room beside the conversation it opens and closes a drawer. */
+  function toggle(name) {
+    if (docked[name]) {
+      shown[name] = false;
+      layoutPrefs.set(shown);
+      layoutSig = null;
+      layout(true);
+    } else if (drawer === name) {
+      drawer = null;
+    } else {
+      if (!shown[name]) {
+        shown[name] = true;
+        layoutPrefs.set(shown);
+        layoutSig = null;
+        layout(true);
+      }
+      if (!docked[name]) drawer = name; // no room for it beside the conversation: show it as a drawer
+    }
+    applyVisibility();
+  }
+
+  /** Re-center the conversation around the docked panels (or turn them into drawers) when the page layout changed. */
   function layout(rescan = false) {
-    // A mounted pane is revalidated cheaply; looking for one is a page scan, so it runs at most every SCAN_MS
+    // A mounted native pane is revalidated cheaply; looking for one is a page scan, so it runs at most every SCAN_MS
     // (at once on resize, route and animation hints) and a trailing pass catches a pane that mounted in between.
     let host = lastHost;
     if (!host || !host.pane.isConnected || !host.container.isConnected || (host.outputs && !(host.outputs.section.isConnected && host.outputs.head.isConnected)) || !host.pane.getBoundingClientRect().width) {
@@ -438,21 +452,46 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
       }
     }
     lastHost = host;
-    place(host);
-    const now = railLayout.signature(host?.left);
-    if (now !== layoutSig) {
-      const { docked } = railLayout.evaluate(host?.left);
-      const was = root.dataset.gsMode;
-      setMode(docked ? "docked" : "collapsed");
-      if (docked) setOpen(true);
-      else if (was === "docked") setOpen(false);
-      layoutSig = railLayout.signature(host?.left);
-      if (!host) setVar("--gs-pane-top", `${Math.max(0, Math.round(adapter.headerBottom(doc)))}px`);
+    syncOutputs(host);
+    placeButtons();
+    // Dock every panel the user wants if the conversation keeps its width, else the prompts alone, else the minimap alone.
+    const want = ["minimap", "prompts"].filter((n) => shown[n]);
+    const options = want.length === 2 ? [want, ["prompts"], ["minimap"], []] : [want, []];
+    const key = `${railLayout.signature(host?.left)}|${want.join()}`;
+    if (key !== layoutSig) {
+      let chosen = [];
+      for (const option of options) {
+        const r = railLayout.evaluate({ left: option.includes("prompts") ? PANEL_WIDTH : 0, right: option.includes("minimap") ? PANEL_WIDTH : 0, paneLeft: host?.left });
+        if (r.docked || !option.length) {
+          chosen = option;
+          break;
+        }
+      }
+      docked = { minimap: chosen.includes("minimap"), prompts: chosen.includes("prompts") };
+      if (docked.minimap && drawer === "minimap") drawer = null;
+      if (docked.prompts && drawer === "prompts") drawer = null;
+      layoutSig = `${railLayout.signature(host?.left)}|${want.join()}`;
+      const edge = railLayout.edges(host?.left);
+      setVar("--gs-top", `${Math.max(0, Math.round(adapter.headerBottom(doc))) + 8}px`);
+      applyVars(edge);
+      applyVisibility();
     }
-    if (!host && root.dataset.gsMode === "collapsed") {
-      const rect = adapter.composer(doc)?.getBoundingClientRect();
-      setVar("--gs-pane-bottom", rect?.height ? `${Math.max(16, Math.round(win.innerHeight - rect.top + 8))}px` : "96px");
-    }
+    // A drawer sits in its free corner and ends above the composer, never over it or the header.
+    const rect = adapter.composer(doc)?.getBoundingClientRect();
+    const clear = rect?.height ? `${Math.max(16, Math.round(win.innerHeight - rect.top + 8))}px` : "96px";
+    if (!docked.prompts && promptsPanel.style.getPropertyValue("--gs-bottom") !== clear) promptsPanel.style.setProperty("--gs-bottom", clear);
+    const mapBottom = docked.minimap ? "16px" : clear;
+    if (mapPanel.style.getPropertyValue("--gs-map-bottom") !== mapBottom) mapPanel.style.setProperty("--gs-map-bottom", mapBottom);
+  }
+
+  /** Panel anchors: docked panels sit in the corners of the space the page column leaves; drawers in the window's corners. */
+  function applyVars(edge) {
+    const set = (name, prop, value) => {
+      if (panels[name].style.getPropertyValue(prop) !== value) panels[name].style.setProperty(prop, value);
+    };
+    set("minimap", "--gs-right", `${docked.minimap ? Math.max(PANEL_GAP, Math.round(win.innerWidth - edge.right) + PANEL_GAP) : 8}px`);
+    set("prompts", "--gs-left", `${docked.prompts ? Math.round(edge.left) + PANEL_GAP : 8}px`);
+    set("prompts", "--gs-bottom", "16px");
   }
 
   // ---- prompt list ------------------------------------------------------------------------
@@ -615,13 +654,13 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
 
   function renderMinimap(m) {
     const ext = turnExtent();
-    if (!ext || overviewCard.dataset.gsCollapsed === "true") return;
+    if (!ext || mapPanel.hidden) return;
     const slice = els.slice(prompts[ext.i].turnIndex, promptEnd(ext.i) + 1);
     const turnBox = ext.a.getBoundingClientRect();
     const turnPx = ext.z.getBoundingClientRect().bottom - turnBox.top;
     const contentWidth = Math.min(turnBox.width || CONTENT_W, CONTENT_W); // ChatGPT's centered conversation column
     // Content, rendered-ness and the turn's size (to 20px / 8px): anything that changes the drawn boxes.
-    const key = `${activeId}:${slice.map((e) => e.textContent.length).join(",")}:${slice.every((e) => runtime.isTurnActive(e))}:${Math.round(turnPx / 20)}:${Math.round(turnBox.width / 8)}:${Math.round(minimap.getBoundingClientRect().width / 8)}:${Math.round(minimap.getBoundingClientRect().height / 8)}`;
+    const key = `${activeId}:${slice.map((e) => e.textContent.length).join(",")}:${slice.every((e) => runtime.isTurnActive(e))}:${Math.round(turnPx / 20)}:${Math.round(turnBox.width / 8)}:${Math.round(minimap.getBoundingClientRect().width / 8)}:${Math.round(win.innerHeight / 8)}:${mapPanel.style.getPropertyValue("--gs-map-bottom")}`;
     // A growing (streaming) turn rebuilds its overview at most twice a second.
     const now = win.performance.now();
     const throttled = key !== modelKey && modelKey !== "" && modelKey.startsWith(`${activeId}:`) && now - modelBuiltAt < 500 && !forceModel;
@@ -640,7 +679,9 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
       const items = silhouetteItems(ext, slice, turnBox.top, turnPx);
       // The frame keeps the conversation's real aspect ratio: one scale for both axes, fitted to the box.
       const box = minimap.getBoundingClientRect();
-      const scale = Math.min((box.width ? box.width - MAP_PAD : MAP_W) / contentWidth, (box.height ? box.height - MAP_PAD : MAP_H) / Math.max(turnPx, 1));
+      const room = win.innerHeight - parseFloat(mapPanel.style.getPropertyValue("--gs-map-bottom") || "16") - (adapter.headerBottom(doc) + 8) - MAP_CHROME;
+      const maxH = clamp(Math.min(win.innerHeight * 0.45, room), 48, 360); // the panel grows with the conversation, up to this
+      const scale = Math.min((box.width ? box.width - MAP_PAD : MAP_W) / contentWidth, maxH / Math.max(turnPx, 1));
       const size = { w: `${Math.max(24, Math.round(contentWidth * scale))}px`, h: `${Math.max(8, Math.round(turnPx * scale))}px` };
       if (frame.style.width !== size.w) frame.style.width = size.w;
       if (frame.style.height !== size.h) frame.style.height = size.h;
@@ -845,10 +886,20 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
       e.stopPropagation();
     }
   });
-  on(toggle, "click", () => {
-    setOpen(!open);
-    persist();
-  });
+  for (const name of ["minimap", "prompts"]) {
+    on(buttons[name], "click", () => toggle(name));
+    on(panels[name].querySelector(".gs-collapse"), "click", () => {
+      toggle(name);
+      buttons[name].focus?.();
+    });
+    on(panels[name], "keydown", (e) => {
+      if (e.key === "Escape" && !docked[name] && drawer === name && !(name === "prompts" && input.value)) {
+        drawer = null;
+        applyVisibility();
+        buttons[name].focus?.();
+      }
+    });
+  }
   on(outputsBtn, "click", (e) => {
     e.stopPropagation(); // the native title row has handlers of its own
     outputsCollapsed = !outputsCollapsed;
@@ -856,38 +907,18 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
     persist();
     savePrefs();
   });
-  for (const head of body.querySelectorAll(".gs-sec-head")) {
-    on(head, "click", () => {
-      const card = head.closest(".gs-sec");
-      const collapsed = card.dataset.gsCollapsed !== "true";
-      setCollapsed(card, collapsed);
-      if (!collapsed) {
-        modelKey = "";
-        schedule();
-        if (card === promptsCard && listPinned) list.scrollTop = list.scrollHeight;
-      }
-      persist();
-      savePrefs();
-    });
-  }
   on(filterBtn, "click", () => {
     inViewOnly = !inViewOnly;
     filterBtn.setAttribute("aria-pressed", String(inViewOnly));
     renderList();
     persist();
   });
-  on(root, "keydown", (e) => {
-    if (e.key === "Escape" && root.dataset.gsMode === "collapsed" && open && !input.value) {
-      setOpen(false);
-      toggle.focus();
-    }
-  });
   // The page column moves with the window and with ChatGPT's own sidebar (an animated width change).
   on(win, "resize", () => {
     scheduleLayout(true);
     schedule();
   });
-  on(doc, "transitionend", (e) => !root.contains(e.target) && !body.contains(e.target) && /width|margin|padding|left|right|transform/.test(e.propertyName ?? "") && scheduleLayout(true), { capture: true, passive: true });
+  on(doc, "transitionend", (e) => !root.contains(e.target) && !actions.contains(e.target) && /width|margin|padding|left|right|transform/.test(e.propertyName ?? "") && scheduleLayout(true), { capture: true, passive: true });
 
   // Anything the user does ends the automatic selection of the last prompt.
   for (const type of ["pointerdown", "keydown", "wheel", "touchstart"]) on(doc, type, () => (interacted = true), { capture: true, passive: true });
@@ -906,10 +937,10 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
   update();
 
   const api = {
-    element: root,
-    state: () => ({ activeId, open, mode: root.dataset.gsMode, host: root.dataset.gsHost, outputsCollapsed, listPinned, query, reserve: railLayout.reserve() }),
+    element: mapPanel,
+    state: () => ({ activeId, docked: { ...docked }, outputsCollapsed, listPinned, query, reserve: railLayout.reserve() }),
     /** Structure only, safe to expose: no ids, search text or prompts. */
-    shape: () => ({ host: root.dataset.gsHost, mode: root.dataset.gsMode, open, outputsCollapsible: !!outputsHost, outputsCollapsed, reserve: railLayout.reserve() }),
+    shape: () => ({ docked: { ...docked }, minimap: visible("minimap"), prompts: visible("prompts"), drawer, outputsCollapsible: !!outputsHost, outputsCollapsed, reserve: railLayout.reserve() }),
     select: (id) => {
       const p = prompts.find((x) => x.id === id);
       if (p) select(p);
@@ -923,9 +954,9 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
       cleanups.forEach((fn) => fn());
       railLayout.dispose();
       releaseOutputs();
-      slot?.remove();
-      root.remove();
-      toggle.remove();
+      mapPanel.remove();
+      promptsPanel.remove();
+      actions.remove();
       style.remove();
     },
   };

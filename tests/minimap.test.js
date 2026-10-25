@@ -138,7 +138,7 @@ test("the minimap keeps the conversation's real aspect ratio inside a clear fram
     const h = parseFloat(frame.style.height);
     const el = chatgptAdapter.turns(fx.doc)[turn].getBoundingClientRect();
     assert.ok(Math.abs(w / h - el.width / el.height) < 0.02 * (w / h) + 0.05, `${label}: ${w}x${h} vs the turn's ${el.width}x${el.height}`);
-    assert.ok(w <= 288 - 18 && h <= 240 - 18, `${label}: inside the track`);
+    assert.ok(w <= 288 - 18 && h <= 360, `${label}: inside the track width, and the panel grows no taller than its cap`);
     assert.ok(w > 0 && h > 0);
     rail.dispose();
   }
@@ -148,25 +148,36 @@ test("the minimap keeps the conversation's real aspect ratio inside a clear fram
   const css = fx.doc.getElementById("gs-pane-style").textContent;
   assert.match(css, /\.gs-frame\{[^}]*border:1px solid[^}]*background:var\(--main-surface-primary/);
   assert.match(css, /\.gs-minimap\{[^}]*padding:8px[^}]*background:var\(--bg-elevated-secondary/);
-  assert.equal(fx.doc.querySelector(".gs-sec-overview .gs-sec-title").textContent, "Conversation view");
+  assert.doesNotMatch(css, /\.gs-minimap\{(?:[^}]*;)?height:/, "the track grows with the conversation view instead of a fixed height");
+  assert.equal(fx.doc.querySelector('[data-gs-panel="minimap"] .gs-panel-title').textContent, "Conversation view");
   rail.dispose();
 });
 
-test("a window resize that only changes the track's height refits the frame inside it", async () => {
+test("a window resize that only changes the height refits the frame, and a drawer minimap ends above the composer", async () => {
   const fx = createFixture({ turns: 20, width: 1600, markup: "real" });
   const { rail } = mount(fx);
   await fx.settle();
   const minimap = fx.doc.querySelector(".gs-minimap");
-  const track = (height) => (minimap.getBoundingClientRect = () => ({ top: 0, bottom: height, height, left: 0, right: 288, width: 288, x: 0, y: 0 }));
-  track(240);
+  minimap.getBoundingClientRect = () => ({ top: 0, bottom: 240, height: 240, left: 0, right: 288, width: 288, x: 0, y: 0 });
   fx.doc.querySelectorAll(".gs-prompt")[3].click();
   await fx.settle();
   const frame = fx.doc.querySelector(".gs-frame");
   const tall = parseFloat(frame.style.height);
-  assert.ok(tall > 120, `fits the tall track (${tall})`);
-  track(120);
+  fx.win.innerHeight = 360;
   fx.win.dispatchEvent(new fx.win.Event("resize"));
   await fx.settle();
-  assert.ok(parseFloat(frame.style.height) <= 120 - 18, `refit to the shorter track (${frame.style.height})`);
+  const short = parseFloat(frame.style.height);
+  assert.ok(short < tall && short <= 360 * 0.45 + 1, `refit to the shorter window (${tall} -> ${short})`);
   rail.dispose();
+
+  // A drawer minimap (no room beside the column) is bounded above the composer, like the prompt drawer.
+  const narrow = createFixture({ turns: 20, width: 700, markup: "real" });
+  const m = mount(narrow);
+  await narrow.settle();
+  const mapPanel = narrow.doc.querySelector(".gs-panel-map");
+  const composerTop = chatgptAdapter.composer(narrow.doc).getBoundingClientRect().top;
+  assert.equal(mapPanel.dataset.gsDrawer, "true");
+  const bottom = parseFloat(mapPanel.style.getPropertyValue("--gs-map-bottom"));
+  assert.ok(narrow.win.innerHeight - bottom <= composerTop, `drawer ends at ${narrow.win.innerHeight - bottom}, composer starts at ${composerTop}`);
+  m.rail.dispose();
 });

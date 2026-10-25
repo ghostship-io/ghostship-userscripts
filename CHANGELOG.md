@@ -4,6 +4,9 @@ Agents add entries under Unreleased and never touch version fields. After a merg
 
 ## Unreleased
 
+- The right-hand pane is replaced by two panels in ChatGPT's own style: the conversation view (minimap) pinned top-right, growing down, and the prompt list pinned bottom-left, growing up, with the conversation and composer re-centered in the space between them, around any side pane and with the sidebar open or closed. Each panel collapses to a button in ChatGPT's header button area and the same button restores it (remembered per browser); when there is no room the panels become drawers opened by those buttons (#628).
+- ChatGPT's own summary pane is now recognised on the real page (its `data-summary-panel-*` markup and plain-element section titles, including threads that show only a Scheduled section), so the minimap sits beside it instead of over it and the Outputs disclosure works; threads inside a project (`/g/<project>/c/<id>`) are their own conversation instead of sharing the "new chat" state, queue and panel preferences (#628).
+
 ## [0.7.4] - 2026-10-25
 
 - On opening a conversation the script now waits for the page to settle, then selects the last prompt in the Prompts list like a click on it, and keeps re-targeting the newest last prompt while more prompts load until the list settles; any scroll, click, key or touch from the user ends it (#629).

@@ -7,13 +7,13 @@ import { DEFAULTS } from "../src/core/config.js";
 import { chatgptAdapter } from "../src/chatgpt/adapter.js";
 import { createTurnBackend } from "../src/chatgpt/virtualization/backend.js";
 import { createRail } from "../src/chatgpt/rail/rail.js";
-import { createRailStateStore } from "../src/chatgpt/rail/rail-state.js";
-import { DOCK_MIN_VIEWPORT, MIN_CONTENT, RAIL_EDGE, RAIL_RESERVE, RAIL_WIDTH } from "../src/chatgpt/rail/rail-layout.js";
+import { createPanelPrefs, createRailStateStore } from "../src/chatgpt/rail/rail-state.js";
+import { DOCK_MIN_VIEWPORT, MIN_CONTENT, PANEL_GAP, PANEL_WIDTH } from "../src/chatgpt/rail/rail-layout.js";
 
-function mount(fx, store) {
+function mount(fx, store, layoutPrefs) {
   const runtime = createRuntime({ win: fx.win, adapter: chatgptAdapter, backend: createTurnBackend(), config: { ...DEFAULTS } });
   assert.equal(runtime.mode, "active");
-  const rail = createRail({ win: fx.win, adapter: chatgptAdapter, runtime, store });
+  const rail = createRail({ win: fx.win, adapter: chatgptAdapter, runtime, store, layoutPrefs });
   const stop = () => {
     rail.dispose();
     runtime.dispose();
@@ -25,83 +25,199 @@ const rects = (fx) => ({
   turn: chatgptAdapter.turns(fx.doc)[0].getBoundingClientRect(),
   composer: chatgptAdapter.composer(fx.doc).getBoundingClientRect(),
 });
-const railLeft = (fx) => fx.win.innerWidth - RAIL_EDGE - RAIL_WIDTH;
+/** Markup with style attributes normalized (a browser re-serializes them once a property was set and removed). */
+const norm = (html) => html.replace(/style="([^"]*)"/g, (_, v) => `style="${v.replace(/\s+/g, "").replace(/;$/, "")}"`);
+const NEED = PANEL_WIDTH + 2 * PANEL_GAP; // what a docked panel takes beside the conversation
+const hiddenPanel = (fx, name) => fx.doc.querySelector(`.gs-panel[data-gs-panel="${name}"]`).hidden;
+const hbtn = (fx, name) => fx.doc.querySelector(`.gs-hbtn[data-gs-panel="${name}"]`);
+const varOf = (fx, name, prop) => parseFloat(fx.doc.querySelector(`.gs-panel[data-gs-panel="${name}"]`).style.getPropertyValue(prop));
 
-test("the rail's column is reserved in the page: conversation and composer never intersect it", async () => {
-  for (const [width, nav] of [[1920, 0], [1600, 0], [1448, 52], [1280, 0], [1280, 52], [1180, 52], [1100, 0], [DOCK_MIN_VIEWPORT, 0]]) {
-    const fx = createFixture({ turns: 20, width, nav, markup: "real" });
-    const { q } = mount(fx);
+test("the minimap is pinned top-right and the prompts bottom-left; the conversation re-centers in the space between them", async () => {
+  for (const [width, nav] of [[1920, 0], [1600, 0], [1448, 52], [1280, 0], [1260, 52], [1200, 0]]) {
+    const fx = createFixture({ turns: 20, width, nav, markup: "real", header: true });
+    mount(fx);
     await fx.settle();
     const label = `${width}px wide, ${nav}px navigation`;
     const { turn, composer } = rects(fx);
-    assert.equal(q(".gs-pane").dataset.gsMode, "docked", label);
-    assert.ok(turn.right <= railLeft(fx), `${label}: conversation ends at ${turn.right}, rail starts at ${railLeft(fx)}`);
-    assert.ok(composer.right <= railLeft(fx), `${label}: composer ends at ${composer.right}`);
+    assert.equal(hiddenPanel(fx, "minimap") || hiddenPanel(fx, "prompts"), false, `${label}: both panels docked`);
+    assert.ok(turn.left >= nav + NEED && composer.left >= nav + NEED, `${label}: conversation starts at ${turn.left}, the prompts panel ends at ${nav + NEED}`);
+    assert.ok(turn.right <= width - NEED && composer.right <= width - NEED, `${label}: conversation ends at ${turn.right}, the minimap starts at ${width - NEED}`);
     assert.ok(turn.width >= MIN_CONTENT, `${label}: conversation keeps ${turn.width}px`);
     assert.equal(composer.left, turn.left, `${label}: composer and conversation shift together`);
+    // Re-centered in what remains: equal room on both sides.
+    assert.ok(Math.abs(turn.left - nav - NEED - (width - NEED - turn.right)) <= 2, `${label}: centered between the panels`);
+    // The panels are anchored to the column's corners.
+    assert.equal(varOf(fx, "prompts", "--gs-left"), nav + PANEL_GAP, label);
+    assert.equal(varOf(fx, "minimap", "--gs-right"), PANEL_GAP, label);
+    assert.equal(varOf(fx, "minimap", "--gs-top"), 56 + 8, `${label}: below the header, in the top-right corner`);
+    assert.equal(varOf(fx, "prompts", "--gs-bottom"), 16, `${label}: bottom-left corner`);
   }
 });
 
-test("the page shifts only by what the rail needs; a wide window is left alone", async () => {
+test("the page shifts only by what the panels need; a wide window is left alone", async () => {
   const wide = createFixture({ turns: 12, width: 1920, markup: "real" });
   mount(wide);
   await wide.settle();
-  assert.equal(wide.reserve(), 0, "the natural right gutter already fits the rail");
+  assert.equal(wide.reserve() + wide.reserveLeft(), 0, "the natural gutters already fit both panels");
   assert.equal(wide.doc.body.hasAttribute("data-gs-column"), false);
   assert.equal(wide.doc.body.getAttribute("style"), null, "no writes to the page at all");
 
   const tight = createFixture({ turns: 12, width: 1280, markup: "real" });
   mount(tight);
   await tight.settle();
-  const reserve = tight.reserve();
-  assert.ok(reserve > 0 && reserve < RAIL_RESERVE, `shifted by ${reserve}px, less than the full ${RAIL_RESERVE}px`);
+  assert.equal(tight.reserve(), NEED, "the minimap takes its width from the right");
+  assert.equal(tight.reserveLeft(), NEED, "the prompts take theirs from the left");
   assert.equal(tight.doc.body.hasAttribute("data-gs-column"), true);
-  assert.match(tight.doc.getElementById("gs-pane-style").textContent, /\[data-gs-column\]\[data-gs-column\]\{[^}]*padding-right:var\(--gs-reserve/);
+  const css = tight.doc.getElementById("gs-pane-style").textContent;
+  assert.match(css, /\[data-gs-column\]\[data-gs-left\]\{[^}]*padding-left:var\(--gs-reserve-left/);
+  assert.match(css, /\[data-gs-column\]\[data-gs-right\]\{[^}]*padding-right:var\(--gs-reserve/);
 });
 
-test("narrow windows and split windows collapse the rail and leave the page untouched", async () => {
+test("collapsing a panel to its header button gives its room back; the same button restores it; the choice survives a reload", async () => {
+  const data = new Map();
+  const storage = { getItem: (k) => data.get(k) ?? null, setItem: (k, v) => data.set(k, v) };
+  const fx = createFixture({ turns: 20, width: 1280, markup: "real", header: true });
+  const make = () => mount(fx, undefined, createPanelPrefs(storage));
+  let ui = make();
+  await fx.settle();
+  const full = rects(fx).turn;
+  assert.ok(fx.reserve() > 0 && fx.reserveLeft() > 0);
+
+  hbtn(fx, "prompts").click();
+  await fx.settle();
+  assert.equal(hiddenPanel(fx, "prompts"), true);
+  assert.equal(fx.reserveLeft(), 0, "no room kept for the hidden prompts");
+  assert.ok(fx.reserve() > 0, "the minimap still has its room");
+  const oneSided = rects(fx).turn;
+  assert.ok(oneSided.width >= full.width, "the conversation widens");
+
+  hbtn(fx, "minimap").click();
+  await fx.settle();
+  assert.equal(fx.reserve() + fx.reserveLeft(), 0, "both collapsed: the conversation is centered at its full width");
+  assert.equal(fx.doc.body.hasAttribute("data-gs-column"), false);
+  assert.equal(rects(fx).turn.width, 768);
+  assert.deepEqual(JSON.parse(data.get("gs.pane.layout")), { minimap: false, prompts: false });
+
+  // A reload (a fresh rail on the same storage) keeps both collapsed.
+  ui.stop();
+  ui = make();
+  await fx.settle();
+  assert.equal(hiddenPanel(fx, "minimap") && hiddenPanel(fx, "prompts"), true);
+  assert.equal(fx.reserve() + fx.reserveLeft(), 0);
+  assert.equal(hbtn(fx, "minimap").getAttribute("aria-pressed"), "false");
+
+  // The same buttons restore them.
+  hbtn(fx, "minimap").click();
+  hbtn(fx, "prompts").click();
+  await fx.settle();
+  assert.equal(hiddenPanel(fx, "minimap") || hiddenPanel(fx, "prompts"), false);
+  assert.ok(fx.reserve() > 0 && fx.reserveLeft() > 0);
+  assert.equal(hbtn(fx, "minimap").getAttribute("aria-pressed"), "true");
+  ui.stop();
+});
+
+test("the page column is padded, but the header cancels it: ChatGPT's header, and its buttons, stay where they are", async () => {
+  const fx = createFixture({ turns: 20, width: 1280, markup: "real", header: true });
+  mount(fx);
+  await fx.settle();
+  const header = fx.doc.getElementById("page-header");
+  assert.equal(fx.doc.body.hasAttribute("data-gs-column"), true);
+  assert.equal(header.hasAttribute("data-gs-header"), true, "the header cancels the column's padding with opposite margins");
+  assert.match(fx.doc.getElementById("gs-pane-style").textContent, /\[data-gs-header\]\{margin-left:calc\(-1 \* var\(--gs-reserve-left,0px\)\);margin-right:calc\(-1 \* var\(--gs-reserve,0px\)\)\}/);
+  assert.equal(header.getBoundingClientRect().right, 1280, "the header still spans the window");
+  // Nothing reserved: the header is untouched too.
+  const wide = createFixture({ turns: 20, width: 1920, markup: "real", header: true });
+  mount(wide);
+  await wide.settle();
+  assert.equal(wide.doc.getElementById("page-header").hasAttribute("data-gs-header"), false);
+  // Disposing releases it.
+  const ui = createFixture({ turns: 20, width: 1280, markup: "real", header: true });
+  const m = mount(ui);
+  await ui.settle();
+  m.stop();
+  assert.equal(ui.doc.getElementById("page-header").hasAttribute("data-gs-header"), false);
+});
+
+test("the panel buttons sit in ChatGPT's header button area; without a header they float top-right", async () => {
+  const fx = createFixture({ turns: 12, width: 1600, markup: "real", header: true });
+  mount(fx);
+  await fx.settle();
+  const acts = fx.doc.querySelector(".gs-hbtns");
+  const native = [...fx.doc.querySelectorAll("#page-header .acts > button")];
+  assert.equal(acts.parentElement, native[0].parentElement, "inside the native button group");
+  assert.equal(acts.nextElementSibling, native.at(-1), "just before the right-most native button");
+  assert.equal(acts.hasAttribute("data-gs-float"), false);
+  // ChatGPT re-renders its header: the buttons are put back, once.
+  const group = native[0].parentElement;
+  acts.remove();
+  fx.win.dispatchEvent(new fx.win.Event("resize"));
+  await fx.settle();
+  assert.equal(fx.doc.querySelectorAll(".gs-hbtns").length, 1);
+  assert.equal(fx.doc.querySelector(".gs-hbtns").parentElement, group);
+  const bare = createFixture({ turns: 12, width: 1600, markup: "real" });
+  mount(bare);
+  assert.equal(bare.doc.querySelector(".gs-hbtns").hasAttribute("data-gs-float"), true);
+});
+
+test("narrow windows turn the panels into drawers; a medium window docks the prompts and leaves the minimap a drawer", async () => {
   for (const width of [1023, 900, 768, 390]) {
     const fx = createFixture({ turns: 12, width, markup: "real" });
-    const { q } = mount(fx);
+    mount(fx);
     await fx.settle();
-    assert.equal(q(".gs-pane").dataset.gsMode, "collapsed", `${width}px`);
-    assert.equal(q(".gs-pane").dataset.gsOpen, "false", `${width}px: opens only on request`);
-    assert.equal(fx.reserve(), 0);
-    assert.equal(fx.doc.body.hasAttribute("data-gs-column"), false, "the page column is untouched");
-    assert.equal(fx.doc.body.getAttribute("style"), null);
+    assert.equal(hiddenPanel(fx, "minimap") && hiddenPanel(fx, "prompts"), true, `${width}px: nothing covers the conversation on its own`);
+    assert.equal(fx.reserve() + fx.reserveLeft(), 0, `${width}px`);
+    assert.equal(fx.doc.body.hasAttribute("data-gs-column"), false, `${width}px`);
+    assert.equal(fx.doc.body.getAttribute("style"), null, `${width}px`);
+    hbtn(fx, "minimap").click();
+    assert.equal(hiddenPanel(fx, "minimap"), false, `${width}px: opens on request`);
+    hbtn(fx, "prompts").click();
+    assert.deepEqual([hiddenPanel(fx, "minimap"), hiddenPanel(fx, "prompts")], [true, false], `${width}px: one drawer at a time`);
   }
-  // A wide window whose open sidebar leaves too little for the shifted conversation also collapses.
-  const split = createFixture({ turns: 12, width: 1100, nav: 260, markup: "real" });
-  const { q } = mount(split);
-  await split.settle();
-  assert.equal(q(".gs-pane").dataset.gsMode, "collapsed");
-  assert.equal(split.reserve(), 0);
-  assert.ok(rects(split).turn.width >= MIN_CONTENT || split.reserve() === 0);
+  // Not room for both beside a 560px conversation: the prompts dock, the minimap is a drawer behind its button.
+  for (const [width, nav] of [[1100, 0], [1160, 0], [1300, 260]]) {
+    const fx = createFixture({ turns: 12, width, nav, markup: "real" });
+    mount(fx);
+    await fx.settle();
+    const label = `${width}px, navigation ${nav}px`;
+    assert.deepEqual([hiddenPanel(fx, "minimap"), hiddenPanel(fx, "prompts")], [true, false], label);
+    assert.equal(fx.reserve(), 0, `${label}: nothing reserved for the closed minimap`);
+    assert.ok(rects(fx).turn.left >= nav + NEED && rects(fx).turn.width >= MIN_CONTENT, label);
+    hbtn(fx, "minimap").click();
+    assert.equal(hiddenPanel(fx, "minimap"), false, `${label}: the minimap opens as a drawer`);
+    assert.equal(hiddenPanel(fx, "prompts"), false, `${label}: the docked prompts stay`);
+    assert.equal(fx.doc.querySelector('.gs-panel[data-gs-panel="minimap"]').dataset.gsDrawer, "true");
+    hbtn(fx, "minimap").click();
+    assert.equal(hiddenPanel(fx, "minimap"), true);
+  }
 });
 
 test("opening and closing ChatGPT's sidebar, or resizing the window, re-measures without oscillating", async () => {
-  const fx = createFixture({ turns: 20, width: 1100, markup: "real" });
-  const { q } = mount(fx);
+  const fx = createFixture({ turns: 20, width: 1300, markup: "real" });
+  mount(fx);
   await fx.settle();
-  assert.equal(q(".gs-pane").dataset.gsMode, "docked");
-  assert.ok(fx.reserve() > 0);
+  assert.equal(hiddenPanel(fx, "minimap"), false);
+  assert.ok(fx.reserve() + fx.reserveLeft() > 0);
 
   const transition = () => Object.assign(new fx.win.Event("transitionend", { bubbles: true }), { propertyName: "width" });
-  fx.setNav(260); // the sidebar opens: not enough room left for both
+  fx.setNav(260); // the sidebar opens: not enough room left for both panels
   fx.doc.body.dispatchEvent(transition());
   await fx.settle();
-  assert.equal(q(".gs-pane").dataset.gsMode, "collapsed");
+  assert.deepEqual([hiddenPanel(fx, "minimap"), hiddenPanel(fx, "prompts")], [true, false], "the minimap becomes a drawer instead of covering the page");
   assert.equal(fx.reserve(), 0);
-  assert.equal(q(".gs-pane").dataset.gsOpen, "false");
+  fx.setNav(700); // an even wider sidebar: neither fits
+  fx.doc.body.dispatchEvent(transition());
+  await fx.settle();
+  assert.equal(hiddenPanel(fx, "minimap") && hiddenPanel(fx, "prompts"), true);
+  assert.equal(fx.reserve() + fx.reserveLeft(), 0);
 
   fx.setNav(0); // and closes again
   fx.doc.body.dispatchEvent(transition());
   await fx.settle();
-  assert.equal(q(".gs-pane").dataset.gsMode, "docked");
-  const settled = fx.reserve();
-  assert.ok(settled > 0);
+  assert.equal(hiddenPanel(fx, "minimap") || hiddenPanel(fx, "prompts"), false);
+  const settled = [fx.reserve(), fx.reserveLeft()];
+  assert.ok(settled[0] > 0 && settled[1] > 0);
 
-  // Stable afterwards: no layout writes while nothing changes, whatever notifies the rail.
+  // Stable afterwards: no layout writes while nothing changes, whatever notifies the panels.
   const writes = [];
   const mo = new fx.win.MutationObserver((records) => writes.push(...records.map((r) => `${r.type}:${r.attributeName ?? ""}`)));
   mo.observe(fx.doc.body, { attributes: true });
@@ -111,28 +227,28 @@ test("opening and closing ChatGPT's sidebar, or resizing the window, re-measures
     await fx.settle();
   }
   assert.deepEqual(writes, []);
-  assert.equal(fx.reserve(), settled);
+  assert.deepEqual([fx.reserve(), fx.reserveLeft()], settled);
   mo.disconnect();
 
-  fx.win.innerWidth = 1500; // the window grows: the gutter now fits, so the page is released
+  fx.win.innerWidth = 1900; // the window grows: the gutters now fit, so the page is released
   fx.win.dispatchEvent(new fx.win.Event("resize"));
   await fx.settle();
-  assert.equal(fx.reserve(), 0);
+  assert.equal(fx.reserve() + fx.reserveLeft(), 0);
   assert.equal(fx.doc.body.hasAttribute("data-gs-column"), false);
 });
 
-test("dispose removes the reservation and leaves the page exactly as it was", async () => {
-  const fx = createFixture({ turns: 20, width: 1280, markup: "real" });
+test("dispose removes the reservation and the panels and leaves the page exactly as it was", async () => {
+  const fx = createFixture({ turns: 20, width: 1280, markup: "real", header: true });
   const before = fx.doc.documentElement.outerHTML;
   const { stop } = mount(fx);
   await fx.settle();
-  assert.ok(fx.reserve() > 0);
+  assert.ok(fx.reserve() > 0 && fx.reserveLeft() > 0);
   stop();
-  assert.equal(fx.doc.documentElement.outerHTML, before);
+  assert.equal(norm(fx.doc.documentElement.outerHTML), norm(before));
 });
 
-test("an idle docked page with a reserved column makes no DOM writes", async () => {
-  const fx = createFixture({ turns: 20, width: 1280, markup: "real" });
+test("an idle docked page with reserved columns makes no DOM writes", async () => {
+  const fx = createFixture({ turns: 20, width: 1280, markup: "real", header: true });
   const { runtime } = mount(fx);
   await fx.settle();
   const flushes = runtime.diagnostics.snapshot()["observer.flush"];
@@ -219,7 +335,6 @@ test("each conversation keeps its own rail state: A -> B -> A restores A, B stay
   const input = ui.q(".gs-search input");
   input.value = "about";
   input.dispatchEvent(new fx.win.Event("input"));
-  ui.q(".gs-sec-overview .gs-sec-head").click();
   items(fx)[10].click();
   await fx.settle();
   fx.wheel(300);
@@ -248,13 +363,11 @@ test("each conversation keeps its own rail state: A -> B -> A restores A, B stay
   ui = mount(fx, store);
   await fx.settle();
   assert.equal(items(fx).length, 12);
-  assert.doesNotMatch(ui.q(".gs-pane").textContent, /Prompt \d/, "no prompt preview of A in B");
+  assert.doesNotMatch(ui.q(".gs-panel-prompts").textContent, /Prompt \d/, "no prompt preview of A in B");
   assert.equal(ui.q(".gs-search input").value, "");
-  assert.equal(ui.q(".gs-sec-overview").dataset.gsCollapsed, "false");
   assert.equal(items(fx).at(-1).getAttribute("aria-current"), "true");
   ui.q(".gs-search input").value = "pears";
   ui.q(".gs-search input").dispatchEvent(new fx.win.Event("input"));
-  ui.q(".gs-sec-prompts .gs-sec-head").click();
   ui.stop();
 
   // Back to A: everything is where the user left it.
@@ -264,8 +377,6 @@ test("each conversation keeps its own rail state: A -> B -> A restores A, B stay
   ui = mount(fx, store);
   await fx.settle();
   assert.equal(ui.q(".gs-search input").value, "about");
-  assert.equal(ui.q(".gs-sec-overview").dataset.gsCollapsed, "true");
-  assert.equal(ui.q(".gs-sec-prompts").dataset.gsCollapsed, "false");
   assert.equal(items(fx).find((b) => b.getAttribute("aria-current") === "true").dataset.id, a.active);
   assert.equal(ui.q(".gs-prompts").scrollTop, a.list);
   assert.equal(fx.rawTop(), a.top, "the conversation is back at the exact scroll position");
@@ -279,10 +390,8 @@ test("each conversation keeps its own rail state: A -> B -> A restores A, B stay
   ui = mount(fx, store);
   await fx.settle();
   assert.equal(ui.q(".gs-search input").value, "pears");
-  assert.equal(ui.q(".gs-sec-prompts").dataset.gsCollapsed, "true");
-  assert.equal(ui.q(".gs-sec-overview").dataset.gsCollapsed, "false");
   assert.equal(items(fx).length, 3, "B filters by its own search (pears), not A's");
-  assert.doesNotMatch(ui.q(".gs-pane").textContent, /Prompt \d/);
+  assert.doesNotMatch(ui.q(".gs-panel-prompts").textContent, /Prompt \d/);
   ui.stop();
 });
 
@@ -319,21 +428,20 @@ test("the store is bounded and keeps one entry per conversation", () => {
   assert.equal(store.save("new", { sig: "x" }), false);
 });
 
-test("the composer clears the rail when it sits in an overlay inside the scrolling column (live chatgpt.com layout)", async () => {
-  for (const [width, nav] of [[1600, 52], [1448, 52], [1280, 0], [1180, 52], [DOCK_MIN_VIEWPORT, 0]]) {
+test("the composer clears both panels when it sits in an overlay inside the scrolling column (live chatgpt.com layout)", async () => {
+  for (const [width, nav] of [[1600, 52], [1448, 52], [1280, 0], [1260, 52]]) {
     const fx = createFixture({ turns: 20, width, nav, markup: "real", overlay: true });
-    const { q } = mount(fx);
+    mount(fx);
     await fx.settle();
     const label = `${width}px wide, ${nav}px navigation`;
     const { turn, composer } = rects(fx);
-    assert.equal(q(".gs-pane").dataset.gsMode, "docked", label);
-    assert.ok(turn.right <= railLeft(fx), `${label}: conversation ends at ${turn.right}, rail starts at ${railLeft(fx)}`);
-    assert.ok(composer.right <= railLeft(fx), `${label}: composer ends at ${composer.right}, rail starts at ${railLeft(fx)}`);
+    assert.ok(turn.left >= nav + NEED && composer.left >= nav + NEED, `${label}: left edges ${turn.left} / ${composer.left}`);
+    assert.ok(turn.right <= width - NEED && composer.right <= width - NEED, `${label}: right edges ${turn.right} / ${composer.right}`);
     assert.equal(composer.left, turn.left, `${label}: composer and conversation shift together`);
   }
 });
 
-test("the overlay's reservation is removed with the rail and written only once", async () => {
+test("the overlay's reservation is removed with the panels and written only once", async () => {
   const fx = createFixture({ turns: 20, width: 1280, markup: "real", overlay: true });
   const overlay = fx.doc.getElementById("overlay");
   const { stop } = mount(fx);
@@ -346,5 +454,20 @@ test("the overlay's reservation is removed with the rail and written only once",
   stop();
   assert.equal(overlay.hasAttribute("data-gs-column"), false);
   assert.equal(overlay.style.getPropertyValue("--gs-reserve"), "");
+  assert.equal(overlay.style.getPropertyValue("--gs-reserve-left"), "");
   assert.equal(overlay.style.position, "absolute", "the page's own style survives");
+});
+
+test("a header that ChatGPT replaces (column and composer untouched) takes over the cancelling margins", async () => {
+  const fx = createFixture({ turns: 20, width: 1280, markup: "real", header: true });
+  mount(fx);
+  await fx.settle();
+  const old = fx.doc.getElementById("page-header");
+  assert.equal(old.hasAttribute("data-gs-header"), true);
+  const fresh = old.cloneNode(true);
+  fresh.removeAttribute("data-gs-header");
+  old.replaceWith(fresh);
+  fx.win.dispatchEvent(new fx.win.Event("resize"));
+  await fx.settle();
+  assert.equal(fresh.hasAttribute("data-gs-header"), true, "the new header cancels the padding too");
 });
