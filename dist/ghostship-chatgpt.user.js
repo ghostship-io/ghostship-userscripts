@@ -980,9 +980,9 @@
         return "unknown";
       }
     }
-    async readiness(target) {
+    async readiness(target, text) {
       try {
-        return await this.#adapter.readiness(target);
+        return await this.#adapter.readiness(target, text);
       } catch {
         return { state: "waiting", reason: "unknown-state" };
       }
@@ -1171,6 +1171,7 @@
     pollMs = 50,
     settleMs = 600,
     sendWaitMs = 8e3,
+    placeWaitMs = 1500,
     steerWaitMs = 1500,
     ackMs = 6e3,
     stopWaitMs = 5e3,
@@ -1182,6 +1183,8 @@
     const clicked = /* @__PURE__ */ new Set();
     let lastBusy = -Infinity;
     let composerMissingSince = null;
+    const placeFailures = /* @__PURE__ */ new Map();
+    const PLACE_FAILURES_BEFORE_HOLD = 3;
     const waitFor = (probe, ms) => new Promise((resolve) => {
       const started = Date.now();
       const poll = () => {
@@ -1195,7 +1198,7 @@
     const generating = () => adapter.generating(doc);
     const onTarget = (target) => adapter.conversationId(win) === target.conversationId && adapter.accountId(doc) === target.accountId;
     const enabled = (button2) => button2 && !button2.disabled && button2.getAttribute("aria-disabled") !== "true" ? button2 : null;
-    function notReady(target, { allowGenerating = false } = {}) {
+    function notReady(target, { allowGenerating = false, text = null } = {}) {
       if (!onTarget(target)) return { state: "waiting", reason: "other-conversation" };
       const input = adapter.composerInput(doc);
       if (!input) {
@@ -1218,36 +1221,56 @@
         }
         if (now() - lastBusy < settleMs) return { state: "waiting", reason: "settling" };
       }
-      if (io.hasText(input)) return { state: "waiting", reason: "composer-has-draft" };
+      if (io.hasText(input) && !(text !== null && norm(io.read(input)) === norm(text))) return { state: "waiting", reason: "composer-has-draft" };
       return null;
     }
-    const unstage = (input, text) => {
-      if (norm(io.read(input)) === norm(text)) io.write(input, "");
-    };
-    async function stage(target, text, control, ms, { allowGenerating }) {
+    const unstage = (text) => {
       const input = adapter.composerInput(doc);
-      if (!io.write(input, text) || norm(io.read(input)) !== norm(text)) {
-        unstage(input, text);
-        return { failed: { kind: "rejected", code: "composer-fill-failed", message: "The text could not be placed in the composer; nothing was sent.", action: "Reload the page, then press Retry." } };
+      if (input && norm(io.read(input)) === norm(text)) io.write(input, "");
+    };
+    async function place(text) {
+      const holds = () => {
+        const input = adapter.composerInput(doc);
+        return input !== null && norm(io.read(input)) === norm(text);
+      };
+      if (!holds()) {
+        const input = adapter.composerInput(doc);
+        if (!input || io.write(input, text) === false) return false;
       }
+      let streak = 0;
+      return Boolean(await waitFor(() => holds() ? ++streak >= 2 : (streak = 0, false), placeWaitMs));
+    }
+    async function stage(target, text, control, ms, { allowGenerating }) {
+      const key = `${target.accountId}:${target.conversationId}`;
+      if (!await place(text)) {
+        unstage(text);
+        const failures = (placeFailures.get(key) ?? 0) + 1;
+        if (failures < PLACE_FAILURES_BEFORE_HOLD) {
+          placeFailures.set(key, failures);
+          return { failed: { kind: "wait", reason: "placing-text" } };
+        }
+        placeFailures.delete(key);
+        return { failed: { kind: "rejected", code: "composer-fill-failed", message: "The text did not appear in the composer after several tries; nothing was sent.", action: "Check the composer, then press Retry, Steer or Interrupt & Send Next." } };
+      }
+      placeFailures.delete(key);
       const button2 = await waitFor(() => {
         if (!onTarget(target)) return "left";
         if (!allowGenerating && generating()) return "busy";
         return enabled(control());
       }, ms);
       if (button2 === "left") {
-        unstage(input, text);
+        unstage(text);
         return { failed: { kind: "wait", reason: "other-conversation" } };
       }
       if (button2 === "busy") {
-        unstage(input, text);
+        unstage(text);
         return { failed: { kind: "wait", reason: "generating" } };
       }
       if (!button2) {
-        unstage(input, text);
+        unstage(text);
         return { missing: true };
       }
-      return { input, button: button2 };
+      return { button: button2 };
     }
     async function click(itemId, button2, turnsBefore, target, { steering = false } = {}) {
       if (!onTarget(target)) {
@@ -1272,8 +1295,8 @@
         if (!adapter.composerInput(doc)) return "unknown";
         return generating() ? "generating" : "idle";
       },
-      async readiness(target) {
-        return notReady(target) ?? { state: "ready" };
+      async readiness(target, text = null) {
+        return notReady(target, { text }) ?? { state: "ready" };
       },
       async submit({ itemId, accountId, conversationId, text, attachments }) {
         const target = { accountId, conversationId };
@@ -1281,7 +1304,7 @@
           return { kind: "uncertain", code: "already-attempted", message: "This message was already submitted from this page." };
         }
         if (attachments.length) return attachmentsRefused;
-        const not = notReady(target);
+        const not = notReady(target, { text });
         if (not) return not.state === "blocked" ? { kind: "rejected", code: not.code, message: not.message, action: not.action } : { kind: "wait", reason: not.reason };
         const staged = await stage(target, text, () => adapter.sendButton(doc), sendWaitMs, { allowGenerating: false });
         if (staged.failed) return staged.failed;
@@ -1298,7 +1321,7 @@
         }
         if (attachments.length) return attachmentsRefused;
         if (!generating()) return { kind: "wait", reason: "not-generating" };
-        const not = notReady(target, { allowGenerating: true });
+        const not = notReady(target, { allowGenerating: true, text });
         if (not) return not.state === "blocked" ? { kind: "rejected", code: not.code, message: not.message, action: not.action } : { kind: "wait", reason: not.reason };
         const staged = await stage(target, text, () => adapter.steerButton(doc), steerWaitMs, { allowGenerating: true });
         if (staged.failed) return staged.failed;
@@ -1809,7 +1832,7 @@
         }
         const gate = this.#gate(view, false);
         if (gate) return gate;
-        const ready = await this.#dispatch.readiness(target);
+        const ready = await this.#dispatch.readiness(target, view.pending.text);
         if (ready.state === "waiting") return { kind: "waiting", reason: ready.reason };
         if (ready.state === "blocked") return this.#hold(target, view.pending, ready);
         const lease = await this.#acquire(target);
@@ -1884,7 +1907,9 @@
       if (inflight?.status === "manual-review") return { kind: "halted", itemId: inflight.id, status: "manual-review" };
       if (inflight) return { kind: "busy", itemId: inflight.id };
       if (!pending) return { kind: "idle" };
-      if (pending.status !== "pending") return { kind: "halted", itemId: pending.id, status: pending.status };
+      if (pending.status !== "pending" && !(explicit && pending.lastError?.code !== "attachments-not-restorable")) {
+        return { kind: "halted", itemId: pending.id, status: pending.status };
+      }
       if (view.editing) return explicit ? { kind: "editing" } : { kind: "waiting", reason: "editing" };
       if (view.paused && !explicit) return { kind: "paused" };
       return null;
@@ -2169,7 +2194,7 @@
     if (model.edit) return "Save or cancel the edit first.";
     if (!model.pending) return "Nothing is queued.";
     if (model.inflight) return model.inflight.status === "sending" ? "The previous message is still being sent." : "Resolve the message that needs review first.";
-    if (model.pending.status !== "pending") return "Resolve the hold on the queued prompt first.";
+    if (model.pending.status !== "pending" && model.pending.lastError?.code === "attachments-not-restorable") return "Send without the files or delete the prompt first.";
     return null;
   }
   function renderPanel(doc, root, model, on) {
@@ -2214,8 +2239,7 @@
           title: blocker
         }),
         button(doc, "head:pause", [icon(doc, model.paused ? "play" : "pause"), model.paused ? "Resume" : "Pause"], () => on.togglePause(), {
-          label: model.paused ? "Resume the queue" : "Pause the queue",
-          disabled: pending.status !== "pending"
+          label: model.paused ? "Resume the queue" : "Pause the queue"
         })
       );
     }

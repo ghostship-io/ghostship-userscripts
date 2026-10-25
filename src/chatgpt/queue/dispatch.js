@@ -39,9 +39,9 @@ export class DispatchBoundary {
     }
   }
 
-  async readiness(target) {
+  async readiness(target, text) {
     try {
-      return await this.#adapter.readiness(target);
+      return await this.#adapter.readiness(target, text);
     } catch {
       return { state: "waiting", reason: "unknown-state" };
     }

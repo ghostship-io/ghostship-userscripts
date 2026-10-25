@@ -28,7 +28,8 @@ export async function fakePage({ editable = "textarea", acknowledges = true, sto
       else p.append(doc.createElement("br"));
       return p;
     };
-    doc.execCommand = (command, _ui, value) => {
+    // `page.fill`: "now" (default), a number of ms (the editor applies input late, as ProseMirror does), or "never".
+    const apply = (command, value) => {
       if (command === "delete") input.replaceChildren();
       else if (command === "insertParagraph") {
         if (!input.lastElementChild) input.append(paragraph());
@@ -40,6 +41,11 @@ export async function fakePage({ editable = "textarea", acknowledges = true, sto
         last.append(doc.createTextNode(value));
       }
       input.dispatchEvent(new window.Event("input", { bubbles: true }));
+    };
+    doc.execCommand = (command, _ui, value) => {
+      if (page.fill === "never") return true; // accepted, never shown
+      if (typeof page.fill === "number") setTimeout(() => apply(command, value), page.fill);
+      else apply(command, value);
       return true;
     };
   }
@@ -52,7 +58,7 @@ export async function fakePage({ editable = "textarea", acknowledges = true, sto
     doc.body.append(button);
   }
 
-  const page = { window, doc, input, form, log: [], streaming: false, send: null, stop: null, steerButton: null };
+  const page = { window, doc, input, form, fill: "now", log: [], streaming: false, send: null, stop: null, steerButton: null };
   const text = () =>
     editable === "textarea"
       ? input.value
