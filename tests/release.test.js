@@ -196,5 +196,6 @@ test("the workflows: only the release workflow may write contents, and it verifi
   const releaseYml = read("release.yml");
   assert.match(releaseYml, /contents: write/);
   assert.ok(releaseYml.indexOf("npm test") < releaseYml.indexOf("git push origin HEAD:main"), "tests run before the push");
-  assert.doesNotMatch(releaseYml, /--force|-f\s/);
+  assert.doesNotMatch(releaseYml, /--force|--force-with-lease|push -f|\+HEAD/);
+  assert.match(releaseYml, /git reset --hard origin\/main/, "a rejected push restarts from the new tip instead of failing");
 });
