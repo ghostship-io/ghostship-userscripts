@@ -249,9 +249,8 @@ test("observers stay bounded across long streaming sessions", async () => {
 
 test("fail open: unknown markup leaves the page untouched and native scrolling intact", async () => {
   const cases = [
-    ["plain", () => {}, /selfcheck|layout not recognised/],
     ["chatgpt", (fx) => fx.elements().forEach((e) => (e.innerHTML = "<div>x</div>")), /unknown-role/],
-    ["chatgpt", (fx) => { const w = fx.doc.createElement("div"); fx.elements()[3].replaceWith(w); w.append(fx.doc.createElement("article")); w.firstChild.setAttribute("data-testid", "conversation-turn-99"); w.firstChild.innerHTML = '<div data-message-author-role="user">x</div>'; }, /turns-not-siblings/],
+    ["chatgpt", (fx) => { const out = fx.doc.createElement("div"); out.append(fx.elements()[3]); fx.scroller.append(out); }, /turns-outside-root/],
   ];
   for (const [markup, mutate, reason] of cases) {
     const fx = createFixture({ turns: 10, markup });

@@ -90,14 +90,29 @@ test("React remount of every turn, new turns and composer typing: still no scrol
   assert.equal(guards.isClean(), true, JSON.stringify(guards.report()));
 });
 
-test("broken ChatGPT markup: the script fails closed (safe mode), leaves the page untouched and sends nothing", async () => {
-  const fx = createFixture({ turns: 12, markup: "no-role" });
+test("broken ChatGPT markup (turns without roles): the script fails closed (safe mode), leaves the page untouched and sends nothing", async () => {
+  const fx = createFixture({ turns: 12 });
+  fx.elements().forEach((e) => (e.innerHTML = "<div>unrecognised</div>"));
   const guards = installPageGuards(fx);
   const before = fx.doc.documentElement.outerHTML;
   const health = runBundle(fx);
   await fx.settle();
   assert.equal(health.mode, "safe");
   assert.equal(fx.doc.documentElement.outerHTML, before);
+  fx.scroller.scrollTop = 100;
+  assert.equal(fx.rawTop(), 100, "native scrolling is not intercepted");
+  assert.equal(guards.isClean(), true, JSON.stringify(guards.report()));
+});
+
+test("no recognisable turns (a new chat or changed turn markup): composer-only, conversation and scrolling untouched, nothing sent", async () => {
+  const fx = createFixture({ turns: 12, markup: "no-role" });
+  const guards = installPageGuards(fx);
+  const turnsBefore = fx.thread.outerHTML;
+  const health = runBundle(fx);
+  await fx.settle();
+  assert.equal(health.mode, "composer-only");
+  assert.equal(JSON.stringify(health.missing), JSON.stringify(["turns"]));
+  assert.equal(fx.thread.outerHTML, turnsBefore, "the conversation is not modified");
   fx.scroller.scrollTop = 100;
   assert.equal(fx.rawTop(), 100, "native scrolling is not intercepted");
   assert.equal(guards.isClean(), true, JSON.stringify(guards.report()));

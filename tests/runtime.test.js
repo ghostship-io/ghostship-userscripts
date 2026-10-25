@@ -21,10 +21,10 @@ test("runtime: active on the fixture, index follows DOM changes, dispose is clea
   assert.equal(runtime.observers.size(), 0);
 });
 
-test("runtime: unrecognised layout falls back to safe mode without touching the page", async () => {
+test("runtime: no composer falls back to safe mode without touching the page", async () => {
   const dom = await loadFixture();
   const { window } = dom;
-  window.document.querySelectorAll("[data-testid]").forEach((el) => el.removeAttribute("data-testid"));
+  window.document.getElementById("prompt-textarea").removeAttribute("id");
   const warnings = [];
   window.console.warn = (m) => warnings.push(m);
   const before = window.document.documentElement.outerHTML;
@@ -33,6 +33,24 @@ test("runtime: unrecognised layout falls back to safe mode without touching the 
   assert.equal(warnings.length, 1);
   assert.equal(window.document.documentElement.outerHTML, before);
   assert.equal(runtime.diagnostics.snapshot()["selfcheck.failed"], 1);
+});
+
+test("runtime: a composer without turns (new chat) runs composer-only, mounts the queue and leaves scrolling alone", async () => {
+  const dom = await loadFixture();
+  const { window } = dom;
+  window.document.querySelectorAll("[data-testid]").forEach((el) => el.removeAttribute("data-testid"));
+  const mounted = [];
+  const queueUi = () => {
+    mounted.push("queue");
+    return { dispose: () => mounted.push("disposed") };
+  };
+  const runtime = createRuntime({ win: window, adapter: chatgptAdapter, queueUi });
+  assert.equal(runtime.mode, "composer-only");
+  assert.deepEqual(mounted, ["queue"]);
+  assert.deepEqual(runtime.promptIndex, []);
+  assert.equal(runtime.diagnostics.snapshot()["selfcheck.failed"], undefined);
+  runtime.dispose();
+  assert.deepEqual(mounted, ["queue", "disposed"]);
 });
 
 test("runtime: disabled by config does nothing", async () => {

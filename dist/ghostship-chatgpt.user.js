@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GhostShip ChatGPT
 // @namespace    https://github.com/ghostship-io/ghostship-userscripts
-// @version      0.6.0
+// @version      0.6.1
 // @description  Fast, queue-aware ChatGPT interface for the owner browser.
 // @match        https://chatgpt.com/*
 // @grant        none
@@ -11,6 +11,200 @@
 // ==/UserScript==
 
 (() => {
+  // src/core/diagnostics.js
+  function createDiagnostics(log = console) {
+    const counters = /* @__PURE__ */ new Map();
+    const warned = /* @__PURE__ */ new Set();
+    return {
+      count(name, n = 1) {
+        counters.set(name, (counters.get(name) ?? 0) + n);
+      },
+      warnOnce(key, message) {
+        if (warned.has(key)) return;
+        warned.add(key);
+        log.warn(`[ghostship] ${message}`);
+      },
+      snapshot() {
+        return Object.fromEntries(counters);
+      }
+    };
+  }
+
+  // src/core/boot.js
+  var BOOT_DEFAULTS = Object.freeze({ maxWaitMs: 3e4, settleMs: 100 });
+  function createBoot({ win, adapter, mount, version, onDispose, maxWaitMs = BOOT_DEFAULTS.maxWaitMs, settleMs = BOOT_DEFAULTS.settleMs, timers }) {
+    const doc = win.document;
+    const t = timers ?? {
+      setTimeout: (fn, ms) => win.setTimeout(fn, ms),
+      clearTimeout: (id) => win.clearTimeout(id),
+      now: () => win.performance.now()
+    };
+    const diagnostics = createDiagnostics(win.console);
+    const state = { phase: "waiting", reason: null, missing: [], attempts: 0, waitStart: t.now(), route: "new", turns: false };
+    let current = null;
+    let failedLayout = null;
+    let observer = null;
+    let debounce = null;
+    let giveUpTimer = null;
+    let disposed = false;
+    const sameLayout = (a, b) => !!a && !!b && a.route === b.route && a.composer === b.composer && a.container === b.container && a.scroller === b.scroller;
+    function watch(on) {
+      if (on && !observer && !disposed) {
+        observer = new win.MutationObserver(() => schedule());
+        observer.observe(doc.body, { childList: true, subtree: true });
+      } else if (!on && observer) {
+        observer.disconnect();
+        observer = null;
+      }
+    }
+    function schedule() {
+      if (debounce !== null || disposed) return;
+      debounce = t.setTimeout(() => {
+        debounce = null;
+        tick();
+      }, settleMs);
+    }
+    function teardown() {
+      const old = current;
+      current = null;
+      try {
+        old?.handle.dispose();
+      } catch (error) {
+        diagnostics.count("boot.dispose.failed");
+      }
+    }
+    function startWaiting(reason) {
+      state.phase = "waiting";
+      state.reason = reason;
+      state.waitStart = t.now();
+      state.attempts = 0;
+      t.clearTimeout(giveUpTimer);
+      giveUpTimer = t.setTimeout(giveUp, maxWaitMs);
+      watch(true);
+    }
+    function giveUp() {
+      giveUpTimer = null;
+      if (disposed || current) return;
+      const check = adapter.selfCheck(doc);
+      if (check.ok) return tick();
+      state.phase = "timeout";
+      state.reason = "timeout";
+      state.missing = check.missing;
+      diagnostics.count("boot.timeout");
+      diagnostics.warnOnce("boot-timeout", `ChatGPT layout not found after ${Math.round(maxWaitMs / 1e3)}s (${check.missing.join(", ")}); the script stays idle until the page route changes`);
+      watch(false);
+    }
+    function start(layout, check) {
+      state.attempts++;
+      try {
+        const handle = mount();
+        current = { handle, layout };
+        const mode = handle.runtime.mode;
+        state.reason = null;
+        if (mode === "off") {
+          state.phase = "off";
+          watch(false);
+        } else if (mode === "safe") {
+          failedLayout = layout;
+          state.phase = "running";
+        } else {
+          state.phase = "running";
+        }
+        t.clearTimeout(giveUpTimer);
+        giveUpTimer = null;
+      } catch (error) {
+        failedLayout = layout;
+        state.phase = "error";
+        state.reason = "mount-error";
+        diagnostics.count("boot.mount.failed");
+        diagnostics.warnOnce("boot-mount", `startup failed (${error instanceof Error ? error.message : error}); running without the script`);
+      }
+      state.missing = check.missing;
+    }
+    function tick() {
+      if (disposed) return;
+      const layout = adapter.layout(doc, win);
+      const check = adapter.selfCheck(doc);
+      state.route = layout.route === "new" ? "new" : "conversation";
+      state.turns = check.hasTurns;
+      if (state.phase === "off") return;
+      if (current) {
+        state.missing = check.missing;
+        if (sameLayout(current.layout, layout)) {
+          if (current.handle.runtime.mode === "safe") failedLayout = layout;
+          return;
+        }
+        diagnostics.count("boot.restart");
+        teardown();
+        failedLayout = null;
+        startWaiting("restart");
+      }
+      if (sameLayout(failedLayout, layout)) return;
+      failedLayout = null;
+      if (!check.ok) {
+        state.missing = check.missing;
+        return;
+      }
+      start(layout, check);
+    }
+    const onRoute = () => {
+      if (state.phase === "timeout") startWaiting("route");
+      schedule();
+    };
+    const history = win.history;
+    const originals = {};
+    for (const name of ["pushState", "replaceState"]) {
+      originals[name] = history[name];
+      const wrapped = function(...args) {
+        const result = originals[name].apply(this, args);
+        onRoute();
+        return result;
+      };
+      history[name] = wrapped;
+      originals[name + "Wrapped"] = wrapped;
+    }
+    win.addEventListener("popstate", onRoute);
+    win.addEventListener("hashchange", onRoute);
+    startWaiting(null);
+    tick();
+    const health = {
+      version,
+      get mode() {
+        if (current) return current.handle.runtime.mode;
+        return state.phase === "timeout" || state.phase === "error" ? "safe" : state.phase === "off" ? "off" : "waiting";
+      },
+      get missing() {
+        return [...state.missing];
+      },
+      get reason() {
+        return state.reason;
+      },
+      get route() {
+        return state.route;
+      },
+      get attempts() {
+        return state.attempts;
+      },
+      diagnostics: () => ({ ...diagnostics.snapshot(), ...current?.handle.runtime.diagnostics.snapshot() ?? {} })
+    };
+    return {
+      health,
+      runtime: () => current?.handle.runtime ?? null,
+      dispose() {
+        if (disposed) return;
+        disposed = true;
+        watch(false);
+        t.clearTimeout(debounce);
+        t.clearTimeout(giveUpTimer);
+        win.removeEventListener("popstate", onRoute);
+        win.removeEventListener("hashchange", onRoute);
+        for (const name of ["pushState", "replaceState"]) if (history[name] === originals[name + "Wrapped"]) history[name] = originals[name];
+        teardown();
+        onDispose?.();
+      }
+    };
+  }
+
   // src/core/config.js
   var CONFIG_KEY = "ghostship:userscripts:config";
   var DEFAULTS = Object.freeze({
@@ -44,25 +238,6 @@
     } catch {
       return { ...DEFAULTS };
     }
-  }
-
-  // src/core/diagnostics.js
-  function createDiagnostics(log = console) {
-    const counters = /* @__PURE__ */ new Map();
-    const warned = /* @__PURE__ */ new Set();
-    return {
-      count(name, n = 1) {
-        counters.set(name, (counters.get(name) ?? 0) + n);
-      },
-      warnOnce(key, message) {
-        if (warned.has(key)) return;
-        warned.add(key);
-        log.warn(`[ghostship] ${message}`);
-      },
-      snapshot() {
-        return Object.fromEntries(counters);
-      }
-    };
   }
 
   // src/core/observers.js
@@ -165,7 +340,7 @@
       for (const el2 of anchors()) {
         const r = el2.getBoundingClientRect();
         if (r.bottom > base + EPS) {
-          anchor = { el: el2, key: el2.getAttribute("data-testid") ?? "", offset: r.top - base };
+          anchor = { el: el2, key: el2.getAttribute("data-turn-key") ?? el2.getAttribute("data-testid") ?? "", offset: r.top - base };
           return anchor;
         }
       }
@@ -430,27 +605,47 @@
   // src/core/runtime.js
   function createRuntime({ win, adapter, backend = createNoopBackend(), queueUi: queueUi2, config = loadConfig(win.localStorage) }) {
     const diagnostics = createDiagnostics(win.console);
-    const runtime2 = { config, diagnostics, mode: "off", promptIndex: [], dispose() {
+    const runtime = { config, diagnostics, mode: "off", promptIndex: [], dispose() {
     } };
-    if (!config.enabled) return runtime2;
+    if (!config.enabled) return runtime;
     const check = adapter.selfCheck(win.document);
     if (!check.ok) {
-      runtime2.mode = "safe";
+      runtime.mode = "safe";
       diagnostics.count("selfcheck.failed");
       diagnostics.warnOnce("selfcheck", `ChatGPT layout not recognised (${check.missing.join(", ")}); running in safe mode`);
-      return runtime2;
+      return runtime;
+    }
+    const mountQueue = () => {
+      try {
+        return queueUi2?.({ win, adapter, config, diagnostics }) ?? { dispose() {
+        } };
+      } catch (error) {
+        diagnostics.count("queue.mount.failed");
+        diagnostics.warnOnce("queue", `queue UI disabled (${error instanceof Error ? error.message : error})`);
+        return { dispose() {
+        } };
+      }
+    };
+    if (!check.hasTurns) {
+      const queue2 = mountQueue();
+      const none = () => () => {
+      };
+      Object.assign(runtime, {
+        mode: "composer-only",
+        queue: queue2,
+        scroll: { onScroll: none, scrollTo: () => false, navigateTo: () => false, stats: {} },
+        onIndexChange: none,
+        onFallback: none,
+        navigateTo: () => false,
+        dispose: () => queue2.dispose()
+      });
+      diagnostics.count("runtime.composer-only");
+      return runtime;
     }
     const observers = createObserverHub({ max: config.maxObservers, MutationObserverCtor: win.MutationObserver, schedule: (fn) => win.setTimeout(fn, 16), diagnostics });
     const scroll = createScrollManager({ scroller: adapter.scroller(win.document), diagnostics });
     assertBackend(backend);
-    let queue = { dispose() {
-    } };
-    try {
-      queue = queueUi2?.({ win, adapter, config, diagnostics }) ?? queue;
-    } catch (error) {
-      diagnostics.count("queue.mount.failed");
-      diagnostics.warnOnce("queue", `queue UI disabled (${error instanceof Error ? error.message : error})`);
-    }
+    const queue = mountQueue();
     let stop = () => {
     };
     const indexListeners = /* @__PURE__ */ new Set();
@@ -463,23 +658,23 @@
       backend.unmount();
       observers.disposeAll();
       scroll.dispose();
-      Object.assign(runtime2, { mode: "safe", scroll: void 0, observers: void 0, navigateTo: void 0, onIndexChange: void 0, dispose: () => queue.dispose() });
+      Object.assign(runtime, { mode: "safe", scroll: void 0, observers: void 0, navigateTo: void 0, onIndexChange: void 0, dispose: () => queue.dispose() });
       diagnostics.count("virtualization.fallback");
       diagnostics.warnOnce("virtualization", `virtualization disabled (${reason}); running in safe mode`);
     };
     const mounted = backend.mount({ doc: win.document, adapter, scroll, observers, config, diagnostics, fallback: failOpen });
     if (mounted?.active === false) {
       failOpen(mounted.reason);
-      return runtime2;
+      return runtime;
     }
     const reindex = () => {
-      runtime2.promptIndex = buildPromptIndex(win.document, adapter);
+      runtime.promptIndex = buildPromptIndex(win.document, adapter);
       diagnostics.count("index.rebuilt");
-      indexListeners.forEach((fn) => fn(runtime2.promptIndex));
+      indexListeners.forEach((fn) => fn(runtime.promptIndex));
     };
     reindex();
     stop = observers.subscribe(win.document.body, reindex);
-    Object.assign(runtime2, {
+    Object.assign(runtime, {
       mode: "active",
       scroll,
       /** Subscribe to prompt-index rebuilds; returns an unsubscribe. */
@@ -507,38 +702,55 @@
         scroll.dispose();
       }
     });
-    return runtime2;
+    return runtime;
   }
 
   // src/chatgpt/adapter.js
-  var TURN = '[data-testid^="conversation-turn-"]';
+  var TURN = '[data-turn-key], [data-testid^="conversation-turn-"]';
+  var TURN_ROOT = '[data-thread-find-target="conversation"]';
   var ROLE = "[data-message-author-role]";
   var BLOCKS = "h1,h2,h3,h4,h5,h6,p,li,pre,table,img,blockquote";
-  var USER = '[data-message-author-role="user"]';
-  var COMPOSER = "#prompt-textarea";
+  var USER = '[data-message-author-role="user"], [data-user-message-bubble]';
+  var REPLY = "[data-conversation-role]";
+  var COMPOSER = '#prompt-textarea, [data-chatgpt-composer] [contenteditable="true"], form [contenteditable="true"][role="textbox"]';
   var SEND = 'button[data-testid="send-button"]';
   var STOP = 'button[data-testid="stop-button"]';
+  var SCROLLER = "[data-scroll-root], [data-app-action-timeline-scroll]";
+  var nonEmptyRole = (el2, sel, attr) => (el2.matches(sel) ? el2 : el2.querySelector(sel))?.getAttribute(attr) || null;
   var chatgptAdapter = {
     turns: (root) => [...root.querySelectorAll(TURN)],
-    role: (turn) => (turn.matches(ROLE) ? turn : turn.querySelector(ROLE))?.getAttribute("data-message-author-role") || null,
+    role: (turn) => nonEmptyRole(turn, ROLE, "data-message-author-role") ?? (turn.querySelector("[data-user-message-bubble]") ? "user" : nonEmptyRole(turn, REPLY, "data-conversation-role")),
     blocks: (turnEls) => turnEls.flatMap((el2) => [...el2.querySelectorAll(BLOCKS)]),
-    composer: (doc) => doc.querySelector(COMPOSER)?.closest("form") ?? doc.querySelector(COMPOSER),
     // Queue transport (live dispatcher): the editable composer input and its Send/Stop buttons.
     composerInput: (doc) => doc.querySelector(COMPOSER),
     sendButton: (doc) => doc.querySelector(SEND),
     stopButton: (doc) => doc.querySelector(STOP),
     userTurnCount: (doc) => doc.querySelectorAll(USER).length,
     userMessage: (turn) => turn.querySelector(USER),
-    turnId: (turn, index) => turn.getAttribute("data-testid") ?? `turn-${index}`,
+    turnId: (turn, index) => turn.getAttribute("data-turn-key") ?? turn.getAttribute("data-testid") ?? `turn-${index}`,
+    /** The stable element whose subtree contains every turn; observed for new turns. */
+    turnRoot: (doc) => doc.querySelector(TURN_ROOT) ?? doc.querySelector(TURN)?.parentElement ?? null,
     /** The element the queue panel is inserted directly before: the composer form, else the input itself. */
     composer: (doc) => doc.querySelector(COMPOSER)?.closest("form") ?? doc.querySelector(COMPOSER),
     conversationId: (win) => win.location.pathname.match(/^\/c\/([\w-]+)/)?.[1] ?? "new",
-    scroller: (doc) => doc.querySelector("[data-scroll-root]") ?? doc.scrollingElement ?? doc.documentElement,
+    scroller: (doc) => doc.querySelector(SCROLLER) ?? doc.scrollingElement ?? doc.documentElement,
+    /** Identity of the pieces the script attaches to; a change means the page re-rendered or navigated. */
+    layout(doc, win) {
+      const first = doc.querySelector(TURN);
+      return {
+        route: this.conversationId(win),
+        composer: doc.querySelector(COMPOSER),
+        container: first ? this.turnRoot(doc) : null,
+        scroller: first ? this.scroller(doc) : null
+      };
+    },
+    /** `ok` means the composer is there (a new chat has no turns); `hasTurns` selects the full feature set. */
     selfCheck(doc) {
+      const hasTurns = !!doc.querySelector(TURN);
       const missing = [];
-      if (!doc.querySelector(TURN)) missing.push("turns");
       if (!doc.querySelector(COMPOSER)) missing.push("composer");
-      return { ok: missing.length === 0, missing };
+      if (!hasTurns) missing.push("turns");
+      return { ok: !missing.includes("composer"), hasTurns, missing };
     }
   };
 
@@ -977,6 +1189,34 @@
     /** Renews the lease; call periodically while this tab is the active sender. */
     async heartbeat(conversationId) {
       return (await this.#acquire(conversationId)).ok;
+    }
+    /**
+     * A new chat has no conversation id until its first send creates one. Once that send happened
+     * (an item of the draft conversation is sending, sent or awaiting review), the rest of the draft
+     * queue belongs to the conversation that send created. Moves every item and the paused flag in
+     * one transaction and returns how many items moved; 0 when no send happened (the queue then stays put).
+     */
+    adoptAfterFirstSend(from, to) {
+      return this.#serial(
+        from,
+        () => this.#store.transact(async (tx) => {
+          const moving = await tx.itemsOf(from);
+          const created = moving.some((i) => i.status === "sending" || i.status === "sent" || i.status === "manual-review");
+          if (!created || from === to) return 0;
+          const existing = await tx.itemsOf(to);
+          const base = existing.length ? existing[existing.length - 1].position + 1 : 0;
+          const first = moving[0].position;
+          for (const item of moving) {
+            await tx.putItem({ ...item, conversationId: to, position: base + (item.position - first), version: item.version + 1, updatedAt: this.#clock.now() });
+          }
+          const draft = await tx.getQueue(from);
+          if (draft?.paused) {
+            await tx.putQueue({ conversationId: to, paused: true });
+            await tx.putQueue({ conversationId: from, paused: false });
+          }
+          return moving.length;
+        })
+      );
     }
     release(conversationId) {
       return this.#store.transact(async (tx) => {
@@ -1721,8 +1961,13 @@
         if (!engine || model.interrupting) return;
         const current = adapter.conversationId(win);
         if (current !== conversationId) {
-          await engine.release(conversationId).catch(() => void 0);
+          const previous = conversationId;
+          await engine.release(previous).catch(() => void 0);
           conversationId = current;
+          if (previous === "new" && current !== "new") {
+            const moved = await engine.adoptAfterFirstSend(previous, current).catch(() => 0);
+            if (moved) diagnostics?.count("queue.adopted");
+          }
           model.edit = null;
         }
         const home = adapter.composer(doc);
@@ -1780,6 +2025,21 @@
     return message ? { message, action: "" } : null;
   }
   var CSS_ESCAPE = (value) => value.replace(/["\\]/g, "\\$&");
+
+  // src/chatgpt/queue/persistent.js
+  function persistentQueueUi(create) {
+    let shared = null;
+    const mount = (ctx) => {
+      if (!shared?.mounted) shared = create(ctx);
+      return { ...shared, dispose() {
+      } };
+    };
+    mount.shutdown = () => {
+      shared?.dispose();
+      shared = null;
+    };
+    return mount;
+  }
 
   // src/chatgpt/rail/minimap-model.js
   var HEADING = /^H[1-6]$/;
@@ -1924,13 +2184,13 @@
     return { title, preview };
   }
   var clamp2 = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
-  function createRail({ win, adapter, runtime: runtime2 }) {
+  function createRail({ win, adapter, runtime }) {
     const doc = win.document;
     const scroller = adapter.scroller(doc);
-    const scroll = runtime2.scroll;
+    const scroll = runtime.scroll;
     let els = [];
     let prompts = [];
-    let signature = "";
+    let signature = null;
     let query = "";
     let activeId = null;
     let open = false;
@@ -1939,6 +2199,9 @@
     let listPinned = true;
     let listManual = false;
     let modelKey = "";
+    let modelBuiltAt = -Infinity;
+    let forceModel = false;
+    let trailing = null;
     let scheduled = false;
     let disposed = false;
     let drag = false;
@@ -1989,20 +2252,21 @@
     };
     function setOpen(next) {
       open = next;
-      root.dataset.gsOpen = String(next);
-      toggle.setAttribute("aria-expanded", String(next));
+      if (root.dataset.gsOpen !== String(next)) root.dataset.gsOpen = String(next);
+      if (toggle.getAttribute("aria-expanded") !== String(next)) toggle.setAttribute("aria-expanded", String(next));
     }
     function layout() {
       const first = els[0];
       const gutter = first ? win.innerWidth - first.getBoundingClientRect().right : win.innerWidth;
       const docked = win.innerWidth >= DOCK_MIN_VIEWPORT && gutter >= RAIL_WIDTH + 24;
       const was = root.dataset.gsMode;
-      root.dataset.gsMode = docked ? "docked" : "collapsed";
+      if (was !== (docked ? "docked" : "collapsed")) root.dataset.gsMode = docked ? "docked" : "collapsed";
       if (docked) setOpen(true);
       else if (was === "docked") setOpen(false);
       const composer = adapter.composer(doc);
       const rect = composer?.getBoundingClientRect();
-      root.style.setProperty("--gs-rail-bottom", rect?.height ? `${Math.max(16, Math.round(win.innerHeight - rect.top + 8))}px` : "96px");
+      const bottom = rect?.height ? `${Math.max(16, Math.round(win.innerHeight - rect.top + 8))}px` : "96px";
+      if (root.style.getPropertyValue("--gs-rail-bottom") !== bottom) root.style.setProperty("--gs-rail-bottom", bottom);
     }
     function promptEnd(i) {
       return (prompts[i + 1]?.turnIndex ?? els.length) - 1;
@@ -2098,8 +2362,19 @@
       const ext = turnExtent();
       if (!ext || overviewCard.dataset.gsCollapsed === "true") return;
       const key = `${activeId}:${els.slice(prompts[ext.i].turnIndex, promptEnd(ext.i) + 1).map((e) => e.textContent.length).join(",")}`;
-      if (key !== modelKey) {
+      const now = win.performance.now();
+      const throttled = key !== modelKey && modelKey !== "" && modelKey.startsWith(`${activeId}:`) && now - modelBuiltAt < 500 && !forceModel;
+      if (throttled && !trailing) {
+        trailing = win.setTimeout(() => {
+          trailing = null;
+          forceModel = true;
+          schedule();
+        }, 500);
+      }
+      if (key !== modelKey && !throttled) {
+        forceModel = false;
         modelKey = key;
+        modelBuiltAt = now;
         const model = buildTurnModel(adapter.blocks(els.slice(prompts[ext.i].turnIndex, promptEnd(ext.i) + 1)));
         bars.textContent = "";
         for (const b of layoutBars(model)) {
@@ -2118,11 +2393,13 @@
         viewBottom: sTop + scrollerHeight()
       });
       view.hidden = !ind;
-      caption.textContent = `Drag to navigate \u2022 ${ind ? Math.round(ind.visible * 100) : 0}% visible`;
+      const text = `Drag to navigate \u2022 ${ind ? Math.round(ind.visible * 100) : 0}% visible`;
+      if (caption.textContent !== text) caption.textContent = text;
       if (ind) {
         view.style.top = `${(ind.top * 100).toFixed(2)}%`;
         view.style.height = `${(ind.height * 100).toFixed(2)}%`;
-        minimap.setAttribute("aria-valuenow", String(Math.round(ind.top * 100)));
+        const now2 = String(Math.round(ind.top * 100));
+        if (minimap.getAttribute("aria-valuenow") !== now2) minimap.setAttribute("aria-valuenow", now2);
       }
     }
     function scrollerHeight() {
@@ -2170,7 +2447,7 @@
       listManual = false;
       markActive();
       const el2 = els[p.turnIndex];
-      if (el2) runtime2.navigateTo(el2, { offset: 0 });
+      if (el2) runtime.navigateTo(el2, { offset: 0 });
       modelKey = "";
       renderMinimap();
     }
@@ -2281,9 +2558,9 @@
     });
     on(win, "resize", () => layout());
     cleanups.push(scroll.onScroll(schedule));
-    cleanups.push(runtime2.onIndexChange(refresh));
-    cleanups.push(runtime2.onFallback(() => api.dispose()));
-    refresh(runtime2.promptIndex);
+    cleanups.push(runtime.onIndexChange(refresh));
+    cleanups.push(runtime.onFallback(() => api.dispose()));
+    refresh(runtime.promptIndex);
     listPinned = true;
     list.scrollTop = list.scrollHeight;
     update();
@@ -2298,6 +2575,7 @@
       update,
       dispose() {
         disposed = true;
+        if (trailing) win.clearTimeout(trailing);
         cleanups.forEach((fn) => fn());
         root.remove();
         style.remove();
@@ -2317,11 +2595,13 @@
   function discover(doc, adapter) {
     const els = adapter.turns(doc);
     if (!els.length) return { reason: "no-turns" };
-    const parent = els[0].parentElement;
-    if (!parent || els.some((e) => e.parentElement !== parent)) return { reason: "turns-not-siblings" };
+    const parent = adapter.turnRoot(doc);
+    if (!parent || els.some((e) => !parent.contains(e))) return { reason: "turns-outside-root", els };
+    const scroller = adapter.scroller(doc);
+    if (scroller !== doc.documentElement && scroller !== doc.scrollingElement && !scroller.contains(parent)) return { reason: "root-outside-scroller", els };
     const turns = groupTurns(els, adapter.role);
     if (!turns) return { reason: "unknown-role" };
-    return { parent, turns };
+    return { parent, turns, els };
   }
   function createTurnBackend() {
     let api = null;
@@ -2390,7 +2670,7 @@
       scroll.restore();
       schedule();
     });
-    const stopObserving = observers.subscribe(parent, () => refresh(), { childList: true });
+    const stopObserving = observers.subscribe(parent, () => refresh(), { childList: true, subtree: true });
     function observe(el2, on) {
       if (on && !observed.has(el2)) {
         observed.add(el2);
@@ -2479,6 +2759,9 @@
     }
     function refresh() {
       if (disposed) return;
+      const current = adapter.turns(doc);
+      const flat = allElements();
+      if (current.length === flat.length && current.every((el2, i) => el2 === flat[i]) && adapter.turnRoot(doc) === parent) return;
       const next = discover(doc, adapter);
       if (!next.parent || next.parent !== parent) return fallback?.(next.reason ?? "container-changed");
       const wasAtLatest = windowStart + size >= turns.length;
@@ -2539,8 +2822,25 @@
   }
 
   // src/chatgpt/main.js
-  var queueUi = ({ win, adapter, diagnostics, config }) => createQueueUi({ win, adapter, diagnostics, dispatcher: selectDispatcher({ config, win, adapter }) });
-  var runtime = createRuntime({ win: window, adapter: chatgptAdapter, backend: createTurnBackend(), queueUi });
-  if (runtime.mode === "active") createRail({ win: window, adapter: chatgptAdapter, runtime });
-  window.__ghostshipUserscripts = { version: "0.6.0", mode: runtime.mode, diagnostics: () => runtime.diagnostics.snapshot() };
+  var queueUi = persistentQueueUi(
+    ({ win, adapter, diagnostics, config }) => createQueueUi({ win, adapter, diagnostics, dispatcher: selectDispatcher({ config, win, adapter }) })
+  );
+  var boot = createBoot({
+    win: window,
+    adapter: chatgptAdapter,
+    version: "0.6.1",
+    onDispose: () => queueUi.shutdown(),
+    mount() {
+      const runtime = createRuntime({ win: window, adapter: chatgptAdapter, backend: createTurnBackend(), queueUi });
+      const rail = runtime.mode === "active" || runtime.mode === "composer-only" ? createRail({ win: window, adapter: chatgptAdapter, runtime }) : null;
+      return {
+        runtime,
+        dispose() {
+          rail?.dispose();
+          runtime.dispose();
+        }
+      };
+    }
+  });
+  window.__ghostshipUserscripts = boot.health;
 })();

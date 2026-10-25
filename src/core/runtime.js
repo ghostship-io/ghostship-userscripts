@@ -20,18 +20,40 @@ export function createRuntime({ win, adapter, backend = createNoopBackend(), que
     return runtime;
   }
 
+  // Independent of virtualization: a failure here removes only the queue panel.
+  const mountQueue = () => {
+    try {
+      return queueUi?.({ win, adapter, config, diagnostics }) ?? { dispose() {} };
+    } catch (error) {
+      diagnostics.count("queue.mount.failed");
+      diagnostics.warnOnce("queue", `queue UI disabled (${error instanceof Error ? error.message : error})`);
+      return { dispose() {} };
+    }
+  };
+
+  // A new chat has a composer but no turns: queue only, and an inert scroll/index surface for the rail.
+  if (!check.hasTurns) {
+    const queue = mountQueue();
+
+    const none = () => () => {};
+    Object.assign(runtime, {
+      mode: "composer-only",
+      queue,
+      scroll: { onScroll: none, scrollTo: () => false, navigateTo: () => false, stats: {} },
+      onIndexChange: none,
+      onFallback: none,
+      navigateTo: () => false,
+      dispose: () => queue.dispose(),
+    });
+    diagnostics.count("runtime.composer-only");
+    return runtime;
+  }
+
   const observers = createObserverHub({ max: config.maxObservers, MutationObserverCtor: win.MutationObserver, schedule: (fn) => win.setTimeout(fn, 16), diagnostics });
   const scroll = createScrollManager({ scroller: adapter.scroller(win.document), diagnostics });
   assertBackend(backend);
 
-  // Independent of virtualization: a failure here removes only the queue panel.
-  let queue = { dispose() {} };
-  try {
-    queue = queueUi?.({ win, adapter, config, diagnostics }) ?? queue;
-  } catch (error) {
-    diagnostics.count("queue.mount.failed");
-    diagnostics.warnOnce("queue", `queue UI disabled (${error instanceof Error ? error.message : error})`);
-  }
+  const queue = mountQueue();
 
   // Fail open: drop every hook and leave native ChatGPT behaviour in place.
   let stop = () => {};

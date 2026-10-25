@@ -87,7 +87,7 @@ export function createRail({ win, adapter, runtime }) {
   const scroll = runtime.scroll;
   let els = [];
   let prompts = [];
-  let signature = "";
+  let signature = null;
   let query = "";
   let activeId = null;
   let open = false;
@@ -96,6 +96,9 @@ export function createRail({ win, adapter, runtime }) {
   let listPinned = true;
   let listManual = false;
   let modelKey = "";
+  let modelBuiltAt = -Infinity;
+  let forceModel = false;
+  let trailing = null;
   let scheduled = false;
   let disposed = false;
   let drag = false;
@@ -149,10 +152,11 @@ export function createRail({ win, adapter, runtime }) {
     cleanups.push(() => target.removeEventListener(type, fn, opts));
   };
 
+  // Change-only DOM writes everywhere: an idle or streaming page must see no writes from the rail.
   function setOpen(next) {
     open = next;
-    root.dataset.gsOpen = String(next);
-    toggle.setAttribute("aria-expanded", String(next));
+    if (root.dataset.gsOpen !== String(next)) root.dataset.gsOpen = String(next);
+    if (toggle.getAttribute("aria-expanded") !== String(next)) toggle.setAttribute("aria-expanded", String(next));
   }
 
   /** Dock only when the free right gutter fits the rail; otherwise collapse to the toggle. */
@@ -161,12 +165,13 @@ export function createRail({ win, adapter, runtime }) {
     const gutter = first ? win.innerWidth - first.getBoundingClientRect().right : win.innerWidth;
     const docked = win.innerWidth >= DOCK_MIN_VIEWPORT && gutter >= RAIL_WIDTH + 24;
     const was = root.dataset.gsMode;
-    root.dataset.gsMode = docked ? "docked" : "collapsed";
+    if (was !== (docked ? "docked" : "collapsed")) root.dataset.gsMode = docked ? "docked" : "collapsed";
     if (docked) setOpen(true);
     else if (was === "docked") setOpen(false);
     const composer = adapter.composer(doc);
     const rect = composer?.getBoundingClientRect();
-    root.style.setProperty("--gs-rail-bottom", rect?.height ? `${Math.max(16, Math.round(win.innerHeight - rect.top + 8))}px` : "96px");
+    const bottom = rect?.height ? `${Math.max(16, Math.round(win.innerHeight - rect.top + 8))}px` : "96px";
+    if (root.style.getPropertyValue("--gs-rail-bottom") !== bottom) root.style.setProperty("--gs-rail-bottom", bottom);
   }
 
   function promptEnd(i) {
@@ -271,8 +276,20 @@ export function createRail({ win, adapter, runtime }) {
     const ext = turnExtent();
     if (!ext || overviewCard.dataset.gsCollapsed === "true") return;
     const key = `${activeId}:${els.slice(prompts[ext.i].turnIndex, promptEnd(ext.i) + 1).map((e) => e.textContent.length).join(",")}`;
-    if (key !== modelKey) {
+    // A growing (streaming) turn rebuilds its overview at most twice a second.
+    const now = win.performance.now();
+    const throttled = key !== modelKey && modelKey !== "" && modelKey.startsWith(`${activeId}:`) && now - modelBuiltAt < 500 && !forceModel;
+    if (throttled && !trailing) {
+      trailing = win.setTimeout(() => {
+        trailing = null;
+        forceModel = true;
+        schedule();
+      }, 500);
+    }
+    if (key !== modelKey && !throttled) {
+      forceModel = false;
       modelKey = key;
+      modelBuiltAt = now;
       const model = buildTurnModel(adapter.blocks(els.slice(prompts[ext.i].turnIndex, promptEnd(ext.i) + 1)));
       bars.textContent = "";
       for (const b of layoutBars(model)) {
@@ -291,11 +308,14 @@ export function createRail({ win, adapter, runtime }) {
       viewBottom: sTop + scrollerHeight(),
     });
     view.hidden = !ind;
-    caption.textContent = `Drag to navigate • ${ind ? Math.round(ind.visible * 100) : 0}% visible`;
+    // Only write on change: any DOM write under body re-triggers the prompt-index observer.
+    const text = `Drag to navigate • ${ind ? Math.round(ind.visible * 100) : 0}% visible`;
+    if (caption.textContent !== text) caption.textContent = text;
     if (ind) {
       view.style.top = `${(ind.top * 100).toFixed(2)}%`;
       view.style.height = `${(ind.height * 100).toFixed(2)}%`;
-      minimap.setAttribute("aria-valuenow", String(Math.round(ind.top * 100)));
+      const now = String(Math.round(ind.top * 100));
+      if (minimap.getAttribute("aria-valuenow") !== now) minimap.setAttribute("aria-valuenow", now);
     }
   }
 
@@ -484,6 +504,7 @@ export function createRail({ win, adapter, runtime }) {
     update,
     dispose() {
       disposed = true;
+      if (trailing) win.clearTimeout(trailing);
       cleanups.forEach((fn) => fn());
       root.remove();
       style.remove();

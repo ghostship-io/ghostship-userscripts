@@ -75,7 +75,7 @@ export function createScrollManager({ scroller, diagnostics, clock, intentMs = 3
     for (const el of anchors()) {
       const r = el.getBoundingClientRect();
       if (r.bottom > base + EPS) {
-        anchor = { el, key: el.getAttribute("data-testid") ?? "", offset: r.top - base };
+        anchor = { el, key: el.getAttribute("data-turn-key") ?? el.getAttribute("data-testid") ?? "", offset: r.top - base };
         return anchor;
       }
     }
