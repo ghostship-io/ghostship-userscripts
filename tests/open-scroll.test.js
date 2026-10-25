@@ -134,3 +134,101 @@ test("returning to a conversation restores its saved reading position instead of
   ui.rail.dispose();
   ui.runtime.dispose();
 });
+
+/** Hold the open-selection timers (500 ms settle, 1500 ms follow) so a test decides when time passes. */
+function holdOpenTimers(fx) {
+  const held = [];
+  const real = fx.win.setTimeout;
+  fx.win.setTimeout = (fn, ms) => (ms === 500 || ms === 1500 ? held.push({ fn, ms }) : real(fn, ms));
+  return {
+    held,
+    /** Let the oldest pending timer fire (stale ones are ignored by the rail). */
+    async fire(fx2 = fx) {
+      held.splice(0).forEach((t) => t.fn());
+      await fx2.settle();
+    },
+  };
+}
+const lastRow = (fx) => [...fx.doc.querySelectorAll(".gs-prompt")].at(-1);
+const current = (fx) => fx.doc.querySelector('.gs-prompt[aria-current="true"]');
+
+test("on open it waits for the page to settle, then selects the last prompt like a click on it", async () => {
+  const fx = createFixture({ ...LONG, turns: 30 });
+  const t = holdOpenTimers(fx);
+  fx.setTop(fx.maxTop() - 3000); // the page opens somewhere that is not the newest prompt's start
+  const { moved } = mount(fx);
+  await fx.settle();
+  assert.equal(moved(), 0, "nothing happens before the page has settled");
+  assert.ok(t.held.some((x) => x.ms === 500), "waiting for the list to stay unchanged");
+  await t.fire();
+  assert.equal(moved(), 1);
+  assert.equal(current(fx), lastRow(fx), "the last entry of the Prompts list is selected");
+  assert.equal(fx.rawTop(), Math.min(fx.maxTop(), fx.topOf(last(fx))), "and its start is at the top");
+  assert.equal(fx.doc.querySelector(".gs-view").hidden, false, "the minimap follows the selection");
+});
+
+test("while more prompts keep loading it re-targets the new last prompt, then stops once the list settles", async () => {
+  const fx = createFixture({ ...LONG, turns: 30 });
+  const t = holdOpenTimers(fx);
+  const { moved } = mount(fx);
+  await fx.settle();
+  // More prompts load before the page has settled: only the final last prompt is targeted.
+  fx.addTurn();
+  fx.thread.append(fx.doc.createComment("loaded"));
+  await fx.settle();
+  fx.addTurn();
+  fx.thread.append(fx.doc.createComment("loaded"));
+  await fx.settle();
+  assert.equal(moved(), 0);
+  await t.fire();
+  assert.equal(moved(), 1);
+  assert.equal(current(fx), lastRow(fx));
+  assert.equal(fx.doc.querySelectorAll(".gs-prompt").length, 32);
+  // Still following: another prompt loads after the first selection, so the new last one is selected.
+  fx.addTurn();
+  fx.thread.append(fx.doc.createComment("loaded"));
+  await fx.settle();
+  await t.fire();
+  assert.equal(moved(), 2, "re-targeted");
+  assert.equal(current(fx), lastRow(fx));
+  assert.equal(fx.doc.querySelectorAll(".gs-prompt").length, 33);
+  // The follow window ends with no further change: it stops, and later prompts are left alone.
+  await t.fire();
+  const top = fx.rawTop();
+  fx.addTurn();
+  fx.thread.append(fx.doc.createComment("loaded"));
+  await fx.settle();
+  await t.fire();
+  assert.equal(moved(), 2, "no retargeting after it settled");
+  assert.equal(fx.rawTop(), top);
+});
+
+test("any user action ends it: scrolling, a click, a key press or a touch", async () => {
+  for (const act of [(fx) => fx.wheel(-300), (fx) => fx.doc.body.dispatchEvent(new fx.win.Event("pointerdown", { bubbles: true })), (fx) => fx.doc.body.dispatchEvent(new fx.win.Event("keydown", { bubbles: true })), (fx) => fx.doc.body.dispatchEvent(new fx.win.Event("touchstart", { bubbles: true }))]) {
+    const fx = createFixture({ ...LONG, turns: 30 });
+    const t = holdOpenTimers(fx);
+    const { moved } = mount(fx);
+    await fx.settle();
+    act(fx);
+    await fx.settle();
+    const where = fx.rawTop();
+    await t.fire();
+    fx.addTurn();
+    fx.thread.append(fx.doc.createComment("loaded"));
+    await fx.settle();
+    await t.fire();
+    assert.equal(moved(), 0);
+    assert.equal(fx.rawTop(), where, "the user's position is kept");
+  }
+});
+
+test("a short conversation still selects its last prompt without moving the page", async () => {
+  const fx = createFixture({ turns: 3, width: 1600, markup: "real" });
+  const t = holdOpenTimers(fx);
+  mount(fx);
+  await fx.settle();
+  const events = fx.scrollEvents.length;
+  await t.fire();
+  assert.equal(current(fx), lastRow(fx));
+  assert.equal(fx.scrollEvents.length, events);
+});
