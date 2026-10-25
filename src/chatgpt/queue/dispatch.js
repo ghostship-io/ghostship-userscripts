@@ -95,6 +95,8 @@ function describe(error) {
  * `generating` is the externally visible state tests and the engine observe.
  */
 export class DryRunDispatcher {
+  /** Lets the UI label the queue as not sending anything. */
+  dryRun = true;
   log = [];
   state;
   submitScript = [];

@@ -1,0 +1,102 @@
+// Gate (a), page level: the built userscript, run against fixtures, must not
+// click native Send/Stop, submit, touch the network or move the viewport on its own.
+import test from "node:test";
+import assert from "node:assert/strict";
+import { bundleSource, createFixture, installPageGuards, runBundle } from "./harness.js";
+
+const boot = async (options = {}) => {
+  const fx = createFixture({ turns: 40, ...options });
+  const guards = installPageGuards(fx);
+  const health = runBundle(fx);
+  await fx.settle();
+  return { fx, guards, health };
+};
+
+test("canary: the page guards really detect a native Send click, a stop click and every network API", () => {
+  const fx = createFixture({ turns: 4 });
+  const guards = installPageGuards(fx);
+  guards.send().click();
+  guards.stop().click();
+  fx.doc.getElementById("composer").requestSubmit();
+  assert.throws(() => fx.win.fetch("/backend-api/conversation"), /blocked fetch/);
+  assert.throws(() => new fx.win.XMLHttpRequest(), /blocked XMLHttpRequest/);
+  assert.throws(() => new fx.win.WebSocket("wss://example.invalid"), /blocked WebSocket/);
+  assert.throws(() => fx.win.navigator.sendBeacon("/x"), /blocked sendBeacon/);
+  assert.deepEqual(guards.report(), {
+    nativeClicks: ["send-button", "stop-button"],
+    formSubmits: 2, // the Send click submits the form, then requestSubmit()
+    network: ["fetch", "XMLHttpRequest", "WebSocket", "sendBeacon"],
+  });
+  assert.equal(guards.isClean(), false);
+});
+
+test("bundle: contains no network, submit or synthetic-click primitive", () => {
+  const code = bundleSource().replace(/\/\/.*$/gm, "");
+  assert.doesNotMatch(code, /\b(fetch|XMLHttpRequest|WebSocket|EventSource|sendBeacon|GM_xmlhttpRequest|requestSubmit)\b|\.click\(\)|dispatchEvent\(\s*new (Mouse|Pointer)Event|\.submit\(\)/);
+  assert.doesNotMatch(code, /send-button|stop-button/, "the shipped script does not know the native Send/Stop controls yet");
+});
+
+test("boot: activates on a long thread without any traffic, click or scroll", async () => {
+  const { fx, guards, health } = await boot();
+  assert.equal(health.mode, "active");
+  assert.deepEqual(guards.report(), { nativeClicks: [], formSubmits: 0, network: [] });
+  assert.equal(fx.scrollEvents.length, 0);
+});
+
+test("streaming while reading the bottom and an older turn: no scroll movement, no traffic", async () => {
+  const { fx, guards } = await boot();
+  const bottom = fx.rawTop();
+  const eventsAtStart = fx.scrollEvents.length;
+  for (let i = 0; i < 30; i++) {
+    fx.stream(fx.thread.lastElementChild, 20);
+    fx.pageAutoscroll();
+    if (i % 10 === 9) fx.addTurn();
+    await fx.settle();
+  }
+  assert.equal(fx.rawTop(), bottom, "page autoscroll at the bottom is blocked");
+  assert.equal(fx.scrollEvents.length, eventsAtStart);
+
+  fx.wheel(-4000);
+  await fx.settle();
+  const anchor = fx.anchor();
+  const events = fx.scrollEvents.length;
+  for (let i = 0; i < 20; i++) {
+    fx.stream(fx.thread.lastElementChild, 25);
+    fx.pageAutoscroll();
+    await fx.settle();
+  }
+  assert.deepEqual(fx.anchor(), anchor, "the reading position keeps its exact pixel offset");
+  assert.equal(fx.scrollEvents.length, events);
+  assert.equal(guards.isClean(), true, JSON.stringify(guards.report()));
+});
+
+test("React remount of every turn, new turns and composer typing: still no scroll, click or traffic", async () => {
+  const { fx, guards } = await boot();
+  fx.wheel(-2500);
+  await fx.settle();
+  const anchor = fx.anchor();
+  const events = fx.scrollEvents.length;
+  fx.remount();
+  await fx.settle();
+  fx.addTurn();
+  fx.doc.getElementById("prompt-textarea").value = "draft that must stay a draft";
+  fx.doc.getElementById("prompt-textarea").dispatchEvent(new fx.win.Event("input", { bubbles: true }));
+  await fx.settle();
+  assert.deepEqual(fx.anchor(), anchor);
+  assert.equal(fx.scrollEvents.length, events);
+  assert.equal(fx.doc.getElementById("prompt-textarea").value, "draft that must stay a draft");
+  assert.equal(guards.isClean(), true, JSON.stringify(guards.report()));
+});
+
+test("broken ChatGPT markup: the script fails closed (safe mode), leaves the page untouched and sends nothing", async () => {
+  const fx = createFixture({ turns: 12, markup: "no-role" });
+  const guards = installPageGuards(fx);
+  const before = fx.doc.documentElement.outerHTML;
+  const health = runBundle(fx);
+  await fx.settle();
+  assert.equal(health.mode, "safe");
+  assert.equal(fx.doc.documentElement.outerHTML, before);
+  fx.scroller.scrollTop = 100;
+  assert.equal(fx.rawTop(), 100, "native scrolling is not intercepted");
+  assert.equal(guards.isClean(), true, JSON.stringify(guards.report()));
+});
