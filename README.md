@@ -33,4 +33,6 @@ npm ci
 npm test
 ```
 
-Builds, then runs unit tests and DOM-fixture tests (jsdom) and the repository checks (manifest, dist freshness and hashes, no network primitives, public-repo hygiene). No test contacts chatgpt.com.
+Run `npm run gate` for the dry-run acceptance gate (bundled script against fixtures, queue fault injection; no live traffic) and see `docs/profiling.md` for the read-only real-thread profiling procedure.
+
+`npm test` builds, then runs unit tests and DOM-fixture tests (jsdom) and the repository checks (manifest, dist freshness and hashes, no network primitives, public-repo hygiene). No test contacts chatgpt.com.
