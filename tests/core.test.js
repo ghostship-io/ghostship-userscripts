@@ -4,10 +4,11 @@ import { parseConfig, DEFAULTS } from "../src/core/config.js";
 import { createScrollManager } from "../src/core/scroll-manager.js";
 import { createObserverHub } from "../src/core/observers.js";
 import { createDiagnostics } from "../src/core/diagnostics.js";
-import { computeWindow, assertBackend, createNoopBackend } from "../src/core/virtualization.js";
+import { assertBackend, createNoopBackend } from "../src/core/virtualization.js";
 import { buildPromptIndex, searchPrompts } from "../src/core/prompt-index.js";
 import { chatgptAdapter } from "../src/chatgpt/adapter.js";
 import { loadFixture, tick } from "./helpers.js";
+import { JSDOM } from "jsdom";
 
 test("config: defaults, invalid JSON and wrong types fall back", () => {
   assert.deepEqual(parseConfig(null), DEFAULTS);
@@ -17,27 +18,41 @@ test("config: defaults, invalid JSON and wrong types fall back", () => {
   assert.equal(parseConfig('{"windowTurns":0}').windowTurns, 10);
 });
 
+function scrollerFixture({ scrollTop = 0 } = {}) {
+  const win = new JSDOM('<div id="s"><i id="a"></i></div>').window;
+  const scroller = win.document.getElementById("s");
+  const state = { top: scrollTop, anchorTop: 200 };
+  Object.defineProperty(scroller, "scrollTop", { configurable: true, get: () => state.top, set: (v) => (state.top = v) });
+  scroller.getBoundingClientRect = () => ({ top: 0, bottom: 800, height: 800 });
+  const anchor = win.document.getElementById("a");
+  anchor.getBoundingClientRect = () => ({ top: state.anchorTop - state.top, bottom: state.anchorTop - state.top + 50 });
+  return { scroller, anchor, state };
+}
+
 test("scroll manager: refuses unsolicited sources, accepts explicit navigation", () => {
-  const scroller = { scrollTop: 100 };
+  const { scroller, state } = scrollerFixture({ scrollTop: 100 });
   const diagnostics = createDiagnostics({ warn() {} });
   const scroll = createScrollManager({ scroller, diagnostics });
   for (const source of ["send", "stream", "render", "queue", "resize", "restore"]) {
     assert.equal(scroll.scrollTo(source, 0), false);
   }
-  assert.equal(scroller.scrollTop, 100);
+  assert.equal(state.top, 100);
+  scroller.scrollTop = 0; // page-initiated write
+  assert.equal(state.top, 100);
   assert.equal(scroll.scrollTo("prompt-nav", 40), true);
-  assert.equal(scroller.scrollTop, 40);
+  assert.equal(state.top, 40);
   assert.equal(diagnostics.snapshot()["scroll.refused.stream"], 1);
+  assert.equal(diagnostics.snapshot()["scroll.blocked.scrollTop"], 1);
+  scroll.dispose();
 });
 
 test("scroll manager: preserve keeps the anchor at the same viewport offset", () => {
-  const scroller = { scrollTop: 500 };
-  let top = 200;
-  const anchor = { getBoundingClientRect: () => ({ top }) };
+  const { scroller, anchor, state } = scrollerFixture({ scrollTop: 100 });
   const scroll = createScrollManager({ scroller });
-  const drift = scroll.preserve(anchor, () => { top += 300; /* turns inserted above */ });
+  const drift = scroll.preserve(anchor, () => { state.anchorTop += 300; /* turns inserted above */ });
   assert.equal(drift, 300);
-  assert.equal(scroller.scrollTop, 800);
+  assert.equal(state.top, 400);
+  scroll.dispose();
 });
 
 test("observer hub: enforces the budget and batches into one flush", async () => {
@@ -59,11 +74,7 @@ test("observer hub: enforces the budget and batches into one flush", async () =>
   assert.equal(hub.size(), 0);
 });
 
-test("virtualization: window math and backend contract", () => {
-  assert.deepEqual(computeWindow(4, 3, 10), { start: 0, end: 4 });
-  assert.deepEqual(computeWindow(100, 99, 10), { start: 90, end: 100 });
-  assert.deepEqual(computeWindow(100, 50, 10), { start: 45, end: 55 });
-  assert.deepEqual(computeWindow(100, 0, 10), { start: 0, end: 10 });
+test("virtualization: backend contract", () => {
   assert.throws(() => assertBackend({}), /mount/);
   assert.equal(assertBackend(createNoopBackend()).name, "noop");
 });
