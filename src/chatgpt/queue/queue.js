@@ -266,7 +266,7 @@ export class QueueEngine {
       const gate = this.#gate(view, false);
       if (gate) return gate;
 
-      const ready = await this.#dispatch.readiness(target);
+      const ready = await this.#dispatch.readiness(target, view.pending.text);
       if (ready.state === "waiting") return { kind: "waiting", reason: ready.reason };
       if (ready.state === "blocked") return this.#hold(target, view.pending, ready);
 
@@ -351,7 +351,11 @@ export class QueueEngine {
     if (inflight?.status === "manual-review") return { kind: "halted", itemId: inflight.id, status: "manual-review" };
     if (inflight) return { kind: "busy", itemId: inflight.id };
     if (!pending) return { kind: "idle" };
-    if (pending.status !== "pending") return { kind: "halted", itemId: pending.id, status: pending.status };
+    // A hold for a transient reason (placement, Send, composer) lifts on an explicit Steer / Interrupt: the user
+    // looked and chose. Files that cannot be restored stay held until they are dropped or the prompt is deleted.
+    if (pending.status !== "pending" && !(explicit && pending.lastError?.code !== "attachments-not-restorable")) {
+      return { kind: "halted", itemId: pending.id, status: pending.status };
+    }
     if (view.editing) return explicit ? { kind: "editing" } : { kind: "waiting", reason: "editing" };
     if (view.paused && !explicit) return { kind: "paused" };
     return null;
