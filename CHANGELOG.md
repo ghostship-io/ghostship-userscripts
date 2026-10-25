@@ -6,6 +6,10 @@ Agents add entries under Unreleased and never touch version fields. After a merg
 
 - On opening a conversation the script now waits for the page to settle, then selects the last prompt in the Prompts list like a click on it, and keeps re-targeting the newest last prompt while more prompts load until the list settles; any scroll, click, key or touch from the user ends it (#629).
 
+## [0.7.3] - 2026-10-25
+
+- The minimap keeps the conversation's real aspect ratio inside a bordered frame on a recessed track (the "Conversation view"), with the viewport box inside the frame, instead of stretching to the pane width (#628).
+
 ## [0.7.2] - 2026-10-25
 
 - Fix the queue's false "could not place the text in the composer" error (#630): the staged text is read back after the editor has applied it instead of once, immediately; a composer that already holds exactly the queued text counts as placed and is sent; a genuinely missing placement is waited out twice before the prompt is held. A held prompt no longer disables Steer, Interrupt & Send Next or Pause, and Retry works without a reload.
