@@ -9,6 +9,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "bump": "node scripts/bump.mjs",
+    "gate": "node scripts/gate.mjs",
     "test": "npm run build --silent && node --test \"tests/*.test.js\""
   },
   "devDependencies": {

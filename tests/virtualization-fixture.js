@@ -15,7 +15,7 @@ export function createFixture({ turns = 40, viewport = 800, markup = "chatgpt" }
       <div id="scroller" data-scroll-root style="overflow-y:auto"><main id="thread"></main></div>
       <form id="composer"><textarea id="prompt-textarea"></textarea></form>
     </body></html>`,
-    { pretendToBeVisual: false },
+    { pretendToBeVisual: false, runScripts: "outside-only", url: "https://chatgpt.com/c/fixture" },
   );
   const win = dom.window;
   const doc = win.document;
@@ -136,6 +136,7 @@ export function createFixture({ turns = 40, viewport = 800, markup = "chatgpt" }
   sim.top = maxTop();
 
   const api = {
+    dom,
     win,
     doc,
     scroller,
