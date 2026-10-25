@@ -6,6 +6,7 @@
 - Profiling: `docs/profiling.md`. `profiling/measure.js` must stay read-only (a test scans it); run it against real threads only as that document says.
 - Commit `dist/` with every source change (`npm run build`); CI fails on a stale `dist/`. Bump the version with `npm run bump -- <id> <patch|minor|major>`; managers ignore non-increasing versions.
 - ResizeObserver is allowed only in `src/chatgpt/virtualization/backend.js` (active turn elements only); everything else observes through the hub.
+- Startup is `src/core/boot.js`: it waits (one bounded observer, visible give-up) for the layout, restarts on route changes and root replacement, and a composer without turns (new chat) runs composer-only. Never add a one-shot layout check at script start.
 - All scroll writes go through `src/core/scroll-manager.js`; all DOM observation through `src/core/observers.js`; all ChatGPT selectors live in `src/chatgpt/adapter.js`.
 - Public repository: no private data, profile paths, account names, tokens or personal identifiers anywhere (code, fixtures, commits, issues).
 - Keep `@grant none` unless a review justifies a grant.

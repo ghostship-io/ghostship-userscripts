@@ -21,7 +21,7 @@ export function createFixture({ turns = 40, viewport = 800, markup = "chatgpt", 
   win.innerWidth = width;
   const doc = win.document;
   const scroller = doc.getElementById("scroller");
-  const thread = doc.getElementById("thread");
+  let thread = doc.getElementById("thread");
   const clock = { t: 0, now: () => clock.t };
   const sim = { top: 0 };
   const scrollEvents = [];
@@ -160,9 +160,28 @@ export function createFixture({ turns = 40, viewport = 800, markup = "chatgpt", 
     win,
     doc,
     scroller,
-    thread,
+    get thread() {
+      return thread;
+    },
     clock,
     scrollEvents,
+    /** The conversation root swapped for a new element, as a route change can do. */
+    replaceThread(count = 0) {
+      const next = doc.createElement("main");
+      next.id = "thread";
+      thread.replaceWith(next);
+      thread = next;
+      for (let i = 0; i < count; i++) addTurn(i);
+      sim.top = Math.min(sim.top, maxTop());
+    },
+    removeComposer() {
+      const form = doc.getElementById("composer");
+      form.remove();
+      return form;
+    },
+    addComposer(form) {
+      doc.body.append(form);
+    },
     addTurn: () => addTurn(thread.children.length),
     elements: () => [...thread.children],
     setHeight(el, h) {

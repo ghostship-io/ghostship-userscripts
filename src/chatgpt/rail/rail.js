@@ -87,7 +87,7 @@ export function createRail({ win, adapter, runtime }) {
   const scroll = runtime.scroll;
   let els = [];
   let prompts = [];
-  let signature = "";
+  let signature = null;
   let query = "";
   let activeId = null;
   let open = false;

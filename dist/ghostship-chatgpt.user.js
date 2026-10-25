@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GhostShip ChatGPT
 // @namespace    https://github.com/ghostship-io/ghostship-userscripts
-// @version      0.5.1
+// @version      0.5.2
 // @description  Fast, queue-aware ChatGPT interface for the owner browser.
 // @match        https://chatgpt.com/*
 // @grant        none
@@ -11,6 +11,199 @@
 // ==/UserScript==
 
 (() => {
+  // src/core/diagnostics.js
+  function createDiagnostics(log = console) {
+    const counters = /* @__PURE__ */ new Map();
+    const warned = /* @__PURE__ */ new Set();
+    return {
+      count(name, n = 1) {
+        counters.set(name, (counters.get(name) ?? 0) + n);
+      },
+      warnOnce(key, message) {
+        if (warned.has(key)) return;
+        warned.add(key);
+        log.warn(`[ghostship] ${message}`);
+      },
+      snapshot() {
+        return Object.fromEntries(counters);
+      }
+    };
+  }
+
+  // src/core/boot.js
+  var BOOT_DEFAULTS = Object.freeze({ maxWaitMs: 3e4, settleMs: 100 });
+  function createBoot({ win, adapter, mount, version, maxWaitMs = BOOT_DEFAULTS.maxWaitMs, settleMs = BOOT_DEFAULTS.settleMs, timers }) {
+    const doc = win.document;
+    const t = timers ?? {
+      setTimeout: (fn, ms) => win.setTimeout(fn, ms),
+      clearTimeout: (id) => win.clearTimeout(id),
+      now: () => win.performance.now()
+    };
+    const diagnostics = createDiagnostics(win.console);
+    const state = { phase: "waiting", reason: null, missing: [], attempts: 0, waitStart: t.now(), route: "new", turns: false };
+    let current = null;
+    let failedLayout = null;
+    let observer = null;
+    let debounce = null;
+    let giveUpTimer = null;
+    let disposed = false;
+    const sameLayout = (a, b) => !!a && !!b && a.route === b.route && a.composer === b.composer && a.container === b.container && a.scroller === b.scroller;
+    function watch(on) {
+      if (on && !observer && !disposed) {
+        observer = new win.MutationObserver(() => schedule());
+        observer.observe(doc.body, { childList: true, subtree: true });
+      } else if (!on && observer) {
+        observer.disconnect();
+        observer = null;
+      }
+    }
+    function schedule() {
+      if (debounce !== null || disposed) return;
+      debounce = t.setTimeout(() => {
+        debounce = null;
+        tick();
+      }, settleMs);
+    }
+    function teardown() {
+      const old = current;
+      current = null;
+      try {
+        old?.handle.dispose();
+      } catch (error) {
+        diagnostics.count("boot.dispose.failed");
+      }
+    }
+    function startWaiting(reason) {
+      state.phase = "waiting";
+      state.reason = reason;
+      state.waitStart = t.now();
+      state.attempts = 0;
+      t.clearTimeout(giveUpTimer);
+      giveUpTimer = t.setTimeout(giveUp, maxWaitMs);
+      watch(true);
+    }
+    function giveUp() {
+      giveUpTimer = null;
+      if (disposed || current) return;
+      const check = adapter.selfCheck(doc);
+      if (check.ok) return tick();
+      state.phase = "timeout";
+      state.reason = "timeout";
+      state.missing = check.missing;
+      diagnostics.count("boot.timeout");
+      diagnostics.warnOnce("boot-timeout", `ChatGPT layout not found after ${Math.round(maxWaitMs / 1e3)}s (${check.missing.join(", ")}); the script stays idle until the page route changes`);
+      watch(false);
+    }
+    function start(layout, check) {
+      state.attempts++;
+      try {
+        const handle = mount();
+        current = { handle, layout };
+        const mode = handle.runtime.mode;
+        state.reason = null;
+        if (mode === "off") {
+          state.phase = "off";
+          watch(false);
+        } else if (mode === "safe") {
+          failedLayout = layout;
+          state.phase = "running";
+        } else {
+          state.phase = "running";
+        }
+        t.clearTimeout(giveUpTimer);
+        giveUpTimer = null;
+      } catch (error) {
+        failedLayout = layout;
+        state.phase = "error";
+        state.reason = "mount-error";
+        diagnostics.count("boot.mount.failed");
+        diagnostics.warnOnce("boot-mount", `startup failed (${error instanceof Error ? error.message : error}); running without the script`);
+      }
+      state.missing = check.missing;
+    }
+    function tick() {
+      if (disposed) return;
+      const layout = adapter.layout(doc, win);
+      const check = adapter.selfCheck(doc);
+      state.route = layout.route === "new" ? "new" : "conversation";
+      state.turns = check.hasTurns;
+      if (state.phase === "off") return;
+      if (current) {
+        state.missing = check.missing;
+        if (sameLayout(current.layout, layout)) {
+          if (current.handle.runtime.mode === "safe") failedLayout = layout;
+          return;
+        }
+        diagnostics.count("boot.restart");
+        teardown();
+        failedLayout = null;
+        startWaiting("restart");
+      }
+      if (sameLayout(failedLayout, layout)) return;
+      failedLayout = null;
+      if (!check.ok) {
+        state.missing = check.missing;
+        return;
+      }
+      start(layout, check);
+    }
+    const onRoute = () => {
+      if (state.phase === "timeout") startWaiting("route");
+      schedule();
+    };
+    const history = win.history;
+    const originals = {};
+    for (const name of ["pushState", "replaceState"]) {
+      originals[name] = history[name];
+      const wrapped = function(...args) {
+        const result = originals[name].apply(this, args);
+        onRoute();
+        return result;
+      };
+      history[name] = wrapped;
+      originals[name + "Wrapped"] = wrapped;
+    }
+    win.addEventListener("popstate", onRoute);
+    win.addEventListener("hashchange", onRoute);
+    startWaiting(null);
+    tick();
+    const health = {
+      version,
+      get mode() {
+        if (current) return current.handle.runtime.mode;
+        return state.phase === "timeout" || state.phase === "error" ? "safe" : state.phase === "off" ? "off" : "waiting";
+      },
+      get missing() {
+        return [...state.missing];
+      },
+      get reason() {
+        return state.reason;
+      },
+      get route() {
+        return state.route;
+      },
+      get attempts() {
+        return state.attempts;
+      },
+      diagnostics: () => ({ ...diagnostics.snapshot(), ...current?.handle.runtime.diagnostics.snapshot() ?? {} })
+    };
+    return {
+      health,
+      runtime: () => current?.handle.runtime ?? null,
+      dispose() {
+        if (disposed) return;
+        disposed = true;
+        watch(false);
+        t.clearTimeout(debounce);
+        t.clearTimeout(giveUpTimer);
+        win.removeEventListener("popstate", onRoute);
+        win.removeEventListener("hashchange", onRoute);
+        for (const name of ["pushState", "replaceState"]) if (history[name] === originals[name + "Wrapped"]) history[name] = originals[name];
+        teardown();
+      }
+    };
+  }
+
   // src/core/config.js
   var CONFIG_KEY = "ghostship:userscripts:config";
   var DEFAULTS = Object.freeze({
@@ -43,25 +236,6 @@
     } catch {
       return { ...DEFAULTS };
     }
-  }
-
-  // src/core/diagnostics.js
-  function createDiagnostics(log = console) {
-    const counters = /* @__PURE__ */ new Map();
-    const warned = /* @__PURE__ */ new Set();
-    return {
-      count(name, n = 1) {
-        counters.set(name, (counters.get(name) ?? 0) + n);
-      },
-      warnOnce(key, message) {
-        if (warned.has(key)) return;
-        warned.add(key);
-        log.warn(`[ghostship] ${message}`);
-      },
-      snapshot() {
-        return Object.fromEntries(counters);
-      }
-    };
   }
 
   // src/core/observers.js
@@ -429,27 +603,47 @@
   // src/core/runtime.js
   function createRuntime({ win, adapter, backend = createNoopBackend(), queueUi: queueUi2, config = loadConfig(win.localStorage) }) {
     const diagnostics = createDiagnostics(win.console);
-    const runtime2 = { config, diagnostics, mode: "off", promptIndex: [], dispose() {
+    const runtime = { config, diagnostics, mode: "off", promptIndex: [], dispose() {
     } };
-    if (!config.enabled) return runtime2;
+    if (!config.enabled) return runtime;
     const check = adapter.selfCheck(win.document);
     if (!check.ok) {
-      runtime2.mode = "safe";
+      runtime.mode = "safe";
       diagnostics.count("selfcheck.failed");
       diagnostics.warnOnce("selfcheck", `ChatGPT layout not recognised (${check.missing.join(", ")}); running in safe mode`);
-      return runtime2;
+      return runtime;
+    }
+    const mountQueue = () => {
+      try {
+        return queueUi2?.({ win, adapter, config, diagnostics }) ?? { dispose() {
+        } };
+      } catch (error) {
+        diagnostics.count("queue.mount.failed");
+        diagnostics.warnOnce("queue", `queue UI disabled (${error instanceof Error ? error.message : error})`);
+        return { dispose() {
+        } };
+      }
+    };
+    if (!check.hasTurns) {
+      const queue2 = mountQueue();
+      const none = () => () => {
+      };
+      Object.assign(runtime, {
+        mode: "composer-only",
+        queue: queue2,
+        scroll: { onScroll: none, scrollTo: () => false, navigateTo: () => false, stats: {} },
+        onIndexChange: none,
+        onFallback: none,
+        navigateTo: () => false,
+        dispose: () => queue2.dispose()
+      });
+      diagnostics.count("runtime.composer-only");
+      return runtime;
     }
     const observers = createObserverHub({ max: config.maxObservers, MutationObserverCtor: win.MutationObserver, schedule: (fn) => win.setTimeout(fn, 16), diagnostics });
     const scroll = createScrollManager({ scroller: adapter.scroller(win.document), diagnostics });
     assertBackend(backend);
-    let queue = { dispose() {
-    } };
-    try {
-      queue = queueUi2?.({ win, adapter, config, diagnostics }) ?? queue;
-    } catch (error) {
-      diagnostics.count("queue.mount.failed");
-      diagnostics.warnOnce("queue", `queue UI disabled (${error instanceof Error ? error.message : error})`);
-    }
+    const queue = mountQueue();
     let stop = () => {
     };
     const indexListeners = /* @__PURE__ */ new Set();
@@ -462,23 +656,23 @@
       backend.unmount();
       observers.disposeAll();
       scroll.dispose();
-      Object.assign(runtime2, { mode: "safe", scroll: void 0, observers: void 0, navigateTo: void 0, onIndexChange: void 0, dispose: () => queue.dispose() });
+      Object.assign(runtime, { mode: "safe", scroll: void 0, observers: void 0, navigateTo: void 0, onIndexChange: void 0, dispose: () => queue.dispose() });
       diagnostics.count("virtualization.fallback");
       diagnostics.warnOnce("virtualization", `virtualization disabled (${reason}); running in safe mode`);
     };
     const mounted = backend.mount({ doc: win.document, adapter, scroll, observers, config, diagnostics, fallback: failOpen });
     if (mounted?.active === false) {
       failOpen(mounted.reason);
-      return runtime2;
+      return runtime;
     }
     const reindex = () => {
-      runtime2.promptIndex = buildPromptIndex(win.document, adapter);
+      runtime.promptIndex = buildPromptIndex(win.document, adapter);
       diagnostics.count("index.rebuilt");
-      indexListeners.forEach((fn) => fn(runtime2.promptIndex));
+      indexListeners.forEach((fn) => fn(runtime.promptIndex));
     };
     reindex();
     stop = observers.subscribe(win.document.body, reindex);
-    Object.assign(runtime2, {
+    Object.assign(runtime, {
       mode: "active",
       scroll,
       /** Subscribe to prompt-index rebuilds; returns an unsubscribe. */
@@ -506,7 +700,7 @@
         scroll.dispose();
       }
     });
-    return runtime2;
+    return runtime;
   }
 
   // src/chatgpt/adapter.js
@@ -519,18 +713,29 @@
     turns: (root) => [...root.querySelectorAll(TURN)],
     role: (turn) => (turn.matches(ROLE) ? turn : turn.querySelector(ROLE))?.getAttribute("data-message-author-role") || null,
     blocks: (turnEls) => turnEls.flatMap((el2) => [...el2.querySelectorAll(BLOCKS)]),
-    composer: (doc) => doc.querySelector(COMPOSER)?.closest("form") ?? doc.querySelector(COMPOSER),
     userMessage: (turn) => turn.querySelector(USER),
     turnId: (turn, index) => turn.getAttribute("data-testid") ?? `turn-${index}`,
     /** The element the queue panel is inserted directly before: the composer form, else the input itself. */
     composer: (doc) => doc.querySelector(COMPOSER)?.closest("form") ?? doc.querySelector(COMPOSER),
     conversationId: (win) => win.location.pathname.match(/^\/c\/([\w-]+)/)?.[1] ?? "new",
     scroller: (doc) => doc.querySelector("[data-scroll-root]") ?? doc.scrollingElement ?? doc.documentElement,
+    /** Identity of the pieces the script attaches to; a change means the page re-rendered or navigated. */
+    layout(doc, win) {
+      const first = doc.querySelector(TURN);
+      return {
+        route: this.conversationId(win),
+        composer: doc.querySelector(COMPOSER),
+        container: first?.parentElement ?? null,
+        scroller: first ? this.scroller(doc) : null
+      };
+    },
+    /** `ok` means the composer is there (a new chat has no turns); `hasTurns` selects the full feature set. */
     selfCheck(doc) {
+      const hasTurns = !!doc.querySelector(TURN);
       const missing = [];
-      if (!doc.querySelector(TURN)) missing.push("turns");
       if (!doc.querySelector(COMPOSER)) missing.push("composer");
-      return { ok: missing.length === 0, missing };
+      if (!hasTurns) missing.push("turns");
+      return { ok: !missing.includes("composer"), hasTurns, missing };
     }
   };
 
@@ -1829,13 +2034,13 @@
     return { title, preview };
   }
   var clamp2 = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
-  function createRail({ win, adapter, runtime: runtime2 }) {
+  function createRail({ win, adapter, runtime }) {
     const doc = win.document;
     const scroller = adapter.scroller(doc);
-    const scroll = runtime2.scroll;
+    const scroll = runtime.scroll;
     let els = [];
     let prompts = [];
-    let signature = "";
+    let signature = null;
     let query = "";
     let activeId = null;
     let open = false;
@@ -2075,7 +2280,7 @@
       listManual = false;
       markActive();
       const el2 = els[p.turnIndex];
-      if (el2) runtime2.navigateTo(el2, { offset: 0 });
+      if (el2) runtime.navigateTo(el2, { offset: 0 });
       modelKey = "";
       renderMinimap();
     }
@@ -2186,9 +2391,9 @@
     });
     on(win, "resize", () => layout());
     cleanups.push(scroll.onScroll(schedule));
-    cleanups.push(runtime2.onIndexChange(refresh));
-    cleanups.push(runtime2.onFallback(() => api.dispose()));
-    refresh(runtime2.promptIndex);
+    cleanups.push(runtime.onIndexChange(refresh));
+    cleanups.push(runtime.onFallback(() => api.dispose()));
+    refresh(runtime.promptIndex);
     listPinned = true;
     list.scrollTop = list.scrollHeight;
     update();
@@ -2448,7 +2653,21 @@
     if (!config.dryRun) diagnostics.warnOnce("queue-live", "live queue transport is not available; running the queue in dry-run mode");
     return createQueueUi({ win, adapter, diagnostics, dispatcher: new DryRunDispatcher() });
   };
-  var runtime = createRuntime({ win: window, adapter: chatgptAdapter, backend: createTurnBackend(), queueUi });
-  if (runtime.mode === "active") createRail({ win: window, adapter: chatgptAdapter, runtime });
-  window.__ghostshipUserscripts = { version: "0.5.1", mode: runtime.mode, diagnostics: () => runtime.diagnostics.snapshot() };
+  var boot = createBoot({
+    win: window,
+    adapter: chatgptAdapter,
+    version: "0.5.2",
+    mount() {
+      const runtime = createRuntime({ win: window, adapter: chatgptAdapter, backend: createTurnBackend(), queueUi });
+      const rail = runtime.mode === "active" || runtime.mode === "composer-only" ? createRail({ win: window, adapter: chatgptAdapter, runtime }) : null;
+      return {
+        runtime,
+        dispose() {
+          rail?.dispose();
+          runtime.dispose();
+        }
+      };
+    }
+  });
+  window.__ghostshipUserscripts = boot.health;
 })();
