@@ -7,10 +7,14 @@
       "id": "ghostship-chatgpt",
       "name": "GhostShip ChatGPT",
       "description": "Fast, queue-aware ChatGPT interface for the owner browser.",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "entry": "src/chatgpt/main.js",
-      "match": ["https://chatgpt.com/*"],
-      "grant": ["none"],
+      "match": [
+        "https://chatgpt.com/*"
+      ],
+      "grant": [
+        "none"
+      ],
       "runAt": "document-idle"
     }
   ]

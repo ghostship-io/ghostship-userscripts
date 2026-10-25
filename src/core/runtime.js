@@ -23,14 +23,30 @@ export function createRuntime({ win, adapter, backend = createNoopBackend(), con
   const observers = createObserverHub({ max: config.maxObservers, MutationObserverCtor: win.MutationObserver, schedule: (fn) => win.setTimeout(fn, 16), diagnostics });
   const scroll = createScrollManager({ scroller: adapter.scroller(win.document), diagnostics });
   assertBackend(backend);
-  backend.mount({ doc: win.document, scroll, observers, config, diagnostics });
+
+  // Fail open: drop every hook and leave native ChatGPT behaviour in place.
+  let stop = () => {};
+  const failOpen = (reason) => {
+    stop();
+    backend.unmount();
+    observers.disposeAll();
+    scroll.dispose();
+    Object.assign(runtime, { mode: "safe", scroll: undefined, observers: undefined, dispose() {} });
+    diagnostics.count("virtualization.fallback");
+    diagnostics.warnOnce("virtualization", `virtualization disabled (${reason}); running in safe mode`);
+  };
+  const mounted = backend.mount({ doc: win.document, adapter, scroll, observers, config, diagnostics, fallback: failOpen });
+  if (mounted?.active === false) {
+    failOpen(mounted.reason);
+    return runtime;
+  }
 
   const reindex = () => {
     runtime.promptIndex = buildPromptIndex(win.document, adapter);
     diagnostics.count("index.rebuilt");
   };
   reindex();
-  const stop = observers.subscribe(win.document.body, reindex);
+  stop = observers.subscribe(win.document.body, reindex);
 
   Object.assign(runtime, {
     mode: "active",
@@ -40,6 +56,7 @@ export function createRuntime({ win, adapter, backend = createNoopBackend(), con
       stop();
       observers.disposeAll();
       backend.unmount();
+      scroll.dispose();
     },
   });
   return runtime;

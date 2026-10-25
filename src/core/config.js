@@ -5,6 +5,7 @@ export const DEFAULTS = Object.freeze({
   enabled: true,
   dryRun: true,
   windowTurns: 10,
+  prefetchTurns: 2,
   maxObservers: 4,
   debug: false,
 });
@@ -21,6 +22,7 @@ export function parseConfig(raw) {
     if (typeof stored[key] === typeof DEFAULTS[key]) out[key] = stored[key];
   }
   if (!Number.isInteger(out.windowTurns) || out.windowTurns < 1) out.windowTurns = DEFAULTS.windowTurns;
+  if (!Number.isInteger(out.prefetchTurns) || out.prefetchTurns < 0) out.prefetchTurns = DEFAULTS.prefetchTurns;
   if (!Number.isInteger(out.maxObservers) || out.maxObservers < 1) out.maxObservers = DEFAULTS.maxObservers;
   return out;
 }
