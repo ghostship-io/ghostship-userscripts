@@ -104,7 +104,7 @@ export function actionBlocker(model) {
   if (model.edit) return "Save or cancel the edit first.";
   if (!model.pending) return "Nothing is queued.";
   if (model.inflight) return model.inflight.status === "sending" ? "The previous message is still being sent." : "Resolve the message that needs review first.";
-  if (model.pending.status !== "pending") return "Resolve the hold on the queued prompt first.";
+  if (model.pending.status !== "pending" && model.pending.lastError?.code === "attachments-not-restorable") return "Send without the files or delete the prompt first.";
   return null;
 }
 
@@ -153,7 +153,6 @@ export function renderPanel(doc, root, model, on) {
       }),
       button(doc, "head:pause", [icon(doc, model.paused ? "play" : "pause"), model.paused ? "Resume" : "Pause"], () => on.togglePause(), {
         label: model.paused ? "Resume the queue" : "Pause the queue",
-        disabled: pending.status !== "pending",
       }),
     );
   }
