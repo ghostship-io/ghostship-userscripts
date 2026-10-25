@@ -260,6 +260,20 @@ describe("Interrupt & Send Next", () => {
     });
   }
 
+  it("renews the lease after a slow stop instead of losing the send", async () => {
+    // Defect: a stop that outlives the lease TTL making the confirmed interrupt unsendable.
+    const w = new World();
+    const { engine } = await w.tab("A", { leaseTtlMs: 5_000 });
+    const a = await engine.enqueue(CONV, { text: "a" });
+    w.dispatcher.state = "generating";
+    const original = w.dispatcher.stop.bind(w.dispatcher);
+    w.dispatcher.stop = async (req) => {
+      w.clock.advance(9_000);
+      return original(req);
+    };
+    assert.deepEqual(await engine.interruptAndSendNext(CONV), { kind: "sent", itemId: a.id });
+  });
+
   it("halts instead of skipping an item that needs attention", async () => {
     // Defect: jumping past a failed head to send a later item.
     const { w, engine, a } = await setup();

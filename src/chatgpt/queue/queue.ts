@@ -238,6 +238,7 @@ export class QueueEngine {
     return this.#serial(conversationId, async (): Promise<InterruptOutcome> => {
       const lease = await this.#acquire(conversationId);
       if (!lease.ok) return lease.outcome;
+      let token = lease.token;
       const view = await this.#view(conversationId);
       const gate = this.#headGate(view.head);
       if (gate) return gate;
@@ -250,14 +251,18 @@ export class QueueEngine {
       if (state === "generating") {
         const stop = await this.#dispatch.stop(conversationId);
         if (stop.kind !== "confirmed") return this.#interruptFailed(head, stop.code, stop.message);
+        // The stop may have outlived the lease; renew (or lose it to another tab) before claiming.
+        const renewed = await this.#acquire(conversationId);
+        if (!renewed.ok) return renewed.outcome;
+        token = renewed.token;
         const after = await this.#view(conversationId);
         const next = after.head;
         if (!next || next.id !== head.id || next.version !== head.version || next.status !== "pending") {
           return { kind: "interrupt-aborted", reason: "head-changed" };
         }
-        return this.#send(next, lease.token);
+        return this.#send(next, token);
       }
-      return this.#send(head, lease.token);
+      return this.#send(head, token);
     });
   }
 
