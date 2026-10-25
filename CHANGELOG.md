@@ -4,6 +4,8 @@ Agents add entries under Unreleased and never touch version fields. After a merg
 
 ## Unreleased
 
+## [0.7.3] - 2026-10-25
+
 - The minimap keeps the conversation's real aspect ratio inside a bordered frame on a recessed track (the "Conversation view"), with the viewport box inside the frame, instead of stretching to the pane width (#628).
 
 ## [0.7.2] - 2026-10-25
