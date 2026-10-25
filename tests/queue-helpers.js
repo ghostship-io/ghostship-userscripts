@@ -1,23 +1,22 @@
 import { IDBFactory } from "fake-indexeddb";
-import { DispatchBoundary, DryRunDispatcher } from "../dispatch.ts";
-import { QueueEngine, type QueueEngineOptions } from "../queue.ts";
-import { QueueStore } from "../store.ts";
-import type { Clock } from "../types.ts";
+import { DispatchBoundary, DryRunDispatcher } from "../src/chatgpt/queue/dispatch.js";
+import { QueueEngine } from "../src/chatgpt/queue/queue.js";
+import { QueueStore } from "../src/chatgpt/queue/store.js";
 
-export class ManualClock implements Clock {
+export class ManualClock {
   t = 1_000_000;
-  #timers: { at: number; fn: () => void; live: boolean }[] = [];
+  #timers = [];
   now() {
     return this.t;
   }
-  after(ms: number, fn: () => void) {
+  after(ms, fn) {
     const timer = { at: this.t + ms, fn, live: true };
     this.#timers.push(timer);
     return () => {
       timer.live = false;
     };
   }
-  advance(ms: number) {
+  advance(ms) {
     this.t += ms;
     for (const timer of this.#timers.filter((x) => x.live && x.at <= this.t)) {
       timer.live = false;
@@ -31,14 +30,9 @@ export async function settle(times = 20) {
   for (let i = 0; i < times; i++) await new Promise((resolve) => setImmediate(resolve));
 }
 
-export async function until(condition: () => boolean) {
+export async function until(condition) {
   for (let i = 0; i < 200 && !condition(); i++) await settle(1);
   if (!condition()) throw new Error("condition never became true");
-}
-
-export interface Tab {
-  engine: QueueEngine;
-  store: QueueStore;
 }
 
 export class World {
@@ -47,7 +41,7 @@ export class World {
   dispatcher = new DryRunDispatcher();
   #n = 0;
   /** A new tab/restart: its own store connection and engine over the shared database. */
-  async tab(tabId: string, overrides: Partial<QueueEngineOptions> = {}, dispatcher = this.dispatcher): Promise<Tab> {
+  async tab(tabId, overrides = {}, dispatcher = this.dispatcher) {
     const store = await QueueStore.open(this.factory);
     const engine = new QueueEngine({
       store,

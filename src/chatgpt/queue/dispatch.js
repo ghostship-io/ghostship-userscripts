@@ -1,54 +1,11 @@
-import type { AttachmentRef, Clock } from "./types.ts";
-
 /** What ChatGPT is doing right now, as the adapter can best tell. */
-export type GenerationState = "idle" | "generating" | "unknown";
-
-export interface SubmitRequest {
-  itemId: string; // stable idempotency key
-  attemptId: string;
-  conversationId: string;
-  text: string;
-  attachments: AttachmentRef[];
-}
-
-export interface StopRequest {
-  conversationId: string;
-}
 
 /** `rejected` means the message definitely did not leave; `uncertain` means it may have. */
-export type SubmitResult =
-  | { kind: "accepted" }
-  | { kind: "rejected"; code: string; message: string; retryable: boolean }
-  | { kind: "uncertain"; code: string; message: string };
-
-export type StopResult =
-  | { kind: "confirmed" }
-  | { kind: "failed"; code: string; message: string }
-  | { kind: "ambiguous"; code: string; message: string };
 
 /**
  * The only thing that touches ChatGPT. A live adapter (later packet) clicks
  * Send/Stop; `DryRunDispatcher` has no side effects at all.
  */
-export interface DispatchAdapter {
-  readState(conversationId: string): Promise<GenerationState>;
-  submit(request: SubmitRequest): Promise<SubmitResult>;
-  stop(request: StopRequest): Promise<StopResult>;
-}
-
-export type BoundaryStopResult =
-  | { kind: "confirmed" }
-  | { kind: "failed"; code: string; message: string }
-  | { kind: "timeout"; code: "stop-timeout"; message: string }
-  | { kind: "ambiguous"; code: string; message: string };
-
-export interface BoundaryOptions {
-  clock: Clock;
-  submitTimeoutMs?: number;
-  stopTimeoutMs?: number;
-  /** Observes every action just before it reaches the adapter. */
-  onAction?: (action: { type: "submit" | "stop"; conversationId: string; itemId?: string }) => void;
-}
 
 const TIMED_OUT = Symbol("timed-out");
 
@@ -59,15 +16,15 @@ const TIMED_OUT = Symbol("timed-out");
  * only `confirmed` once the adapter also reports the conversation idle).
  */
 export class DispatchBoundary {
-  readonly #adapter: DispatchAdapter;
-  readonly #opts: Required<Omit<BoundaryOptions, "onAction">> & Pick<BoundaryOptions, "onAction">;
+  #adapter;
+  #opts;
 
-  constructor(adapter: DispatchAdapter, opts: BoundaryOptions) {
+  constructor(adapter, opts) {
     this.#adapter = adapter;
     this.#opts = { submitTimeoutMs: 10_000, stopTimeoutMs: 10_000, ...opts };
   }
 
-  async readState(conversationId: string): Promise<GenerationState> {
+  async readState(conversationId) {
     try {
       return await this.#adapter.readState(conversationId);
     } catch {
@@ -75,7 +32,7 @@ export class DispatchBoundary {
     }
   }
 
-  async submit(request: SubmitRequest): Promise<SubmitResult> {
+  async submit(request) {
     this.#opts.onAction?.({ type: "submit", conversationId: request.conversationId, itemId: request.itemId });
     try {
       const result = await this.#race(this.#adapter.submit(request), this.#opts.submitTimeoutMs);
@@ -88,9 +45,9 @@ export class DispatchBoundary {
     }
   }
 
-  async stop(conversationId: string): Promise<BoundaryStopResult> {
+  async stop(conversationId) {
     this.#opts.onAction?.({ type: "stop", conversationId });
-    let result: StopResult | typeof TIMED_OUT;
+    let result;
     try {
       result = await this.#race(this.#adapter.stop({ conversationId }), this.#opts.stopTimeoutMs);
     } catch (error) {
@@ -111,7 +68,7 @@ export class DispatchBoundary {
     return result;
   }
 
-  #race<T>(work: Promise<T>, ms: number): Promise<T | typeof TIMED_OUT> {
+  #race(work, ms) {
     return new Promise((resolve, reject) => {
       const cancel = this.#opts.clock.after(ms, () => resolve(TIMED_OUT));
       work.then(
@@ -119,7 +76,7 @@ export class DispatchBoundary {
           cancel();
           resolve(value);
         },
-        (error: unknown) => {
+        (error) => {
           cancel();
           reject(error);
         },
@@ -128,72 +85,66 @@ export class DispatchBoundary {
   }
 }
 
-function describe(error: unknown): string {
+function describe(error) {
   return error instanceof Error ? error.message : String(error);
 }
-
-export type ScriptedOutcome<T> = T | Error | "hang";
-
-export type DispatchLogEntry =
-  | { type: "submit"; request: SubmitRequest }
-  | { type: "stop"; request: StopRequest };
 
 /**
  * No-side-effect adapter: records every action and answers from a script.
  * Defaults model a healthy ChatGPT (submit starts generation, stop ends it).
  * `generating` is the externally visible state tests and the engine observe.
  */
-export class DryRunDispatcher implements DispatchAdapter {
-  readonly log: DispatchLogEntry[] = [];
-  state: GenerationState;
-  submitScript: ScriptedOutcome<SubmitResult>[] = [];
-  stopScript: ScriptedOutcome<StopResult>[] = [];
+export class DryRunDispatcher {
+  log = [];
+  state;
+  submitScript = [];
+  stopScript = [];
   /** Set to make `readState` throw (adapter cannot tell). */
-  stateError: Error | null = null;
-  #stateOverrides: GenerationState[] = [];
+  stateError = null;
+  #stateOverrides = [];
 
-  constructor(initial: GenerationState = "idle") {
+  constructor(initial = "idle") {
     this.state = initial;
   }
 
   /** Queue one-shot answers for the next `readState` calls (race injection). */
-  overrideState(...states: GenerationState[]): void {
+  overrideState(...states) {
     this.#stateOverrides.push(...states);
   }
 
-  async readState(): Promise<GenerationState> {
+  async readState() {
     if (this.stateError) throw this.stateError;
     return this.#stateOverrides.shift() ?? this.state;
   }
 
-  async submit(request: SubmitRequest): Promise<SubmitResult> {
+  async submit(request) {
     this.log.push({ type: "submit", request });
-    const outcome = this.submitScript.shift() ?? ({ kind: "accepted" } as const);
+    const outcome = this.submitScript.shift() ?? { kind: "accepted" };
     const result = await play(outcome);
     if (result.kind === "accepted") this.state = "generating";
     return result;
   }
 
-  async stop(request: StopRequest): Promise<StopResult> {
+  async stop(request) {
     this.log.push({ type: "stop", request });
-    const outcome = this.stopScript.shift() ?? ({ kind: "confirmed" } as const);
+    const outcome = this.stopScript.shift() ?? { kind: "confirmed" };
     const result = await play(outcome);
     if (result.kind === "confirmed") this.state = "idle";
     return result;
   }
 
   /** The response finished on its own. */
-  finishGeneration(): void {
+  finishGeneration() {
     this.state = "idle";
   }
 
-  actions(): string[] {
+  actions() {
     return this.log.map((entry) => (entry.type === "submit" ? `submit:${entry.request.itemId}` : "stop"));
   }
 }
 
-async function play<T>(outcome: ScriptedOutcome<T>): Promise<T> {
-  if (outcome === "hang") return new Promise<T>(() => undefined);
+async function play(outcome) {
+  if (outcome === "hang") return new Promise(() => undefined);
   if (outcome instanceof Error) throw outcome;
   return outcome;
 }

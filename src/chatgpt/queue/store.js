@@ -1,9 +1,7 @@
-import type { ConversationQueueState, LeaseRecord, QueueItem } from "./types.ts";
-
 const DB_NAME = "ghostship-chatgpt-queue";
 const DB_VERSION = 1;
 
-function request<T>(req: IDBRequest<T>): Promise<T> {
+function request(req) {
   return new Promise((resolve, reject) => {
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -12,40 +10,38 @@ function request<T>(req: IDBRequest<T>): Promise<T> {
 
 /** Typed accessors valid only inside one `QueueStore.transact` callback. */
 export class Tx {
-  readonly #tx: IDBTransaction;
-  constructor(tx: IDBTransaction) {
+  #tx;
+  constructor(tx) {
     this.#tx = tx;
   }
 
-  getItem(id: string): Promise<QueueItem | undefined> {
+  getItem(id) {
     return request(this.#tx.objectStore("items").get(id));
   }
-  putItem(item: QueueItem): Promise<IDBValidKey> {
+  putItem(item) {
     return request(this.#tx.objectStore("items").put(item));
   }
-  deleteItem(id: string): Promise<undefined> {
+  deleteItem(id) {
     return request(this.#tx.objectStore("items").delete(id));
   }
   /** Items of one conversation ordered by position. */
-  async itemsOf(conversationId: string): Promise<QueueItem[]> {
-    const items: QueueItem[] = await request(
-      this.#tx.objectStore("items").index("conversationId").getAll(conversationId),
-    );
+  async itemsOf(conversationId) {
+    const items = await request(this.#tx.objectStore("items").index("conversationId").getAll(conversationId));
     return items.sort((a, b) => a.position - b.position);
   }
-  getQueue(conversationId: string): Promise<ConversationQueueState | undefined> {
+  getQueue(conversationId) {
     return request(this.#tx.objectStore("queues").get(conversationId));
   }
-  putQueue(state: ConversationQueueState): Promise<IDBValidKey> {
+  putQueue(state) {
     return request(this.#tx.objectStore("queues").put(state));
   }
-  getLease(conversationId: string): Promise<LeaseRecord | undefined> {
+  getLease(conversationId) {
     return request(this.#tx.objectStore("leases").get(conversationId));
   }
-  putLease(lease: LeaseRecord): Promise<IDBValidKey> {
+  putLease(lease) {
     return request(this.#tx.objectStore("leases").put(lease));
   }
-  deleteLease(conversationId: string): Promise<undefined> {
+  deleteLease(conversationId) {
     return request(this.#tx.objectStore("leases").delete(conversationId));
   }
 }
@@ -58,12 +54,12 @@ export class Tx {
  * lease and the compare-and-set claims atomic.
  */
 export class QueueStore {
-  readonly #db: IDBDatabase;
-  private constructor(db: IDBDatabase) {
+  #db;
+  constructor(db) {
     this.#db = db;
   }
 
-  static async open(factory: IDBFactory = globalThis.indexedDB, name = DB_NAME): Promise<QueueStore> {
+  static async open(factory = globalThis.indexedDB, name = DB_NAME) {
     const open = factory.open(name, DB_VERSION);
     open.onupgradeneeded = () => {
       const db = open.result;
@@ -75,15 +71,15 @@ export class QueueStore {
     return new QueueStore(await request(open));
   }
 
-  close(): void {
+  close() {
     this.#db.close();
   }
 
-  transact<T>(fn: (tx: Tx) => Promise<T>): Promise<T> {
-    return new Promise<T>((resolve, reject) => {
+  transact(fn) {
+    return new Promise((resolve, reject) => {
       const tx = this.#db.transaction(["items", "queues", "leases"], "readwrite");
-      let result: T;
-      let failure: unknown;
+      let result;
+      let failure;
       let failed = false;
       tx.oncomplete = () => (failed ? reject(failure) : resolve(result));
       tx.onabort = () => reject(failed ? failure : tx.error);
@@ -92,7 +88,7 @@ export class QueueStore {
         (value) => {
           result = value;
         },
-        (error: unknown) => {
+        (error) => {
           failed = true;
           failure = error;
           try {
