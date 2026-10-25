@@ -526,3 +526,22 @@ test("a legacy record from before accounts is taken over once by the first accou
   assert.equal(await engine.adoptLegacy(OTHER_ACCOUNT), 0);
   assert.equal(await engine.adoptLegacy(A), 0);
 });
+
+test("a prompt held for a transient reason can still be paused, steered and retried; only unrestorable files keep Steer refused", async () => {
+  // Defect: a Blocked prompt that nothing but a reload could clear.
+  const w = new World();
+  const { engine } = await w.tab("t1");
+  await engine.append(A, { text: "x" });
+  w.dispatcher.submitScript = [{ kind: "rejected", code: "composer-fill-failed", message: "did not appear", action: "check" }];
+  assert.equal((await engine.step(A)).kind, "rejected");
+  assert.equal((await engine.view(A)).pending.status, "blocked");
+  assert.equal((await engine.step(A)).kind, "halted", "automatic dispatch stays off");
+  await engine.pause(A);
+  await engine.resume(A);
+  assert.equal((await engine.steer(A, { native: false })).kind, "sent", "an explicit Steer is the user's decision");
+  assert.equal(submits(w).length, 2);
+
+  await engine.append(A, { text: "files", attachments: [{ name: "f", size: 1, type: "", restorable: false }] });
+  assert.equal((await engine.steer(A, { native: false })).kind, "halted");
+  assert.equal(submits(w).length, 2);
+});

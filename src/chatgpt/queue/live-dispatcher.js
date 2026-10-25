@@ -14,6 +14,7 @@ const norm = (text) => text.replace(/\s+/g, " ").trim();
  * @param {number} [o.pollMs]
  * @param {number} [o.settleMs] how long the response must have been over before a send is staged
  * @param {number} [o.sendWaitMs] how long to wait for native Send to enable once the text is in the composer
+ * @param {number} [o.placeWaitMs] how long the composer gets to show the staged text (its editor applies input asynchronously)
  * @param {number} [o.steerWaitMs] how long to wait for a native steer control to appear before falling back
  * @param {number} [o.ackMs] how long to wait for evidence that a click was accepted
  * @param {number} [o.stopWaitMs] how long to wait for the Stop button to go away
@@ -26,6 +27,7 @@ export function createLiveDispatcher({
   pollMs = 50,
   settleMs = 600,
   sendWaitMs = 8000,
+  placeWaitMs = 1500,
   steerWaitMs = 1500,
   ackMs = 6000,
   stopWaitMs = 5000,
@@ -38,6 +40,9 @@ export function createLiveDispatcher({
   const clicked = new Set();
   let lastBusy = -Infinity;
   let composerMissingSince = null;
+  // Consecutive placements that never showed up, per target: a few are waited out, then the prompt is held.
+  const placeFailures = new Map();
+  const PLACE_FAILURES_BEFORE_HOLD = 3;
 
   const waitFor = (probe, ms) =>
     new Promise((resolve) => {
@@ -56,7 +61,7 @@ export function createLiveDispatcher({
   const enabled = (button) => (button && !button.disabled && button.getAttribute("aria-disabled") !== "true" ? button : null);
 
   /** Why a send must not start now, or null. Read-only. */
-  function notReady(target, { allowGenerating = false } = {}) {
+  function notReady(target, { allowGenerating = false, text = null } = {}) {
     if (!onTarget(target)) return { state: "waiting", reason: "other-conversation" };
     const input = adapter.composerInput(doc);
     if (!input) {
@@ -79,40 +84,66 @@ export function createLiveDispatcher({
       }
       if (now() - lastBusy < settleMs) return { state: "waiting", reason: "settling" };
     }
-    if (io.hasText(input)) return { state: "waiting", reason: "composer-has-draft" };
+    // The composer already holding exactly the queued text is our own placement arriving late, not a draft.
+    if (io.hasText(input) && !(text !== null && norm(io.read(input)) === norm(text))) return { state: "waiting", reason: "composer-has-draft" };
     return null;
   }
 
-  const unstage = (input, text) => {
+  const unstage = (text) => {
     // Only take out what we put there; anything the user typed since stays.
-    if (norm(io.read(input)) === norm(text)) io.write(input, "");
+    const input = adapter.composerInput(doc);
+    if (input && norm(io.read(input)) === norm(text)) io.write(input, "");
   };
 
-  /** Puts `text` into the empty composer and waits for `control()` to be enabled; clears it again on failure. */
-  async function stage(target, text, control, ms, { allowGenerating }) {
-    const input = adapter.composerInput(doc);
-    if (!io.write(input, text) || norm(io.read(input)) !== norm(text)) {
-      unstage(input, text);
-      return { failed: { kind: "rejected", code: "composer-fill-failed", message: "The text could not be placed in the composer; nothing was sent.", action: "Reload the page, then press Retry." } };
+  /**
+   * Makes the composer hold `text`. The editor applies input asynchronously, so one immediate read says nothing:
+   * the text counts as placed once reads, a poll apart, agree it is there. Already holding exactly the text counts too.
+   */
+  async function place(text) {
+    const holds = () => {
+      const input = adapter.composerInput(doc);
+      return input !== null && norm(io.read(input)) === norm(text);
+    };
+    if (!holds()) {
+      const input = adapter.composerInput(doc);
+      if (!input || io.write(input, text) === false) return false;
     }
+    let streak = 0;
+    return Boolean(await waitFor(() => (holds() ? ++streak >= 2 : ((streak = 0), false)), placeWaitMs));
+  }
+
+  /** Puts `text` into the empty composer and waits for `control()` to be enabled; takes it out again on failure. */
+  async function stage(target, text, control, ms, { allowGenerating }) {
+    const key = `${target.accountId}:${target.conversationId}`;
+    if (!(await place(text))) {
+      unstage(text);
+      const failures = (placeFailures.get(key) ?? 0) + 1;
+      if (failures < PLACE_FAILURES_BEFORE_HOLD) {
+        placeFailures.set(key, failures);
+        return { failed: { kind: "wait", reason: "placing-text" } };
+      }
+      placeFailures.delete(key);
+      return { failed: { kind: "rejected", code: "composer-fill-failed", message: "The text did not appear in the composer after several tries; nothing was sent.", action: "Check the composer, then press Retry, Steer or Interrupt & Send Next." } };
+    }
+    placeFailures.delete(key);
     const button = await waitFor(() => {
       if (!onTarget(target)) return "left";
       if (!allowGenerating && generating()) return "busy";
       return enabled(control());
     }, ms);
     if (button === "left") {
-      unstage(input, text);
+      unstage(text);
       return { failed: { kind: "wait", reason: "other-conversation" } };
     }
     if (button === "busy") {
-      unstage(input, text);
+      unstage(text);
       return { failed: { kind: "wait", reason: "generating" } };
     }
     if (!button) {
-      unstage(input, text);
+      unstage(text);
       return { missing: true };
     }
-    return { input, button };
+    return { button };
   }
 
   // While steering, a running response is the starting point, not evidence; a normal send also counts a response that starts.
@@ -145,8 +176,8 @@ export function createLiveDispatcher({
       return generating() ? "generating" : "idle";
     },
 
-    async readiness(target) {
-      return notReady(target) ?? { state: "ready" };
+    async readiness(target, text = null) {
+      return notReady(target, { text }) ?? { state: "ready" };
     },
 
     async submit({ itemId, accountId, conversationId, text, attachments }) {
@@ -155,7 +186,7 @@ export function createLiveDispatcher({
         return { kind: "uncertain", code: "already-attempted", message: "This message was already submitted from this page." };
       }
       if (attachments.length) return attachmentsRefused;
-      const not = notReady(target);
+      const not = notReady(target, { text });
       if (not) return not.state === "blocked" ? { kind: "rejected", code: not.code, message: not.message, action: not.action } : { kind: "wait", reason: not.reason };
 
       const staged = await stage(target, text, () => adapter.sendButton(doc), sendWaitMs, { allowGenerating: false });
@@ -174,7 +205,7 @@ export function createLiveDispatcher({
       }
       if (attachments.length) return attachmentsRefused;
       if (!generating()) return { kind: "wait", reason: "not-generating" };
-      const not = notReady(target, { allowGenerating: true });
+      const not = notReady(target, { allowGenerating: true, text });
       if (not) return not.state === "blocked" ? { kind: "rejected", code: not.code, message: not.message, action: not.action } : { kind: "wait", reason: not.reason };
 
       const staged = await stage(target, text, () => adapter.steerButton(doc), steerWaitMs, { allowGenerating: true });
