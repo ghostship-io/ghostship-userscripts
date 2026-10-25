@@ -122,3 +122,32 @@ test("minimap styling: no category colors, native tokens only, viewport box in t
   assert.match(css, /\.gs-bar\[data-kind="text"\]\{[^}]*background-size:100% var\(--gs-lh\)/, "text is drawn as lines");
   rail.dispose();
 });
+
+test("the minimap keeps the conversation's real aspect ratio inside a clear frame, and the viewport box sits in it", async () => {
+  for (const [turn, label] of [[3, "a tall turn"], [1, "a short turn"]]) {
+    const fx = createFixture({ turns: 20, width: 1600, markup: "real" });
+    const { rail } = mount(fx);
+    await fx.settle();
+    const minimap = fx.doc.querySelector(".gs-minimap");
+    minimap.getBoundingClientRect = () => ({ top: 0, bottom: 240, height: 240, left: 0, right: 288, width: 288, x: 0, y: 0 });
+    fx.doc.querySelectorAll(".gs-prompt")[turn].click();
+    await fx.settle();
+    const frame = fx.doc.querySelector(".gs-frame");
+    assert.ok(frame.contains(fx.doc.querySelector(".gs-bars")) && frame.contains(fx.doc.querySelector(".gs-view")), "bars and the viewport box are inside the frame");
+    const w = parseFloat(frame.style.width);
+    const h = parseFloat(frame.style.height);
+    const el = chatgptAdapter.turns(fx.doc)[turn].getBoundingClientRect();
+    assert.ok(Math.abs(w / h - el.width / el.height) < 0.02 * (w / h) + 0.05, `${label}: ${w}x${h} vs the turn's ${el.width}x${el.height}`);
+    assert.ok(w <= 288 - 18 && h <= 240 - 18, `${label}: inside the track`);
+    assert.ok(w > 0 && h > 0);
+    rail.dispose();
+  }
+  // Styling: the frame is bordered and sits on a recessed track, so it reads as a page in a view.
+  const fx = createFixture({ turns: 3, width: 1600, markup: "real" });
+  const { rail } = mount(fx);
+  const css = fx.doc.getElementById("gs-pane-style").textContent;
+  assert.match(css, /\.gs-frame\{[^}]*border:1px solid[^}]*background:var\(--main-surface-primary/);
+  assert.match(css, /\.gs-minimap\{[^}]*padding:8px[^}]*background:var\(--bg-elevated-secondary/);
+  assert.equal(fx.doc.querySelector(".gs-sec-overview .gs-sec-title").textContent, "Conversation view");
+  rail.dispose();
+});
