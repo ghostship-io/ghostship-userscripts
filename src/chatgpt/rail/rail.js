@@ -44,7 +44,8 @@ const CSS = `
 .gs-sec-body{display:flex;flex-direction:column;min-height:0;padding:0 16px 12px}
 .gs-sec-prompts .gs-sec-body{flex:1 1 auto}
 .gs-sec[data-gs-collapsed="true"] .gs-sec-body{display:none}
-.gs-minimap{position:relative;flex:0 0 auto;height:min(220px,28vh);border:1px solid ${LINE};border-radius:8px;background:transparent;cursor:pointer;touch-action:none;overflow:hidden}
+.gs-minimap{position:relative;display:flex;justify-content:center;align-items:flex-start;flex:0 0 auto;height:min(240px,30vh);padding:8px;border:1px solid ${LINE};border-radius:8px;background:${FIELD};cursor:pointer;touch-action:none;overflow:hidden}
+.gs-frame{position:relative;flex:0 0 auto;width:100%;height:100%;border:1px solid ${INK};border-radius:4px;background:var(--main-surface-primary,Canvas)}
 .gs-minimap:focus-visible,.gs-search input:focus-visible,.gs-prompt:focus-visible,.gs-pane-toggle:focus-visible,.gs-sec-head:focus-visible,.gs-filter:focus-visible,.gs-outputs-toggle:focus-visible{${FOCUS}}
 .gs-bars{position:absolute;inset:0;--gs-lh:4px}
 .gs-bar{position:absolute;min-height:2px;border-radius:2px;pointer-events:none}
@@ -93,7 +94,11 @@ export function describePrompt(text, reply = "") {
 const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
 const PREVIEW_MAX = 100;
 const SCAN_MS = 400; // at most one page scan for ChatGPT's pane per this long
-const BLOCK_CAP = 800; // rendered blocks measured per rebuild
+const BLOCK_CAP = 800;
+const CONTENT_W = 768; // the conversation column's usual width, when it cannot be measured
+const MAP_PAD = 18; // the track's padding and borders
+const MAP_W = 270;
+const MAP_H = 222; // rendered blocks measured per rebuild
 
 /**
  * The right pane: current-turn minimap on top, searchable chronological prompt list
@@ -166,9 +171,9 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
   body.dataset.gsUi = "";
   body.innerHTML = `
       <section class="gs-sec gs-sec-overview" data-gs-collapsed="false">
-        <button type="button" class="gs-sec-head" aria-expanded="true" aria-controls="gs-overview-body"><span class="gs-sec-title">Overview</span>${CHEVRON}</button>
+        <button type="button" class="gs-sec-head" aria-expanded="true" aria-controls="gs-overview-body"><span class="gs-sec-title">Conversation view</span>${CHEVRON}</button>
         <div class="gs-sec-body" id="gs-overview-body">
-          <div class="gs-minimap" tabindex="0" role="slider" aria-orientation="vertical" aria-label="Current turn overview" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="gs-bars"></div><div class="gs-view" hidden></div></div>
+          <div class="gs-minimap" tabindex="0" role="slider" aria-orientation="vertical" aria-label="Current turn overview" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="gs-frame"><div class="gs-bars"></div><div class="gs-view" hidden></div></div></div>
           <div class="gs-caption" aria-live="off">Drag to navigate • 0% visible</div>
         </div>
       </section>
@@ -199,6 +204,7 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
 
   const $ = (sel) => body.querySelector(sel);
   const minimap = $(".gs-minimap");
+  const frame = $(".gs-frame");
   const bars = $(".gs-bars");
   const view = $(".gs-view");
   const overviewCard = $(".gs-sec-overview");
@@ -579,8 +585,9 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
     const slice = els.slice(prompts[ext.i].turnIndex, promptEnd(ext.i) + 1);
     const turnBox = ext.a.getBoundingClientRect();
     const turnPx = ext.z.getBoundingClientRect().bottom - turnBox.top;
+    const contentWidth = Math.min(turnBox.width || CONTENT_W, CONTENT_W); // ChatGPT's centered conversation column
     // Content, rendered-ness and the turn's size (to 20px / 8px): anything that changes the drawn boxes.
-    const key = `${activeId}:${slice.map((e) => e.textContent.length).join(",")}:${slice.every((e) => runtime.isTurnActive(e))}:${Math.round(turnPx / 20)}:${Math.round(turnBox.width / 8)}`;
+    const key = `${activeId}:${slice.map((e) => e.textContent.length).join(",")}:${slice.every((e) => runtime.isTurnActive(e))}:${Math.round(turnPx / 20)}:${Math.round(turnBox.width / 8)}:${Math.round(minimap.getBoundingClientRect().width / 8)}:${Math.round(minimap.getBoundingClientRect().height / 8)}`;
     // A growing (streaming) turn rebuilds its overview at most twice a second.
     const now = win.performance.now();
     const throttled = key !== modelKey && modelKey !== "" && modelKey.startsWith(`${activeId}:`) && now - modelBuiltAt < 500 && !forceModel;
@@ -596,10 +603,16 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
       modelKey = key;
       modelBuiltAt = now;
       bars.textContent = "";
-      // One text line of the real turn, scaled to the overview (never finer than 3px).
-      const scale = (minimap.getBoundingClientRect().height || 220) / Math.max(turnPx, 1);
+      const items = silhouetteItems(ext, slice, turnBox.top, turnPx);
+      // The frame keeps the conversation's real aspect ratio: one scale for both axes, fitted to the box.
+      const box = minimap.getBoundingClientRect();
+      const scale = Math.min((box.width ? box.width - MAP_PAD : MAP_W) / contentWidth, (box.height ? box.height - MAP_PAD : MAP_H) / Math.max(turnPx, 1));
+      const size = { w: `${Math.max(24, Math.round(contentWidth * scale))}px`, h: `${Math.max(8, Math.round(turnPx * scale))}px` };
+      if (frame.style.width !== size.w) frame.style.width = size.w;
+      if (frame.style.height !== size.h) frame.style.height = size.h;
+      // One text line of the real conversation (about 24px), at the same scale (never finer than 3px).
       bars.style.setProperty("--gs-lh", `${Math.max(3, Math.min(8, 24 * scale)).toFixed(1)}px`);
-      for (const b of silhouetteItems(ext, slice, turnBox.top, turnPx)) {
+      for (const b of items) {
         const d = doc.createElement("div");
         d.className = "gs-bar";
         d.dataset.kind = b.kind;
@@ -730,7 +743,8 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
     const ext = turnExtent();
     if (!ext) return;
     ensureRendered(ext);
-    const r = minimap.getBoundingClientRect();
+    const f = frame.getBoundingClientRect();
+    const r = f.height ? f : minimap.getBoundingClientRect(); // the frame is the conversation; the track around it clamps
     const fraction = clamp(r.height ? (clientY - r.top) / r.height : 0, 0, 1);
     scroll.scrollTo("minimap", scrollTopForFraction({ fraction, ...turnGeometry(ext), viewHeight: scrollerHeight() }));
   }
@@ -835,7 +849,10 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
     }
   });
   // The page column moves with the window and with ChatGPT's own sidebar (an animated width change).
-  on(win, "resize", () => scheduleLayout(true));
+  on(win, "resize", () => {
+    scheduleLayout(true);
+    schedule();
+  });
   on(doc, "transitionend", (e) => !root.contains(e.target) && !body.contains(e.target) && /width|margin|padding|left|right|transform/.test(e.propertyName ?? "") && scheduleLayout(true), { capture: true, passive: true });
 
   cleanups.push(scroll.onScroll((kind) => {

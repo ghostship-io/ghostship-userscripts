@@ -46,7 +46,7 @@ test("layout: minimap on top, prompts chronological oldest-first, newest last, l
   assert.deepEqual(cards, ["gs-sec-overview", "gs-sec-prompts"], "overview card above the prompts card");
   assert.deepEqual([...q(".gs-sec-overview .gs-sec-body").children].map((c) => c.className), ["gs-minimap", "gs-caption"]);
   assert.deepEqual([...q(".gs-sec-prompts .gs-sec-body").children].map((c) => c.className), ["gs-search", "gs-prompts"]);
-  assert.equal(q(".gs-sec-overview .gs-sec-title").textContent, "Overview");
+  assert.equal(q(".gs-sec-overview .gs-sec-title").textContent, "Conversation view");
   assert.equal(q(".gs-sec-prompts .gs-sec-title").textContent, "Prompts");
   assert.equal(q(".gs-search input").placeholder, "Search prompts...");
   const buttons = items(fx);
