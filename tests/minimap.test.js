@@ -151,3 +151,22 @@ test("the minimap keeps the conversation's real aspect ratio inside a clear fram
   assert.equal(fx.doc.querySelector(".gs-sec-overview .gs-sec-title").textContent, "Conversation view");
   rail.dispose();
 });
+
+test("a window resize that only changes the track's height refits the frame inside it", async () => {
+  const fx = createFixture({ turns: 20, width: 1600, markup: "real" });
+  const { rail } = mount(fx);
+  await fx.settle();
+  const minimap = fx.doc.querySelector(".gs-minimap");
+  const track = (height) => (minimap.getBoundingClientRect = () => ({ top: 0, bottom: height, height, left: 0, right: 288, width: 288, x: 0, y: 0 }));
+  track(240);
+  fx.doc.querySelectorAll(".gs-prompt")[3].click();
+  await fx.settle();
+  const frame = fx.doc.querySelector(".gs-frame");
+  const tall = parseFloat(frame.style.height);
+  assert.ok(tall > 120, `fits the tall track (${tall})`);
+  track(120);
+  fx.win.dispatchEvent(new fx.win.Event("resize"));
+  await fx.settle();
+  assert.ok(parseFloat(frame.style.height) <= 120 - 18, `refit to the shorter track (${frame.style.height})`);
+  rail.dispose();
+});

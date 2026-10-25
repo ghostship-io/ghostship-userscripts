@@ -587,7 +587,7 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
     const turnPx = ext.z.getBoundingClientRect().bottom - turnBox.top;
     const contentWidth = Math.min(turnBox.width || CONTENT_W, CONTENT_W); // ChatGPT's centered conversation column
     // Content, rendered-ness and the turn's size (to 20px / 8px): anything that changes the drawn boxes.
-    const key = `${activeId}:${slice.map((e) => e.textContent.length).join(",")}:${slice.every((e) => runtime.isTurnActive(e))}:${Math.round(turnPx / 20)}:${Math.round(turnBox.width / 8)}:${Math.round(minimap.getBoundingClientRect().width / 8)}`;
+    const key = `${activeId}:${slice.map((e) => e.textContent.length).join(",")}:${slice.every((e) => runtime.isTurnActive(e))}:${Math.round(turnPx / 20)}:${Math.round(turnBox.width / 8)}:${Math.round(minimap.getBoundingClientRect().width / 8)}:${Math.round(minimap.getBoundingClientRect().height / 8)}`;
     // A growing (streaming) turn rebuilds its overview at most twice a second.
     const now = win.performance.now();
     const throttled = key !== modelKey && modelKey !== "" && modelKey.startsWith(`${activeId}:`) && now - modelBuiltAt < 500 && !forceModel;
@@ -849,7 +849,10 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
     }
   });
   // The page column moves with the window and with ChatGPT's own sidebar (an animated width change).
-  on(win, "resize", () => scheduleLayout(true));
+  on(win, "resize", () => {
+    scheduleLayout(true);
+    schedule();
+  });
   on(doc, "transitionend", (e) => !root.contains(e.target) && !body.contains(e.target) && /width|margin|padding|left|right|transform/.test(e.propertyName ?? "") && scheduleLayout(true), { capture: true, passive: true });
 
   cleanups.push(scroll.onScroll((kind) => {
