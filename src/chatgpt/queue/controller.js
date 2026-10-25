@@ -70,7 +70,14 @@ export function createQueueUi({
     return next;
   };
 
+  // Rebuilding the DOM would drop the caret and any IME composition in the
+  // inputs, so the background poll only repaints when something visible changed.
+  let painted = null;
   function render(focusKey) {
+    const { items, paused, interrupting, error, note, edit, dryRun } = model;
+    const signature = JSON.stringify({ items, paused, interrupting, error, note, dryRun, editing: edit?.id ?? null });
+    if (signature === painted && !focusKey) return;
+    painted = signature;
     const active = doc.activeElement;
     const key = focusKey ?? (root.contains(active) ? active.getAttribute("data-gs-key") : null);
     renderPanel(doc, root, model, handlers);

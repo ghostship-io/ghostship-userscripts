@@ -1363,7 +1363,12 @@
       chain = next;
       return next;
     };
+    let painted = null;
     function render(focusKey) {
+      const { items, paused, interrupting, error, note, edit, dryRun } = model;
+      const signature = JSON.stringify({ items, paused, interrupting, error, note, dryRun, editing: edit?.id ?? null });
+      if (signature === painted && !focusKey) return;
+      painted = signature;
       const active = doc.activeElement;
       const key = focusKey ?? (root.contains(active) ? active.getAttribute("data-gs-key") : null);
       renderPanel(doc, root, model, handlers);

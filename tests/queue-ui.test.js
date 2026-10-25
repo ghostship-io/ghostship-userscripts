@@ -181,6 +181,19 @@ test("queue ui: pause stops the background drain and resume restores it", async 
   assert.equal(dispatcher.log.length, 1);
 });
 
+test("queue ui: the background poll does not rebuild the panel while the user is typing", async () => {
+  // Defect: a periodic re-render dropping the caret/IME state of the add box.
+  const t = await mountUi();
+  const input = t.key("add:input");
+  input.focus();
+  input.value = "half-typed";
+  input.dispatchEvent(new t.window.Event("input", { bubbles: true }));
+  await t.ui.tick();
+  assert.equal(t.key("add:input"), input, "same element, not a rebuilt copy");
+  assert.equal(t.doc.activeElement, input);
+  assert.equal(input.value, "half-typed");
+});
+
 test("queue ui: the panel is put back above the composer if the page re-renders it away", async () => {
   // Defect: the queue disappearing after a React re-render of the composer area.
   const t = await mountUi({ form: true });
