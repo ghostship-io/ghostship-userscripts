@@ -14,5 +14,6 @@ const queueUi = ({ win, adapter, diagnostics, config }) => {
 
 const runtime = createRuntime({ win: window, adapter: chatgptAdapter, backend: createTurnBackend(), queueUi });
 if (runtime.mode === "active") createRail({ win: window, adapter: chatgptAdapter, runtime });
-// Non-sensitive health only: mode and counters.
-window.__ghostshipUserscripts = { mode: runtime.mode, diagnostics: () => runtime.diagnostics.snapshot() };
+// Non-sensitive health only: build version, mode and counters.
+// __GS_VERSION__ is replaced with the manifest version at build time (scripts/build.mjs).
+window.__ghostshipUserscripts = { version: __GS_VERSION__, mode: runtime.mode, diagnostics: () => runtime.diagnostics.snapshot() };

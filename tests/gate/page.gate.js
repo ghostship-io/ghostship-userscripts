@@ -2,6 +2,7 @@
 // click native Send/Stop, submit, touch the network or move the viewport on its own.
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { bundleSource, createFixture, installPageGuards, runBundle } from "./harness.js";
 
 const boot = async (options = {}) => {
@@ -39,6 +40,7 @@ test("bundle: contains no network, submit or synthetic-click primitive", () => {
 test("boot: activates on a long thread without any traffic, click or scroll", async () => {
   const { fx, guards, health } = await boot();
   assert.equal(health.mode, "active");
+  assert.equal(health.version, JSON.parse(readFileSync(new URL("../../manifest.json", import.meta.url), "utf8")).scripts[0].version, "the running build reports the manifest version");
   assert.deepEqual(guards.report(), { nativeClicks: [], formSubmits: 0, network: [] });
   assert.equal(fx.scrollEvents.length, 0);
 });

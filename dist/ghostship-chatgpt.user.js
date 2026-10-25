@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GhostShip ChatGPT
 // @namespace    https://github.com/ghostship-io/ghostship-userscripts
-// @version      0.5.0
+// @version      0.5.1
 // @description  Fast, queue-aware ChatGPT interface for the owner browser.
 // @match        https://chatgpt.com/*
 // @grant        none
@@ -2450,5 +2450,5 @@
   };
   var runtime = createRuntime({ win: window, adapter: chatgptAdapter, backend: createTurnBackend(), queueUi });
   if (runtime.mode === "active") createRail({ win: window, adapter: chatgptAdapter, runtime });
-  window.__ghostshipUserscripts = { mode: runtime.mode, diagnostics: () => runtime.diagnostics.snapshot() };
+  window.__ghostshipUserscripts = { version: "0.5.1", mode: runtime.mode, diagnostics: () => runtime.diagnostics.snapshot() };
 })();
