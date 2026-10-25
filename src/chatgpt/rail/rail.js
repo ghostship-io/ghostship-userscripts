@@ -161,7 +161,7 @@ export function createRail({ win, adapter, runtime }) {
     const gutter = first ? win.innerWidth - first.getBoundingClientRect().right : win.innerWidth;
     const docked = win.innerWidth >= DOCK_MIN_VIEWPORT && gutter >= RAIL_WIDTH + 24;
     const was = root.dataset.gsMode;
-    root.dataset.gsMode = docked ? "docked" : "collapsed";
+    if (was !== (docked ? "docked" : "collapsed")) root.dataset.gsMode = docked ? "docked" : "collapsed";
     if (docked) setOpen(true);
     else if (was === "docked") setOpen(false);
     const composer = adapter.composer(doc);
@@ -291,11 +291,14 @@ export function createRail({ win, adapter, runtime }) {
       viewBottom: sTop + scrollerHeight(),
     });
     view.hidden = !ind;
-    caption.textContent = `Drag to navigate • ${ind ? Math.round(ind.visible * 100) : 0}% visible`;
+    // Only write on change: any DOM write under body re-triggers the prompt-index observer.
+    const text = `Drag to navigate • ${ind ? Math.round(ind.visible * 100) : 0}% visible`;
+    if (caption.textContent !== text) caption.textContent = text;
     if (ind) {
       view.style.top = `${(ind.top * 100).toFixed(2)}%`;
       view.style.height = `${(ind.height * 100).toFixed(2)}%`;
-      minimap.setAttribute("aria-valuenow", String(Math.round(ind.top * 100)));
+      const now = String(Math.round(ind.top * 100));
+      if (minimap.getAttribute("aria-valuenow") !== now) minimap.setAttribute("aria-valuenow", now);
     }
   }
 

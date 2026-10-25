@@ -361,3 +361,19 @@ test("prompt rows: first sentence is the title, the rest (or the reply) the one-
   assert.equal(describePrompt("x".repeat(200)).title.length, 60);
   assert.equal(describePrompt("a".repeat(200), "").preview.length, 100);
 });
+
+test("an idle page stays idle: the rail does not feed the prompt-index observer in a loop", async () => {
+  const fx = createFixture({ turns: 20, width: 1600 });
+  const { runtime } = mount(fx);
+  await fx.settle();
+  const flushes = runtime.diagnostics.snapshot()["observer.flush"];
+  const writes = [];
+  const mo = new fx.win.MutationObserver((records) => writes.push(...records.map((r) => `${r.type}:${r.target.className || r.target.tagName}`)));
+  mo.observe(fx.doc.documentElement, { childList: true, subtree: true, attributes: true, characterData: true });
+  await fx.settle();
+  await fx.settle();
+  await Promise.resolve();
+  assert.deepEqual(writes, [], "no DOM writes while nothing happens");
+  assert.equal(runtime.diagnostics.snapshot()["observer.flush"], flushes);
+  mo.disconnect();
+});
