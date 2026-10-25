@@ -4,6 +4,8 @@ Agents add entries under Unreleased and never touch version fields. After a merg
 
 ## Unreleased
 
+## [0.7.4] - 2026-10-25
+
 - On opening a conversation the script now waits for the page to settle, then selects the last prompt in the Prompts list like a click on it, and keeps re-targeting the newest last prompt while more prompts load until the list settles; any scroll, click, key or touch from the user ends it (#629).
 
 ## [0.7.3] - 2026-10-25
