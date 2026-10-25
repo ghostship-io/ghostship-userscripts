@@ -36,6 +36,7 @@ for (const script of manifest.scripts) {
     target: "chrome110",
     write: false,
     legalComments: "none",
+    define: { __GS_VERSION__: JSON.stringify(script.version) },
     logLevel: "warning",
   });
   const head = header(script);
