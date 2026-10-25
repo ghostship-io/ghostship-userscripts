@@ -26,12 +26,17 @@ export function createRuntime({ win, adapter, backend = createNoopBackend(), con
 
   // Fail open: drop every hook and leave native ChatGPT behaviour in place.
   let stop = () => {};
+  const indexListeners = new Set();
+  const fallbackListeners = new Set();
   const failOpen = (reason) => {
     stop();
+    indexListeners.clear();
+    fallbackListeners.forEach((fn) => fn(reason));
+    fallbackListeners.clear();
     backend.unmount();
     observers.disposeAll();
     scroll.dispose();
-    Object.assign(runtime, { mode: "safe", scroll: undefined, observers: undefined, dispose() {} });
+    Object.assign(runtime, { mode: "safe", scroll: undefined, observers: undefined, navigateTo: undefined, onIndexChange: undefined, dispose() {} });
     diagnostics.count("virtualization.fallback");
     diagnostics.warnOnce("virtualization", `virtualization disabled (${reason}); running in safe mode`);
   };
@@ -44,6 +49,7 @@ export function createRuntime({ win, adapter, backend = createNoopBackend(), con
   const reindex = () => {
     runtime.promptIndex = buildPromptIndex(win.document, adapter);
     diagnostics.count("index.rebuilt");
+    indexListeners.forEach((fn) => fn(runtime.promptIndex));
   };
   reindex();
   stop = observers.subscribe(win.document.body, reindex);
@@ -51,9 +57,24 @@ export function createRuntime({ win, adapter, backend = createNoopBackend(), con
   Object.assign(runtime, {
     mode: "active",
     scroll,
+    /** Subscribe to prompt-index rebuilds; returns an unsubscribe. */
+    onIndexChange(fn) {
+      indexListeners.add(fn);
+      return () => indexListeners.delete(fn);
+    },
+    /** Subscribe to fail-open (the runtime dropped to safe mode); returns an unsubscribe. */
+    onFallback(fn) {
+      fallbackListeners.add(fn);
+      return () => fallbackListeners.delete(fn);
+    },
+    /** The one explicit navigation entry: activates a virtualized-out turn, then scrolls to it. */
+    navigateTo(el, options) {
+      return backend.navigateToElement?.(el, options) || scroll.navigateTo(el, options);
+    },
     observers,
     dispose() {
       stop();
+      indexListeners.clear();
       observers.disposeAll();
       backend.unmount();
       scroll.dispose();

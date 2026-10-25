@@ -9,7 +9,7 @@ import { JSDOM } from "jsdom";
  * and animation frames are queued and delivered by `settle()` so tests are
  * deterministic.
  */
-export function createFixture({ turns = 40, viewport = 800, markup = "chatgpt" } = {}) {
+export function createFixture({ turns = 40, viewport = 800, markup = "chatgpt", width = 1024 } = {}) {
   const dom = new JSDOM(
     `<!doctype html><html><head></head><body>
       <div id="scroller" data-scroll-root style="overflow-y:auto"><main id="thread"></main></div>
@@ -18,6 +18,7 @@ export function createFixture({ turns = 40, viewport = 800, markup = "chatgpt" }
     { pretendToBeVisual: false },
   );
   const win = dom.window;
+  win.innerWidth = width;
   const doc = win.document;
   const scroller = doc.getElementById("scroller");
   const thread = doc.getElementById("thread");
@@ -64,7 +65,9 @@ export function createFixture({ turns = 40, viewport = 800, markup = "chatgpt" }
       top = topOf(this) - sim.top;
       height = heightOf(this);
     }
-    return { top, bottom: top + height, height, left: 0, right: 0, width: 0, x: 0, y: top };
+    const width = this.parentElement === thread ? 768 : 0;
+    const left = this.parentElement === thread ? (win.innerWidth - width) / 2 : 0;
+    return { top, bottom: top + height, height, left, right: left + width, width, x: left, y: top };
   };
   EP.scrollIntoView = function () {
     if (this.parentElement === thread) setTop(topOf(this));
@@ -79,6 +82,22 @@ export function createFixture({ turns = 40, viewport = 800, markup = "chatgpt" }
   Object.defineProperty(scroller, "scrollTop", { configurable: true, get: () => sim.top, set: setTop });
   Object.defineProperty(scroller, "scrollHeight", { get: scrollHeight });
   Object.defineProperty(scroller, "clientHeight", { get: () => viewport });
+
+  // The rail's prompt list needs just enough layout to scroll: 40px rows, 200px viewport.
+  const isList = (el) => el.classList?.contains("gs-prompts");
+  const listMax = (el) => Math.max(0, el.children.length * 40 - 200);
+  Object.defineProperty(EP, "scrollHeight", { configurable: true, get() { return isList(this) ? this.children.length * 40 : 0; } });
+  Object.defineProperty(EP, "clientHeight", { configurable: true, get() { return isList(this) ? 200 : 0; } });
+  Object.defineProperty(EP, "scrollTop", {
+    configurable: true,
+    get() { return this.__st ?? 0; },
+    set(v) {
+      const next = isList(this) ? Math.max(0, Math.min(listMax(this), v)) : v;
+      if (next !== (this.__st ?? 0)) { this.__st = next; this.dispatchEvent(new win.Event("scroll")); }
+    },
+  });
+  Object.defineProperty(EP, "offsetTop", { configurable: true, get() { return this.classList?.contains("gs-prompt") ? [...this.parentElement.parentElement.children].indexOf(this.parentElement) * 40 : 0; } });
+  Object.defineProperty(EP, "offsetHeight", { configurable: true, get() { return this.classList?.contains("gs-prompt") ? 40 : 0; } });
 
   win.requestAnimationFrame = (fn) => rafQueue.push(fn);
   // The observer hub flushes on a timer; queue it so settle() delivers it deterministically.
@@ -106,6 +125,7 @@ export function createFixture({ turns = 40, viewport = 800, markup = "chatgpt" }
     }
   };
 
+  const TOPICS = ["apples", "pears", "plums", "grapes"];
   const wordy = (n, tag = "p") => `<${tag}>${"lorem ipsum ".repeat(n)}</${tag}>`;
   const codeBlock = (lines) =>
     `<pre><code>${Array.from({ length: lines }, (_, i) => `<span class="tok">line ${i}</span>\n`).join("")}</code></pre>`;
@@ -123,11 +143,11 @@ export function createFixture({ turns = 40, viewport = 800, markup = "chatgpt" }
   };
   const addTurn = (i) => {
     const heavy = i % 7 === 3;
-    thread.append(article("user", wordy(5), 90 + (i % 3) * 20));
+    thread.append(article("user", `Prompt ${i} about ${TOPICS[i % TOPICS.length]}`, 90 + (i % 3) * 20));
     thread.append(
       article(
         "assistant",
-        wordy(40) + (heavy ? codeBlock(300) + table(40) + '<img alt="chart" src="x.png">' : "") + wordy(10),
+        wordy(40) + (heavy ? "<h2>Details</h2>" + codeBlock(300) + table(40) + '<img alt="chart" src="x.png">' : "") + wordy(10),
         heavy ? 1400 : 300 + (i % 4) * 60,
       ),
     );
