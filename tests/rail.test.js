@@ -5,7 +5,7 @@ import { createRuntime } from "../src/core/runtime.js";
 import { DEFAULTS } from "../src/core/config.js";
 import { chatgptAdapter } from "../src/chatgpt/adapter.js";
 import { createTurnBackend } from "../src/chatgpt/virtualization/backend.js";
-import { createRail } from "../src/chatgpt/rail/rail.js";
+import { createRail, describePrompt } from "../src/chatgpt/rail/rail.js";
 import { buildTurnModel, layoutBars, scrollTopForFraction, viewportIndicator } from "../src/chatgpt/rail/minimap-model.js";
 
 function mount(fx) {
@@ -32,7 +32,7 @@ test("minimap model: bounded, skips nested blocks, classifies code/table/heading
   assert.ok(bars.every((b, i) => i === 0 || b.top >= bars[i - 1].top + bars[i - 1].height - 1e-9), "bars never overlap");
   assert.ok(bars.at(-1).top + bars.at(-1).height <= 1);
   assert.equal(viewportIndicator({ turnTop: 0, turnBottom: 1000, viewTop: -500, viewBottom: -100 }), null);
-  assert.deepEqual(viewportIndicator({ turnTop: 0, turnBottom: 1000, viewTop: 250, viewBottom: 750 }), { top: 0.25, height: 0.5 });
+  assert.deepEqual(viewportIndicator({ turnTop: 0, turnBottom: 1000, viewTop: 250, viewBottom: 750 }), { top: 0.25, height: 0.5, visible: 0.5 });
   assert.equal(scrollTopForFraction({ fraction: 0.5, turnTop: 1000, turnHeight: 2000, viewHeight: 800 }), 1600);
   assert.equal(scrollTopForFraction({ fraction: 1, turnTop: 1000, turnHeight: 2000, viewHeight: 800 }), 2200, "clamped inside the turn");
   assert.equal(scrollTopForFraction({ fraction: 0.5, turnTop: 1000, turnHeight: 300, viewHeight: 800 }), 1000, "short turn pins to its top");
@@ -42,12 +42,16 @@ test("layout: minimap on top, prompts chronological oldest-first, newest last, l
   const fx = createFixture({ turns: 30, width: 1600 });
   const { q, list } = mount(fx);
   await fx.settle();
-  const panel = q(".gs-rail-panel");
-  const order = [...panel.children].map((c) => c.className);
-  assert.deepEqual(order, ["gs-minimap", "gs-search", "gs-prompts"]);
+  const cards = [...q(".gs-rail-panel").children].map((c) => c.className.split(" ")[1]);
+  assert.deepEqual(cards, ["gs-card-overview", "gs-card-prompts"], "overview card above the prompts card");
+  assert.deepEqual([...q(".gs-card-overview .gs-card-body").children].map((c) => c.className), ["gs-minimap", "gs-caption"]);
+  assert.deepEqual([...q(".gs-card-prompts .gs-card-body").children].map((c) => c.className), ["gs-search", "gs-prompts", "gs-jumps"]);
+  assert.equal(q(".gs-card-overview .gs-card-title").textContent, "Conversation overview");
+  assert.equal(q(".gs-card-prompts .gs-card-title").textContent, "Prompts");
+  assert.equal(q(".gs-search input").placeholder, "Search prompts...");
   const buttons = items(fx);
   assert.equal(buttons.length, 30);
-  assert.deepEqual(buttons.map((b) => b.querySelector(".gs-n").textContent), Array.from({ length: 30 }, (_, i) => String(i + 1)));
+  assert.deepEqual(buttons.map((b) => b.querySelector(".gs-n").textContent), Array.from({ length: 30 }, (_, i) => `#${i + 1}`));
   assert.match(buttons[0].textContent, /Prompt 0 about/);
   assert.match(buttons.at(-1).textContent, /Prompt 29 about/);
   assert.equal(list.scrollTop, list.scrollHeight - 200, "scrolled to the newest prompt");
@@ -95,7 +99,7 @@ test("conversation scrolling updates the active prompt; order and manual list sc
   const idx = items(fx).indexOf(active);
   const shown = [fx.elements()[2 * idx], fx.elements()[2 * idx + 1]];
   assert.ok(shown.some((e) => e.getBoundingClientRect().bottom > 0), "active prompt's turn is the one at the top");
-  assert.ok(items(fx).map((b) => +b.querySelector(".gs-n").textContent).every((n, i) => n === i + 1), "never reversed");
+  assert.ok(items(fx).map((b) => +b.querySelector(".gs-n").textContent.slice(1)).every((n, i) => n === i + 1), "never reversed");
   // The user scrolls the list away from the bottom; new prompts must not yank it.
   list.dispatchEvent(new fx.win.Event("wheel"));
   list.scrollTop = 200;
@@ -139,7 +143,7 @@ test("search filters chronologically, keeps numbering, clears with Escape", asyn
   input.value = "plums";
   input.dispatchEvent(new fx.win.Event("input"));
   const hits = items(fx).map((b) => b.querySelector(".gs-n").textContent);
-  assert.deepEqual(hits, ["3", "7", "11", "15", "19", "23", "27"]);
+  assert.deepEqual(hits, ["#3", "#7", "#11", "#15", "#19", "#23", "#27"]);
   input.value = "nothing-like-this";
   input.dispatchEvent(new fx.win.Event("input"));
   assert.equal(items(fx).length, 0);
@@ -233,9 +237,10 @@ test("styles keep the rail inside the viewport and anchored bottom-right, growin
   const css = fx.doc.getElementById("gs-rail-style").textContent;
   assert.match(css, /\.gs-rail\{position:fixed;right:\d+px;bottom:\d+px/);
   assert.match(css, /\.gs-rail\{[^}]*max-width:calc\(100vw - 24px\)/);
-  assert.match(css, /\.gs-rail-panel\{[^}]*max-width:calc\(100vw - 24px\)[^}]*max-height:min\(70vh/);
+  assert.match(css, /\.gs-rail-panel\{[^}]*max-width:calc\(100vw - 24px\)[^}]*max-height:min\(calc\(100vh/);
   assert.match(css, /\.gs-prompts\{[^}]*overflow-x:hidden;overflow-y:auto/);
-  assert.match(css, /\.gs-text\{[^}]*overflow-wrap:anywhere/);
+  assert.match(css, /\.gs-title\{[^}]*white-space:nowrap[^}]*text-overflow:ellipsis/);
+  assert.match(css, /\.gs-preview\{[^}]*white-space:nowrap[^}]*text-overflow:ellipsis/);
   assert.doesNotMatch(css, /overflow-x:(auto|scroll)/);
   assert.doesNotMatch(css, /position:(sticky|absolute)[^}]*\.gs-rail\b/);
   assert.match(css, /focus-visible/);
@@ -274,4 +279,85 @@ test("fail-open removes the rail; dispose leaves the DOM as it was", async () =>
   await fx2.settle();
   assert.equal(fx2.doc.querySelector(".gs-rail"), null);
   assert.equal(fx2.doc.getElementById("gs-rail-style"), null);
+});
+
+test("reference layout: collapsible cards, caption percentage, green in-view dots, jump links, filter", async () => {
+  const fx = createFixture({ turns: 40, width: 1600 });
+  const { q, list, minimap } = mount(fx);
+  fixMinimapRect(minimap);
+  await fx.settle();
+  const head = (cls) => q(`.${cls} .gs-card-head`);
+  assert.match(q(".gs-caption").textContent, /^Drag to navigate • \d+% visible$/);
+
+  // Rows: #N, bold title, one-line preview; the newest row is last.
+  const row = items(fx).at(-1);
+  assert.equal(row.querySelector(".gs-n").textContent, "#40");
+  assert.equal(row.querySelector(".gs-title").textContent, "Prompt 39 about grapes");
+  assert.ok(row.querySelector(".gs-preview").textContent.length > 0);
+
+  // Green dot on prompts whose turn is in view; follows scrolling.
+  const dotted = () => items(fx).filter((b) => b.dataset.inView === "true").map((b) => b.querySelector(".gs-n").textContent);
+  assert.ok(dotted().includes("#40"));
+  fx.wheel(-9000);
+  await fx.settle();
+  assert.ok(!dotted().includes("#40"));
+  assert.ok(dotted().length >= 1);
+  assert.ok(items(fx).find((b) => b.getAttribute("aria-current") === "true").dataset.inView === "true", "active row is in view");
+
+  // Filter button limits the list to prompts in view.
+  q(".gs-filter").click();
+  assert.equal(q(".gs-filter").getAttribute("aria-pressed"), "true");
+  assert.ok(items(fx).length >= 1 && items(fx).length < 40);
+  assert.ok(items(fx).every((b) => b.dataset.inView === "true"));
+  q(".gs-filter").click();
+  assert.equal(items(fx).length, 40);
+
+  // Jump links: oldest at the very top, newest at the very bottom.
+  assert.equal(q(".gs-first").textContent, "↑ First prompt (oldest)");
+  assert.equal(q(".gs-last").textContent, "↓ Last prompt (newest)");
+  q(".gs-first").click();
+  await fx.settle();
+  assert.equal(fx.rawTop(), 0);
+  assert.equal(list.scrollTop, 0);
+  assert.equal(items(fx)[0].getAttribute("aria-current"), "true");
+  q(".gs-last").click();
+  await fx.settle();
+  assert.equal(items(fx).at(-1).getAttribute("aria-current"), "true");
+  assert.equal(list.scrollTop, list.scrollHeight - 200);
+  assert.equal(fx.blankInViewport().length, 0);
+
+  // Chevron headers collapse and expand each card.
+  for (const cls of ["gs-card-overview", "gs-card-prompts"]) {
+    const card = q(`.${cls}`);
+    assert.equal(head(cls).getAttribute("aria-expanded"), "true");
+    head(cls).click();
+    assert.equal(card.dataset.gsCollapsed, "true");
+    assert.equal(head(cls).getAttribute("aria-expanded"), "false");
+    head(cls).click();
+    assert.equal(card.dataset.gsCollapsed, "false");
+  }
+  assert.match(fx.doc.getElementById("gs-rail-style").textContent, /\.gs-card\[data-gs-collapsed="true"\] \.gs-card-body\{display:none\}/);
+});
+
+test("minimap caption reports the visible share of the turn", async () => {
+  const fx = createFixture({ turns: 40, width: 1600 });
+  const { q, minimap } = mount(fx);
+  fixMinimapRect(minimap);
+  await fx.settle();
+  fx.elements()[6].__h = 4000; // long reply turn => viewport covers a fraction of it
+  fx.elements()[7].__h = 4000;
+  q(".gs-prompt[data-id='conversation-turn-7']").click();
+  await fx.settle();
+  const pct = +q(".gs-caption").textContent.match(/(\d+)% visible/)[1];
+  assert.ok(pct > 5 && pct < 20, `visible ${pct}%`);
+});
+
+test("prompt rows: first sentence is the title, the rest (or the reply) the one-line preview", () => {
+  assert.deepEqual(describePrompt("Summarize the notes. Cover topics one to three with examples", "reply text"), {
+    title: "Summarize the notes",
+    preview: "Cover topics one to three with examples",
+  });
+  assert.deepEqual(describePrompt("Short question", "The answer begins here"), { title: "Short question", preview: "The answer begins here" });
+  assert.equal(describePrompt("x".repeat(200)).title.length, 60);
+  assert.equal(describePrompt("a".repeat(200), "").preview.length, 100);
 });

@@ -73,13 +73,13 @@ export function layoutBars(model, maxBars = 120) {
   });
 }
 
-/** Fraction (0..1) of the turn that the viewport covers, or null when they do not intersect. */
+/** Where the viewport sits in the turn (0..1) and the fraction of the turn visible; null when they do not intersect. */
 export function viewportIndicator({ turnTop, turnBottom, viewTop, viewBottom }) {
   const span = turnBottom - turnTop;
   if (span <= 0 || viewBottom <= turnTop || viewTop >= turnBottom) return null;
   const top = Math.max(0, (viewTop - turnTop) / span);
   const bottom = Math.min(1, (viewBottom - turnTop) / span);
-  return { top, height: Math.max(bottom - top, 0.02) };
+  return { top, height: Math.max(bottom - top, 0.02), visible: bottom - top };
 }
 
 /** Scroll position (px within the scroller's content) for a click/drag at `fraction` of the turn. */

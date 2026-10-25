@@ -1,41 +1,75 @@
 import { searchPrompts } from "../../core/prompt-index.js";
 import { buildTurnModel, layoutBars, scrollTopForFraction, viewportIndicator } from "./minimap-model.js";
 
-const RAIL_WIDTH = 240;
+const RAIL_WIDTH = 296;
 const DOCK_MIN_VIEWPORT = 1100;
 const STYLE_ID = "gs-rail-style";
+const ACCENT = "#19c37d";
 
-// Layout contract: one fixed column at the bottom-right that grows upward
-// (anchored by `bottom`). Docked only when the free right gutter fits it, so the
+// Layout contract (owner reference): a right column of two collapsible cards,
+// "Conversation overview" (minimap) above "Prompts", anchored bottom-right and
+// growing upward. Docked only when the free right gutter fits it, so the
 // conversation column is never narrowed; otherwise it collapses to a toggle that
-// opens the same column above the composer. Nothing is wider than the viewport.
+// opens the same cards above the composer. Nothing is wider than the viewport.
 const CSS = `
-.gs-rail{position:fixed;right:12px;bottom:16px;z-index:40;display:flex;flex-direction:column;align-items:flex-end;gap:8px;max-width:calc(100vw - 24px);box-sizing:border-box;font:13px/1.35 system-ui,sans-serif;color:var(--text-primary,#222)}
+.gs-rail{position:fixed;right:12px;bottom:16px;z-index:40;display:flex;flex-direction:column;align-items:flex-end;gap:8px;max-width:calc(100vw - 24px);box-sizing:border-box;font:13px/1.35 system-ui,sans-serif;color:var(--text-primary,#ececec)}
 .gs-rail *{box-sizing:border-box}
 .gs-rail[data-gs-mode="collapsed"]{bottom:var(--gs-rail-bottom,96px)}
-.gs-rail-panel{display:flex;flex-direction:column;width:${RAIL_WIDTH}px;max-width:calc(100vw - 24px);max-height:min(70vh,calc(100vh - var(--gs-rail-bottom,16px) - 72px));overflow:hidden;border:1px solid var(--border-light,rgba(128,128,128,.35));border-radius:10px;background:var(--main-surface-primary,#fff)}
-.gs-rail[data-gs-mode="collapsed"] .gs-rail-panel{width:min(320px,calc(100vw - 24px))}
+.gs-rail-panel{display:flex;flex-direction:column;gap:12px;width:${RAIL_WIDTH}px;max-width:calc(100vw - 24px);max-height:min(calc(100vh - 72px),calc(100vh - var(--gs-rail-bottom,16px) - 72px));min-height:0}
+.gs-rail[data-gs-mode="docked"] .gs-rail-panel{max-height:calc(100vh - 72px)}
 .gs-rail[data-gs-open="false"] .gs-rail-panel{display:none}
-.gs-rail-toggle{display:none;min-width:44px;min-height:44px;border:1px solid var(--border-light,rgba(128,128,128,.35));border-radius:22px;background:var(--main-surface-primary,#fff);color:inherit;cursor:pointer}
-.gs-rail[data-gs-mode="collapsed"] .gs-rail-toggle{display:block}
-.gs-minimap{position:relative;flex:0 0 auto;height:120px;margin:6px;border-radius:6px;background:rgba(128,128,128,.1);cursor:pointer;touch-action:none;overflow:hidden}
-.gs-minimap:focus-visible,.gs-search input:focus-visible,.gs-prompt:focus-visible,.gs-rail-toggle:focus-visible{outline:2px solid #2f6feb;outline-offset:1px}
-.gs-bar{position:absolute;left:4px;min-height:1px;border-radius:1px;background:rgba(128,128,128,.55)}
-.gs-bar[data-kind="heading"]{background:currentColor;opacity:.85}
-.gs-bar[data-kind="code"]{background:rgba(47,111,235,.55)}
-.gs-bar[data-kind="table"]{background:rgba(46,160,67,.55)}
-.gs-bar[data-kind="image"]{background:rgba(219,109,40,.55)}
-.gs-view{position:absolute;left:0;right:0;border:1px solid #2f6feb;background:rgba(47,111,235,.18);pointer-events:none}
-.gs-search{flex:0 0 auto;padding:0 6px 6px}
-.gs-search input{width:100%;min-height:32px;padding:4px 8px;border:1px solid var(--border-light,rgba(128,128,128,.35));border-radius:6px;background:transparent;color:inherit;font:inherit}
-.gs-prompts{flex:1 1 auto;min-height:0;margin:0;padding:0 4px 4px;list-style:none;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain}
-.gs-prompt{display:flex;gap:6px;width:100%;min-height:36px;padding:6px 8px;border:0;border-radius:6px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.gs-card{display:flex;flex-direction:column;min-height:0;border:1px solid var(--border-light,rgba(128,128,128,.35));border-radius:12px;background:var(--main-surface-primary,#212121)}
+.gs-card-prompts{flex:1 1 auto}
+.gs-card-head{display:flex;align-items:center;justify-content:space-between;width:100%;min-height:44px;padding:8px 14px;border:0;background:transparent;color:inherit;font:inherit;font-weight:600;font-size:14px;cursor:pointer}
+.gs-card-prompts .gs-card-title{color:#6aa9ff;text-decoration:underline;text-underline-offset:3px}
+.gs-chevron{display:inline-block;width:8px;height:8px;border:solid currentColor;border-width:2px 0 0 2px;transform:rotate(45deg) translate(2px,2px);transition:transform .15s}
+.gs-card[data-gs-collapsed="true"] .gs-chevron{transform:rotate(225deg) translate(2px,2px)}
+.gs-card-body{display:flex;flex-direction:column;min-height:0;padding:0 12px 12px}
+.gs-card-prompts .gs-card-body{flex:1 1 auto}
+.gs-card[data-gs-collapsed="true"] .gs-card-body{display:none}
+.gs-minimap{position:relative;flex:0 0 auto;height:min(250px,32vh);border:1px solid var(--border-light,rgba(128,128,128,.35));border-radius:8px;background:rgba(128,128,128,.08);cursor:pointer;touch-action:none;overflow:hidden}
+.gs-minimap:focus-visible,.gs-search input:focus-visible,.gs-prompt:focus-visible,.gs-rail-toggle:focus-visible,.gs-card-head:focus-visible,.gs-filter:focus-visible,.gs-jump:focus-visible{outline:2px solid ${ACCENT};outline-offset:1px}
+.gs-bar{position:absolute;left:12%;min-height:2px;border-radius:2px;background:rgba(160,160,160,.5)}
+.gs-bar[data-kind="heading"]{background:rgba(220,220,220,.8)}
+.gs-bar[data-kind="code"]{background:rgba(106,169,255,.55)}
+.gs-bar[data-kind="table"]{background:rgba(25,195,125,.45)}
+.gs-bar[data-kind="image"]{background:rgba(255,160,90,.55)}
+.gs-view{position:absolute;left:4px;right:4px;border:2px solid ${ACCENT};border-radius:3px;background:rgba(25,195,125,.2);pointer-events:none}
+.gs-view::before,.gs-view::after{content:"";position:absolute;top:50%;width:6px;height:6px;margin-top:-3px;border-radius:50%;background:#fff;border:1px solid ${ACCENT}}
+.gs-view::before{left:-5px}.gs-view::after{right:-5px}
+.gs-caption{margin-top:8px;font-size:12px;opacity:.7}
+.gs-search{display:flex;flex:0 0 auto;gap:6px;align-items:center;margin-bottom:8px}
+.gs-search-field{position:relative;flex:1 1 auto;min-width:0}
+.gs-search-field::before{content:"";position:absolute;left:10px;top:50%;width:9px;height:9px;margin-top:-6px;border:2px solid currentColor;border-radius:50%;opacity:.6;pointer-events:none}
+.gs-search input{width:100%;min-height:36px;padding:4px 8px 4px 30px;border:1px solid var(--border-light,rgba(128,128,128,.35));border-radius:10px;background:rgba(128,128,128,.1);color:inherit;font:inherit}
+.gs-filter{flex:0 0 auto;width:36px;height:36px;border:1px solid var(--border-light,rgba(128,128,128,.35));border-radius:10px;background:rgba(128,128,128,.1);color:inherit;cursor:pointer}
+.gs-filter[aria-pressed="true"]{border-color:${ACCENT};color:${ACCENT}}
+.gs-prompts{flex:1 1 auto;min-height:60px;margin:0;padding:0;list-style:none;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain}
+.gs-prompt{position:relative;display:flex;gap:10px;width:100%;min-height:48px;padding:6px 26px 6px 10px;border:0;border-left:3px solid transparent;border-radius:8px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
 .gs-prompt:hover{background:rgba(128,128,128,.12)}
-.gs-prompt[aria-current="true"]{background:rgba(47,111,235,.18);font-weight:600}
-.gs-n{flex:0 0 auto;min-width:2ch;opacity:.6}
-.gs-text{flex:1 1 auto;min-width:0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
+.gs-prompt[aria-current="true"]{background:rgba(25,195,125,.16);border-left-color:${ACCENT}}
+.gs-prompt[data-in-view="true"]::after{content:"";position:absolute;right:10px;top:50%;width:6px;height:6px;margin-top:-3px;border-radius:50%;background:${ACCENT}}
+.gs-n{flex:0 0 auto;min-width:3ch;opacity:.75}
+.gs-copy{display:flex;flex:1 1 auto;flex-direction:column;min-width:0}
+.gs-title{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gs-preview{font-size:12px;opacity:.65;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .gs-empty{padding:8px;opacity:.6}
+.gs-jumps{display:flex;flex:0 0 auto;flex-direction:column;gap:2px;margin-top:8px;padding-top:8px;border-top:1px solid var(--border-light,rgba(128,128,128,.25))}
+.gs-jump{display:flex;gap:8px;align-items:center;min-height:28px;padding:2px 4px;border:0;background:transparent;color:inherit;font:inherit;font-size:12px;opacity:.8;text-align:left;cursor:pointer}
+.gs-jump:hover{opacity:1;text-decoration:underline}
+.gs-rail-toggle{display:none;min-width:44px;min-height:44px;border:1px solid var(--border-light,rgba(128,128,128,.35));border-radius:22px;background:var(--main-surface-primary,#212121);color:inherit;cursor:pointer}
+.gs-rail[data-gs-mode="collapsed"] .gs-rail-toggle{display:block}
 `;
+
+/** Title = first sentence of the prompt; preview = what follows, else the start of the reply. */
+export function describePrompt(text, reply = "") {
+  const clean = text.replace(/\s+/g, " ").trim();
+  const m = clean.match(/^(.{1,60}?)(?:[.?!:]\s+|$)/);
+  const title = (m ? m[1] : clean.slice(0, 60)).trim() || clean.slice(0, 60);
+  const rest = clean.slice(title.length).replace(/^[.?!:\s]+/, "");
+  const preview = (rest || reply.replace(/\s+/g, " ").trim()).slice(0, 100);
+  return { title, preview };
+}
 
 const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
 
@@ -57,6 +91,8 @@ export function createRail({ win, adapter, runtime }) {
   let query = "";
   let activeId = null;
   let open = false;
+  let inViewOnly = false;
+  let viewSet = new Set();
   let listPinned = true;
   let listManual = false;
   let modelKey = "";
@@ -76,11 +112,23 @@ export function createRail({ win, adapter, runtime }) {
   root.dataset.gsOpen = "true";
   root.innerHTML = `
     <div class="gs-rail-panel" id="gs-rail-panel">
-      <div class="gs-minimap" tabindex="0" role="slider" aria-orientation="vertical" aria-label="Current turn overview" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="gs-bars"></div><div class="gs-view" hidden></div></div>
-      <div class="gs-search"><input type="search" placeholder="Search prompts" aria-label="Search prompts"></div>
-      <ol class="gs-prompts" aria-label="Prompts, oldest first"></ol>
+      <section class="gs-card gs-card-overview" data-gs-collapsed="false">
+        <button type="button" class="gs-card-head" aria-expanded="true" aria-controls="gs-overview-body"><span class="gs-card-title">Conversation overview</span><span class="gs-chevron" aria-hidden="true"></span></button>
+        <div class="gs-card-body" id="gs-overview-body">
+          <div class="gs-minimap" tabindex="0" role="slider" aria-orientation="vertical" aria-label="Current turn overview" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="gs-bars"></div><div class="gs-view" hidden></div></div>
+          <div class="gs-caption" aria-live="off">Drag to navigate • 0% visible</div>
+        </div>
+      </section>
+      <section class="gs-card gs-card-prompts" data-gs-collapsed="false">
+        <button type="button" class="gs-card-head" aria-expanded="true" aria-controls="gs-prompts-body"><span class="gs-card-title">Prompts</span><span class="gs-chevron" aria-hidden="true"></span></button>
+        <div class="gs-card-body" id="gs-prompts-body">
+          <div class="gs-search"><div class="gs-search-field"><input type="search" placeholder="Search prompts..." aria-label="Search prompts"></div><button type="button" class="gs-filter" aria-pressed="false" aria-label="Only prompts in view" title="Only prompts in view">&#9776;</button></div>
+          <ol class="gs-prompts" aria-label="Prompts, oldest first"></ol>
+          <div class="gs-jumps"><button type="button" class="gs-jump gs-first">&uarr; First prompt (oldest)</button><button type="button" class="gs-jump gs-last">&darr; Last prompt (newest)</button></div>
+        </div>
+      </section>
     </div>
-    <button type="button" class="gs-rail-toggle" aria-controls="gs-rail-panel" aria-expanded="false" aria-label="Conversation navigator">☰</button>`;
+    <button type="button" class="gs-rail-toggle" aria-controls="gs-rail-panel" aria-expanded="false" aria-label="Conversation navigator">&#9776;</button>`;
   doc.body.appendChild(root);
 
   const $ = (sel) => root.querySelector(sel);
@@ -88,6 +136,9 @@ export function createRail({ win, adapter, runtime }) {
   const minimap = $(".gs-minimap");
   const bars = $(".gs-bars");
   const view = $(".gs-view");
+  const overviewCard = $(".gs-card-overview");
+  const caption = $(".gs-caption");
+  const filterBtn = $(".gs-filter");
   const input = $(".gs-search input");
   const list = $(".gs-prompts");
   const toggle = $(".gs-rail-toggle");
@@ -123,7 +174,8 @@ export function createRail({ win, adapter, runtime }) {
   }
 
   function renderList() {
-    const shown = searchPrompts(prompts, query);
+    let shown = searchPrompts(prompts, query);
+    if (inViewOnly) shown = shown.filter((p) => viewSet.has(p.id));
     list.textContent = "";
     if (!shown.length) {
       const li = doc.createElement("li");
@@ -132,6 +184,7 @@ export function createRail({ win, adapter, runtime }) {
       list.append(li);
     }
     for (const p of shown) {
+      const { title, preview } = describePrompt(p.text, els[p.turnIndex + 1]?.textContent ?? "");
       const li = doc.createElement("li");
       const b = doc.createElement("button");
       b.type = "button";
@@ -139,18 +192,56 @@ export function createRail({ win, adapter, runtime }) {
       b.dataset.id = p.id;
       b.tabIndex = p.id === (activeId ?? shown.at(-1)?.id) ? 0 : -1;
       b.setAttribute("aria-current", String(p.id === activeId));
+      b.dataset.inView = String(viewSet.has(p.id));
       b.title = p.preview;
       const n = doc.createElement("span");
       n.className = "gs-n";
-      n.textContent = String(prompts.indexOf(p) + 1);
+      n.textContent = `#${prompts.indexOf(p) + 1}`;
+      const copy = doc.createElement("span");
+      copy.className = "gs-copy";
       const t = doc.createElement("span");
-      t.className = "gs-text";
-      t.textContent = p.preview;
-      b.append(n, t);
+      t.className = "gs-title";
+      t.textContent = title;
+      const pv = doc.createElement("span");
+      pv.className = "gs-preview";
+      pv.textContent = preview;
+      copy.append(t, pv);
+      b.append(n, copy);
       li.append(b);
       list.append(li);
     }
     if (listPinned) list.scrollTop = list.scrollHeight;
+  }
+
+  /** Prompts whose turn is on screen get a dot; only the changed rows are touched. */
+  function updateInView() {
+    const next = new Set();
+    if (els.length && prompts.length) {
+      const base = scroller.getBoundingClientRect().top;
+      const bottom = base + scrollerHeight();
+      const firstVisible = firstElementBelow(base + 1);
+      let lastVisible = firstVisible;
+      while (lastVisible + 1 < els.length && els[lastVisible + 1].getBoundingClientRect().top < bottom) lastVisible++;
+      prompts.forEach((p, i) => {
+        if (p.turnIndex <= lastVisible && promptEnd(i) >= firstVisible) next.add(p.id);
+      });
+    }
+    const changed = next.size !== viewSet.size || [...next].some((id) => !viewSet.has(id));
+    viewSet = next;
+    if (!changed) return;
+    if (inViewOnly) return renderList();
+    for (const b of list.querySelectorAll(".gs-prompt")) b.dataset.inView = String(viewSet.has(b.dataset.id));
+  }
+
+  function firstElementBelow(y) {
+    let lo = 0;
+    let hi = els.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (els[mid].getBoundingClientRect().bottom > y) hi = mid;
+      else lo = mid + 1;
+    }
+    return lo;
   }
 
   function markActive() {
@@ -178,7 +269,7 @@ export function createRail({ win, adapter, runtime }) {
 
   function renderMinimap() {
     const ext = turnExtent();
-    if (!ext) return;
+    if (!ext || overviewCard.dataset.gsCollapsed === "true") return;
     const key = `${activeId}:${els.slice(prompts[ext.i].turnIndex, promptEnd(ext.i) + 1).map((e) => e.textContent.length).join(",")}`;
     if (key !== modelKey) {
       modelKey = key;
@@ -188,7 +279,7 @@ export function createRail({ win, adapter, runtime }) {
         const d = doc.createElement("div");
         d.className = "gs-bar";
         d.dataset.kind = b.kind;
-        d.style.cssText = `top:${(b.top * 100).toFixed(2)}%;height:${(b.height * 100).toFixed(2)}%;width:calc(${(b.width * 100).toFixed(1)}% - 8px)`;
+        d.style.cssText = `top:${(b.top * 100).toFixed(2)}%;height:${(b.height * 100).toFixed(2)}%;width:${(b.width * 76).toFixed(1)}%`;
         bars.append(d);
       }
     }
@@ -200,6 +291,7 @@ export function createRail({ win, adapter, runtime }) {
       viewBottom: sTop + scrollerHeight(),
     });
     view.hidden = !ind;
+    caption.textContent = `Drag to navigate • ${ind ? Math.round(ind.visible * 100) : 0}% visible`;
     if (ind) {
       view.style.top = `${(ind.top * 100).toFixed(2)}%`;
       view.style.height = `${(ind.height * 100).toFixed(2)}%`;
@@ -215,14 +307,7 @@ export function createRail({ win, adapter, runtime }) {
   function detectActive() {
     if (!els.length || !prompts.length) return null;
     if (scroller.scrollTop + scrollerHeight() >= scroller.scrollHeight - 2) return prompts.at(-1).id;
-    const base = scroller.getBoundingClientRect().top + 1;
-    let lo = 0;
-    let hi = els.length - 1;
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if (els[mid].getBoundingClientRect().bottom > base) hi = mid;
-      else lo = mid + 1;
-    }
+    const lo = firstElementBelow(scroller.getBoundingClientRect().top + 1);
     let found = prompts[0];
     for (const p of prompts) if (p.turnIndex <= lo) found = p;
     return found.id;
@@ -236,6 +321,7 @@ export function createRail({ win, adapter, runtime }) {
       activeId = next;
       markActive();
     }
+    updateInView();
     renderMinimap();
   }
 
@@ -342,6 +428,35 @@ export function createRail({ win, adapter, runtime }) {
     }
   });
   on(toggle, "click", () => setOpen(!open));
+  for (const head of root.querySelectorAll(".gs-card-head")) {
+    on(head, "click", () => {
+      const card = head.closest(".gs-card");
+      const collapsed = card.dataset.gsCollapsed !== "true";
+      card.dataset.gsCollapsed = String(collapsed);
+      head.setAttribute("aria-expanded", String(!collapsed));
+      if (!collapsed) {
+        modelKey = "";
+        schedule();
+        if (card.classList.contains("gs-card-prompts") && listPinned) list.scrollTop = list.scrollHeight;
+      }
+    });
+  }
+  on(filterBtn, "click", () => {
+    inViewOnly = !inViewOnly;
+    filterBtn.setAttribute("aria-pressed", String(inViewOnly));
+    renderList();
+  });
+  on($(".gs-first"), "click", () => {
+    if (!prompts[0]) return;
+    select(prompts[0]);
+    list.scrollTop = 0;
+  });
+  on($(".gs-last"), "click", () => {
+    if (!prompts.length) return;
+    select(prompts.at(-1));
+    listPinned = true;
+    list.scrollTop = list.scrollHeight;
+  });
   on(root, "keydown", (e) => {
     if (e.key === "Escape" && root.dataset.gsMode === "collapsed" && open && !input.value) {
       setOpen(false);
