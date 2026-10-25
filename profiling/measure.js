@@ -12,7 +12,9 @@
   const d = document;
   if (w.__gsProfile && w.__gsProfile.dispose) w.__gsProfile.dispose();
 
-  const TURN = '[data-testid^="conversation-turn-"]';
+  // Current markup: one [data-turn-key] element per turn and a timeline scroller; older builds used conversation-turn-N articles.
+  const TURN = '[data-turn-key], [data-testid^="conversation-turn-"]';
+  const MESSAGE = "[data-message-author-role], [data-user-message-bubble], [data-conversation-role]";
   const INTENT_MS = 500;
   const SCROLL_KEYS = new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "]);
   const now = () => w.performance.now();
@@ -20,7 +22,7 @@
   const supported = (type) => !!(w.PerformanceObserver && (w.PerformanceObserver.supportedEntryTypes || []).includes(type));
 
   function findScroller() {
-    const marked = d.querySelector("[data-scroll-root]");
+    const marked = d.querySelector("[data-scroll-root], [data-app-action-timeline-scroll]");
     if (marked) return marked;
     for (let el = d.querySelector(TURN)?.parentElement; el && el !== d.body; el = el.parentElement) {
       const overflow = w.getComputedStyle(el).overflowY;
@@ -54,7 +56,7 @@
     if (!oldest || oldest.getAttribute("data-gs-state") === "inactive") return false;
     const rect = oldest.getBoundingClientRect();
     const view = scroller === d.scrollingElement || scroller === d.documentElement ? { top: 0, bottom: w.innerHeight } : scroller.getBoundingClientRect();
-    return rect.height > 0 && rect.bottom > view.top && rect.top < view.bottom && !!oldest.querySelector("[data-message-author-role]");
+    return rect.height > 0 && rect.bottom > view.top && rect.top < view.bottom && !!oldest.querySelector(MESSAGE);
   }
 
   let rec = null;

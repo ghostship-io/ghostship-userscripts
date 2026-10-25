@@ -9,11 +9,15 @@ import { JSDOM } from "jsdom";
  * and animation frames are queued and delivered by `settle()` so tests are
  * deterministic.
  */
-export function createFixture({ turns = 40, viewport = 800, markup = "chatgpt", width = 1024, nav = 0 } = {}) {
+// `overlay` (markup "real"): the page column is the scroller itself and the composer sits in an
+// absolutely positioned overlay inside it, as on chatgpt.com, so padding on the scroller does not move it.
+export function createFixture({ turns = 40, viewport = 800, markup = "chatgpt", width = 1024, nav = 0, overlay = false } = {}) {
   const dom = new JSDOM(
     `<!doctype html><html><head></head><body>
-      <div id="scroller" data-scroll-root style="overflow-y:auto"><main id="thread"></main></div>
-      <form id="composer"><textarea id="prompt-textarea"></textarea></form>
+      ${overlay
+        ? `<div id="scroller" data-scroll-root style="overflow-y:auto"><main id="thread"></main><div id="overlay" style="position:absolute"><form id="composer"><textarea id="prompt-textarea"></textarea></form></div></div>`
+        : `<div id="scroller" data-scroll-root style="overflow-y:auto"><main id="thread"></main></div>
+      <form id="composer"><textarea id="prompt-textarea"></textarea></form>`}
     </body></html>`,
     { pretendToBeVisual: false, runScripts: "outside-only", url: "https://chatgpt.com/c/fixture" },
   );
@@ -62,20 +66,21 @@ export function createFixture({ turns = 40, viewport = 800, markup = "chatgpt", 
   // The page column is <body>: its left edge is the app navigation (`nav`), its right edge shrinks by the
   // rail's reserved padding, and the centered conversation/composer (768 wide at most) follow it.
   let navWidth = nav;
-  const reserved = () => parseFloat(doc.body.style.getPropertyValue("--gs-reserve")) || 0;
-  const columnRect = () => ({ left: navWidth, right: win.innerWidth - reserved() });
-  const contentRect = (top, height) => {
-    const col = columnRect();
+  const reservedOf = (el) => parseFloat(el.style.getPropertyValue("--gs-reserve")) || 0;
+  const reserved = () => reservedOf(overlay ? scroller : doc.body);
+  const columnRect = (el = overlay ? scroller : doc.body) => ({ left: navWidth, right: win.innerWidth - reservedOf(el) });
+  const contentRect = (top, height, el) => {
+    const col = columnRect(el);
     const width = Math.min(768, col.right - col.left - 32);
     const left = col.left + (col.right - col.left - width) / 2;
     return { top, bottom: top + height, height, left, right: left + width, width, x: left, y: top };
   };
   EP.getBoundingClientRect = function () {
-    if (this === doc.body) {
-      const col = columnRect();
+    if (this === doc.body || (overlay && this === scroller)) {
+      const col = columnRect(this);
       return { top: 0, bottom: viewport, height: viewport, left: col.left, right: col.right, width: col.right - col.left, x: col.left, y: 0 };
     }
-    if (this.id === "composer") return contentRect(viewport - 120, 100);
+    if (this.id === "composer") return contentRect(viewport - 120, 100, overlay ? doc.getElementById("overlay") : doc.body);
     let top = 0;
     let height = 0;
     if (this === scroller) height = viewport;

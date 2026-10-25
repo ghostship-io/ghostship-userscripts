@@ -17,33 +17,39 @@ const SCROLLER = "[data-scroll-root], [data-app-action-timeline-scroll]";
 const HEADER = "#page-header";
 const ASSISTANT = '[data-message-author-role="assistant"], [data-conversation-role="assistant"]';
 const SCROLLABLE = new Set(["auto", "scroll", "overlay"]);
+const ABSOLUTE = new Set(["absolute", "fixed"]);
+// ChatGPT keeps pages you navigated away from mounted but inactive (hidden, with their own composer, turns and
+// scroller). Everything the script attaches to must come from the active page.
+const ACTIVE_PAGE = '[data-app-shell-active-page="true"]';
+const scope = (root) => (root.nodeType === 9 ? root.querySelector(ACTIVE_PAGE) ?? root : root);
 
 const nonEmptyRole = (el, sel, attr) => (el.matches(sel) ? el : el.querySelector(sel))?.getAttribute(attr) || null;
 
 export const chatgptAdapter = {
-  turns: (root) => [...root.querySelectorAll(TURN)],
+  turns: (root) => [...scope(root).querySelectorAll(TURN)],
   role: (turn) => nonEmptyRole(turn, ROLE, "data-message-author-role") ?? (turn.querySelector("[data-user-message-bubble]") ? "user" : nonEmptyRole(turn, REPLY, "data-conversation-role")),
   blocks: (turnEls) => turnEls.flatMap((el) => [...el.querySelectorAll(BLOCKS)]),
   // Queue transport (live dispatcher): the editable composer input and its Send/Stop buttons.
-  composerInput: (doc) => doc.querySelector(COMPOSER),
-  sendButton: (doc) => doc.querySelector(SEND),
-  stopButton: (doc) => doc.querySelector(STOP),
-  userTurnCount: (doc) => doc.querySelectorAll(USER).length,
+  composerInput: (doc) => scope(doc).querySelector(COMPOSER),
+  sendButton: (doc) => scope(doc).querySelector(SEND),
+  stopButton: (doc) => scope(doc).querySelector(STOP),
+  userTurnCount: (doc) => scope(doc).querySelectorAll(USER).length,
   userMessage: (turn) => turn.querySelector(USER),
   turnId: (turn, index) => turn.getAttribute("data-turn-key") ?? turn.getAttribute("data-testid") ?? `turn-${index}`,
   /** The stable element whose subtree contains every turn; observed for new turns. */
-  turnRoot: (doc) => doc.querySelector(TURN_ROOT) ?? doc.querySelector(TURN)?.parentElement ?? null,
+  turnRoot: (doc) => scope(doc).querySelector(TURN_ROOT) ?? scope(doc).querySelector(TURN)?.parentElement ?? null,
   /** The element the queue panel is inserted directly before: the composer form, else the input itself. */
-  composer: (doc) => doc.querySelector(COMPOSER)?.closest("form") ?? doc.querySelector(COMPOSER),
+  composer: (doc) => scope(doc).querySelector(COMPOSER)?.closest("form") ?? scope(doc).querySelector(COMPOSER),
   conversationId: (win) => win.location.pathname.match(/^\/c\/([\w-]+)/)?.[1] ?? "new",
   /**
    * The element that actually scrolls the conversation. The known selector is trusted unless a nearer
    * ancestor of the turns is itself scrollable and overflowing (the markup moved the scroll owner inward).
    */
   scroller(doc) {
-    const known = doc.querySelector(SCROLLER);
+    const page = scope(doc);
+    const known = page.querySelector(SCROLLER);
     const win = doc.defaultView;
-    for (let el = doc.querySelector(TURN)?.parentElement; el && el !== doc.body && el !== doc.documentElement; el = el.parentElement) {
+    for (let el = page.querySelector(TURN)?.parentElement; el && el !== doc.body && el !== doc.documentElement; el = el.parentElement) {
       if (el === known) break;
       if (SCROLLABLE.has(win.getComputedStyle(el).overflowY) && el.scrollHeight > el.clientHeight && (!known || known.contains(el))) return el;
     }
@@ -57,10 +63,24 @@ export const chatgptAdapter = {
     const composer = this.composer(doc);
     const scroller = this.scroller(doc);
     if (!composer || !scroller) return null;
-    const header = doc.querySelector(HEADER);
+    const header = scope(doc).querySelector(HEADER);
     let node = scroller;
     while (node && !(node.contains(composer) && (!header || node.contains(header)))) node = node.parentElement;
     return !node || node === doc.documentElement ? doc.body : node;
+  },
+  /**
+   * Everything the rail's reservation must be written to: the page column and, when the composer sits in an
+   * absolutely positioned overlay inside it (chatgpt.com does), that overlay, which padding on the column
+   * cannot move.
+   */
+  columns(doc) {
+    const column = this.column(doc);
+    if (!column) return [];
+    const win = doc.defaultView;
+    for (let el = this.composer(doc)?.parentElement; el && el !== column; el = el.parentElement) {
+      if (column.contains(el) && ABSOLUTE.has(win.getComputedStyle(el).position)) return [column, el];
+    }
+    return [column];
   },
   /** The assistant reply of turn `index` of `turns`: inside the turn element, else the next message element. */
   reply(turns, index) {
@@ -71,19 +91,20 @@ export const chatgptAdapter = {
   },
   /** Identity of the pieces the script attaches to; a change means the page re-rendered or navigated. */
   layout(doc, win) {
-    const first = doc.querySelector(TURN);
+    const first = scope(doc).querySelector(TURN);
     return {
       route: this.conversationId(win),
-      composer: doc.querySelector(COMPOSER),
+      composer: scope(doc).querySelector(COMPOSER),
       container: first ? this.turnRoot(doc) : null,
       scroller: first ? this.scroller(doc) : null,
     };
   },
   /** `ok` means the composer is there (a new chat has no turns); `hasTurns` selects the full feature set. */
   selfCheck(doc) {
-    const hasTurns = !!doc.querySelector(TURN);
+    const page = scope(doc);
+    const hasTurns = !!page.querySelector(TURN);
     const missing = [];
-    if (!doc.querySelector(COMPOSER)) missing.push("composer");
+    if (!page.querySelector(COMPOSER)) missing.push("composer");
     if (!hasTurns) missing.push("turns");
     return { ok: !missing.includes("composer"), hasTurns, missing };
   },

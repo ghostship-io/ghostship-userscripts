@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GhostShip ChatGPT
 // @namespace    https://github.com/ghostship-io/ghostship-userscripts
-// @version      0.6.2
+// @version      0.6.3
 // @description  Fast, queue-aware ChatGPT interface for the owner browser.
 // @match        https://chatgpt.com/*
 // @grant        none
@@ -733,31 +733,35 @@
   var HEADER = "#page-header";
   var ASSISTANT = '[data-message-author-role="assistant"], [data-conversation-role="assistant"]';
   var SCROLLABLE = /* @__PURE__ */ new Set(["auto", "scroll", "overlay"]);
+  var ABSOLUTE = /* @__PURE__ */ new Set(["absolute", "fixed"]);
+  var ACTIVE_PAGE = '[data-app-shell-active-page="true"]';
+  var scope = (root) => root.nodeType === 9 ? root.querySelector(ACTIVE_PAGE) ?? root : root;
   var nonEmptyRole = (el2, sel, attr) => (el2.matches(sel) ? el2 : el2.querySelector(sel))?.getAttribute(attr) || null;
   var chatgptAdapter = {
-    turns: (root) => [...root.querySelectorAll(TURN)],
+    turns: (root) => [...scope(root).querySelectorAll(TURN)],
     role: (turn) => nonEmptyRole(turn, ROLE, "data-message-author-role") ?? (turn.querySelector("[data-user-message-bubble]") ? "user" : nonEmptyRole(turn, REPLY, "data-conversation-role")),
     blocks: (turnEls) => turnEls.flatMap((el2) => [...el2.querySelectorAll(BLOCKS)]),
     // Queue transport (live dispatcher): the editable composer input and its Send/Stop buttons.
-    composerInput: (doc) => doc.querySelector(COMPOSER),
-    sendButton: (doc) => doc.querySelector(SEND),
-    stopButton: (doc) => doc.querySelector(STOP),
-    userTurnCount: (doc) => doc.querySelectorAll(USER).length,
+    composerInput: (doc) => scope(doc).querySelector(COMPOSER),
+    sendButton: (doc) => scope(doc).querySelector(SEND),
+    stopButton: (doc) => scope(doc).querySelector(STOP),
+    userTurnCount: (doc) => scope(doc).querySelectorAll(USER).length,
     userMessage: (turn) => turn.querySelector(USER),
     turnId: (turn, index) => turn.getAttribute("data-turn-key") ?? turn.getAttribute("data-testid") ?? `turn-${index}`,
     /** The stable element whose subtree contains every turn; observed for new turns. */
-    turnRoot: (doc) => doc.querySelector(TURN_ROOT) ?? doc.querySelector(TURN)?.parentElement ?? null,
+    turnRoot: (doc) => scope(doc).querySelector(TURN_ROOT) ?? scope(doc).querySelector(TURN)?.parentElement ?? null,
     /** The element the queue panel is inserted directly before: the composer form, else the input itself. */
-    composer: (doc) => doc.querySelector(COMPOSER)?.closest("form") ?? doc.querySelector(COMPOSER),
+    composer: (doc) => scope(doc).querySelector(COMPOSER)?.closest("form") ?? scope(doc).querySelector(COMPOSER),
     conversationId: (win) => win.location.pathname.match(/^\/c\/([\w-]+)/)?.[1] ?? "new",
     /**
      * The element that actually scrolls the conversation. The known selector is trusted unless a nearer
      * ancestor of the turns is itself scrollable and overflowing (the markup moved the scroll owner inward).
      */
     scroller(doc) {
-      const known = doc.querySelector(SCROLLER);
+      const page = scope(doc);
+      const known = page.querySelector(SCROLLER);
       const win = doc.defaultView;
-      for (let el2 = doc.querySelector(TURN)?.parentElement; el2 && el2 !== doc.body && el2 !== doc.documentElement; el2 = el2.parentElement) {
+      for (let el2 = page.querySelector(TURN)?.parentElement; el2 && el2 !== doc.body && el2 !== doc.documentElement; el2 = el2.parentElement) {
         if (el2 === known) break;
         if (SCROLLABLE.has(win.getComputedStyle(el2).overflowY) && el2.scrollHeight > el2.clientHeight && (!known || known.contains(el2))) return el2;
       }
@@ -771,10 +775,24 @@
       const composer = this.composer(doc);
       const scroller = this.scroller(doc);
       if (!composer || !scroller) return null;
-      const header = doc.querySelector(HEADER);
+      const header = scope(doc).querySelector(HEADER);
       let node = scroller;
       while (node && !(node.contains(composer) && (!header || node.contains(header)))) node = node.parentElement;
       return !node || node === doc.documentElement ? doc.body : node;
+    },
+    /**
+     * Everything the rail's reservation must be written to: the page column and, when the composer sits in an
+     * absolutely positioned overlay inside it (chatgpt.com does), that overlay, which padding on the column
+     * cannot move.
+     */
+    columns(doc) {
+      const column = this.column(doc);
+      if (!column) return [];
+      const win = doc.defaultView;
+      for (let el2 = this.composer(doc)?.parentElement; el2 && el2 !== column; el2 = el2.parentElement) {
+        if (column.contains(el2) && ABSOLUTE.has(win.getComputedStyle(el2).position)) return [column, el2];
+      }
+      return [column];
     },
     /** The assistant reply of turn `index` of `turns`: inside the turn element, else the next message element. */
     reply(turns, index) {
@@ -785,19 +803,20 @@
     },
     /** Identity of the pieces the script attaches to; a change means the page re-rendered or navigated. */
     layout(doc, win) {
-      const first = doc.querySelector(TURN);
+      const first = scope(doc).querySelector(TURN);
       return {
         route: this.conversationId(win),
-        composer: doc.querySelector(COMPOSER),
+        composer: scope(doc).querySelector(COMPOSER),
         container: first ? this.turnRoot(doc) : null,
         scroller: first ? this.scroller(doc) : null
       };
     },
     /** `ok` means the composer is there (a new chat has no turns); `hasTurns` selects the full feature set. */
     selfCheck(doc) {
-      const hasTurns = !!doc.querySelector(TURN);
+      const page = scope(doc);
+      const hasTurns = !!page.querySelector(TURN);
       const missing = [];
-      if (!doc.querySelector(COMPOSER)) missing.push("composer");
+      if (!page.querySelector(COMPOSER)) missing.push("composer");
       if (!hasTurns) missing.push("turns");
       return { ok: !missing.includes("composer"), hasTurns, missing };
     }
@@ -2181,68 +2200,69 @@
 `;
   function createRailLayout({ win, adapter, target }) {
     const doc = win.document;
-    let column = null;
+    let written = [];
     let known = null;
     let applied = 0;
-    const findColumn = () => {
-      if (!known?.isConnected) known = adapter.column(doc);
+    const findColumns = () => {
+      if (!known?.length || known.some((el2) => !el2.isConnected)) known = adapter.columns(doc);
       return known;
     };
-    function setReserve(col, px) {
-      if (column && column !== col) clear();
-      column = col;
-      if (px > 0) {
-        if (col.getAttribute("data-gs-column") === null) col.setAttribute("data-gs-column", "");
-        const v = `${Math.round(px)}px`;
-        if (col.style.getPropertyValue("--gs-reserve") !== v) col.style.setProperty("--gs-reserve", v);
-      } else if (applied > 0 || col.hasAttribute("data-gs-column")) {
-        col.removeAttribute("data-gs-column");
-        col.style.removeProperty("--gs-reserve");
-        if (!col.getAttribute("style")) col.removeAttribute("style");
+    function release(el2) {
+      el2.removeAttribute("data-gs-column");
+      el2.style.removeProperty("--gs-reserve");
+      if (!el2.getAttribute("style")) el2.removeAttribute("style");
+    }
+    function setReserve(cols, px) {
+      if (written.some((el2) => !cols.includes(el2))) clear();
+      written = cols;
+      for (const col of cols) {
+        if (px > 0) {
+          if (col.getAttribute("data-gs-column") === null) col.setAttribute("data-gs-column", "");
+          const v = `${Math.round(px)}px`;
+          if (col.style.getPropertyValue("--gs-reserve") !== v) col.style.setProperty("--gs-reserve", v);
+        } else if (applied > 0 || col.hasAttribute("data-gs-column")) release(col);
       }
       applied = px > 0 ? Math.round(px) : 0;
     }
     function clear() {
-      if (!column) return;
-      column.removeAttribute("data-gs-column");
-      column.style.removeProperty("--gs-reserve");
-      if (!column.getAttribute("style")) column.removeAttribute("style");
-      column = null;
+      for (const el2 of written) release(el2);
+      written = [];
       applied = 0;
     }
     function signature() {
-      const col = findColumn();
-      if (!col) return "none";
-      const r = col.getBoundingClientRect();
-      return `${win.innerWidth}|${Math.round(r.left)}|${Math.round(r.right + (col === column ? applied : 0))}`;
+      const cols = findColumns();
+      if (!cols.length) return "none";
+      const r = cols[0].getBoundingClientRect();
+      return `${win.innerWidth}|${Math.round(r.left)}|${Math.round(r.right + (written.includes(cols[0]) ? applied : 0))}|${cols.length}`;
     }
     function evaluate() {
-      const col = findColumn();
+      const cols = findColumns();
       const el2 = target() ?? adapter.composer(doc);
-      if (!col || !el2 || win.innerWidth < DOCK_MIN_VIEWPORT) {
-        if (col) setReserve(col, 0);
+      const edge = () => Math.max(el2.getBoundingClientRect().right, adapter.composer(doc)?.getBoundingClientRect().right ?? 0);
+      if (!cols.length || !el2 || win.innerWidth < DOCK_MIN_VIEWPORT) {
+        if (cols.length) setReserve(cols, 0);
         else clear();
         return { docked: false, reserve: 0 };
       }
-      setReserve(col, 0);
-      const room = Math.max(0, win.innerWidth - col.getBoundingClientRect().right);
+      setReserve(cols, 0);
+      const room = Math.max(0, win.innerWidth - cols[0].getBoundingClientRect().right);
       const cap = Math.max(0, RAIL_RESERVE - room);
       const limit = win.innerWidth - RAIL_RESERVE;
-      let rect = el2.getBoundingClientRect();
+      let right = edge();
       let reserve = 0;
-      if (rect.right > limit && cap > 0) {
-        reserve = Math.min(cap, 2 * (rect.right - limit));
+      if (right > limit && cap > 0) {
+        reserve = Math.min(cap, 2 * (right - limit));
         for (let i = 0; i < 3; i++) {
-          setReserve(col, reserve);
-          rect = el2.getBoundingClientRect();
-          const over = rect.right - limit;
+          setReserve(cols, reserve);
+          right = edge();
+          const over = right - limit;
           if (over <= 0.5 || reserve >= cap) break;
           reserve = Math.min(cap, reserve + over);
         }
       }
-      const fits = rect.right <= limit + 0.5 && (reserve === 0 || rect.width >= MIN_CONTENT);
+      const fits = right <= limit + 0.5 && (reserve === 0 || el2.getBoundingClientRect().width >= MIN_CONTENT);
       if (!fits) {
-        setReserve(col, 0);
+        setReserve(cols, 0);
         return { docked: false, reserve: 0 };
       }
       return { docked: true, reserve };
@@ -3128,7 +3148,7 @@ ${LAYOUT_CSS}`;
   var boot = createBoot({
     win: window,
     adapter: chatgptAdapter,
-    version: "0.6.2",
+    version: "0.6.3",
     onDispose: () => queueUi.shutdown(),
     mount() {
       const runtime = createRuntime({ win: window, adapter: chatgptAdapter, backend: createTurnBackend(), queueUi });

@@ -64,3 +64,55 @@ test("virtualization, prompt list and navigation work on turns that live in sepa
   assert.equal(fx.doc.querySelectorAll(".gs-prompt").length, 31);
   assert.equal(runtime.mode, "active");
 });
+
+// ChatGPT keeps pages you navigated away from mounted but inactive (display:none, with their own composer,
+// turns and scroller). The script must attach to the active page only: after "conversation -> new chat" it
+// used to bind the hidden conversation (queue panel in a hidden composer, the old prompts in the rail).
+function keptAlive({ activeIsConversation }) {
+  const fx = createFixture({ turns: 6, markup: "real", width: 1600 });
+  const { doc } = fx;
+  const conversation = doc.createElement("div");
+  conversation.append(doc.getElementById("scroller"), doc.getElementById("composer"));
+  const empty = doc.createElement("div");
+  empty.innerHTML =
+    '<form data-chatgpt-composer id="composer-empty"><div contenteditable="true" role="textbox"></div><button data-testid="send-button"></button></form>';
+  const [active, stale] = activeIsConversation ? [conversation, empty] : [empty, conversation];
+  active.setAttribute("data-app-shell-active-page", "true");
+  stale.setAttribute("data-app-shell-active-page", "false");
+  stale.style.display = "none";
+  doc.body.append(stale, active);
+  return { fx, active, stale };
+}
+
+test("a new chat opened from a conversation ignores the hidden conversation page", () => {
+  const { fx, active } = keptAlive({ activeIsConversation: false });
+  const { doc, win } = fx;
+  assert.deepEqual(chatgptAdapter.selfCheck(doc), { ok: true, hasTurns: false, missing: ["turns"] });
+  assert.equal(chatgptAdapter.composer(doc), doc.getElementById("composer-empty"));
+  assert.ok(active.contains(chatgptAdapter.composerInput(doc)));
+  assert.ok(active.contains(chatgptAdapter.sendButton(doc)));
+  assert.equal(chatgptAdapter.turns(doc).length, 0);
+  assert.equal(chatgptAdapter.userTurnCount(doc), 0);
+  assert.equal(chatgptAdapter.turnRoot(doc), null);
+  assert.deepEqual(chatgptAdapter.layout(doc, win), { route: "fixture", composer: chatgptAdapter.composerInput(doc), container: null, scroller: null });
+  const runtime = createRuntime({ win, adapter: chatgptAdapter, backend: createTurnBackend(), config: { ...DEFAULTS } });
+  assert.equal(runtime.mode, "composer-only");
+  assert.equal(runtime.promptIndex.length, 0);
+  runtime.dispose();
+});
+
+test("a conversation opened after a new chat ignores the hidden empty page", () => {
+  const { fx, active } = keptAlive({ activeIsConversation: true });
+  const { doc } = fx;
+  assert.deepEqual(chatgptAdapter.selfCheck(doc), { ok: true, hasTurns: true, missing: [] });
+  assert.equal(chatgptAdapter.composer(doc), doc.getElementById("composer"));
+  assert.ok(active.contains(chatgptAdapter.composerInput(doc)));
+  assert.equal(chatgptAdapter.turns(doc).length, 6);
+  assert.equal(chatgptAdapter.scroller(doc), fx.scroller);
+});
+
+test("without an active-page marker the whole document is the page", () => {
+  const fx = createFixture({ turns: 6, markup: "real", width: 1600 });
+  assert.equal(chatgptAdapter.turns(fx.doc).length, 6);
+  assert.equal(chatgptAdapter.selfCheck(fx.doc).ok, true);
+});
