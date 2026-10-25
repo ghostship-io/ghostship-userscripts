@@ -280,6 +280,19 @@ export const chatgptAdapter = {
     return false;
   },
   /**
+   * ChatGPT's own summary pane wherever it renders, with its box: `{ el, left, right, inPage }`, or null. In a wide page it
+   * is part of the page (`inPage`); in a narrow one ChatGPT shows it as a popover outside the page.
+   */
+  summaryCard(doc) {
+    const page = scope(doc);
+    for (const el of doc.querySelectorAll(SUMMARY_HINT)) {
+      if (el.closest(OWN_UI) || el.closest(TURN)) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width) return { el, left: r.left, right: r.right, inPage: page.contains(el) };
+    }
+    return null;
+  },
+  /**
    * Any other pane docked or floating over the right edge of the page (a Subagents or canvas view, say), found by
    * what is really painted there rather than by its title: the widest element on the right edge that is neither
    * the conversation nor the composer nor ours. `{ pane, container, left, outputs: null }` like `nativeSummary`, or null.

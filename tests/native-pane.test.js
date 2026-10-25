@@ -7,12 +7,12 @@ import { chatgptAdapter } from "../src/chatgpt/adapter.js";
 import { createTurnBackend } from "../src/chatgpt/virtualization/backend.js";
 import { createRail } from "../src/chatgpt/rail/rail.js";
 import { createPanePrefs, createRailStateStore } from "../src/chatgpt/rail/rail-state.js";
-import { PANEL_GAP } from "../src/chatgpt/rail/rail-layout.js";
+import { PANEL_GAP, PANEL_WIDTH } from "../src/chatgpt/rail/rail-layout.js";
 
 function mount(fx, { store = createRailStateStore(), prefs } = {}) {
   const runtime = createRuntime({ win: fx.win, adapter: chatgptAdapter, backend: createTurnBackend(), config: { ...DEFAULTS } });
   assert.equal(runtime.mode, "active");
-  const rail = createRail({ win: fx.win, adapter: chatgptAdapter, runtime, store, prefs });
+  const rail = createRail({ win: fx.win, adapter: chatgptAdapter, runtime, store, prefs, paneSettleMs: 20 });
   return {
     runtime,
     rail,
@@ -34,9 +34,14 @@ const outputs = (fx) => fx.doc.getElementById("native-outputs");
 const sources = (fx) => fx.doc.getElementById("native-sources");
 const norm = (html) => html.replace(/style="([^"]*)"/g, (_, v) => `style="${v.replace(/\s+/g, "").replace(/;$/, "")}"`);
 const snapshot = (el) => [el, ...el.querySelectorAll("*")];
+const settled = async (fx) => {
+  await new Promise((resolve) => setTimeout(resolve, 80)); // the rail measures once more after ChatGPT's pane has slid
+  await fx.settle();
+};
 const resize = async (fx) => {
   fx.win.dispatchEvent(new fx.win.Event("resize"));
   await fx.settle();
+  await settled(fx);
 };
 
 test("while ChatGPT's own side pane is open our panels step aside for it, and the native pane is untouched except for the Outputs disclosure", async () => {
@@ -114,29 +119,43 @@ test("a pane without Outputs still works beside the panels and Sources is untouc
   assert.equal(rail(fx).hidden, true);
 });
 
-test("with a side pane open at any width our panels step aside and reserve nothing; without it they dock", async () => {
+test("with ChatGPT's pane open our column stays beside it while there is room, and is a drawer where there is not", async () => {
+  // The pane sits inside the page column, so our padding moves it left of our column.
+  const cases = [[2400, 0, true], [2200, 0, true], [1900, 52, true], [1700, 0, false], [1500, 52, false], [1300, 0, false], [1000, 0, false], [390, 0, false]];
   for (const theme of ["light", "dark"]) {
-    for (const [width, nav] of [[2200, 0], [1900, 52], [1700, 0], [1500, 52], [1300, 0], [1000, 0], [390, 0]]) {
-      const fx = createFixture({ turns: 20, width, nav, markup: "real", pane: width > 600 ? {} : { width, reserves: false }, header: true });
+    for (const [width, nav, beside] of cases) {
+      const fx = createFixture({ turns: 20, width, nav, markup: "real", pane: { follows: true, reserves: false }, header: true });
       fx.doc.documentElement.className = theme;
       mount(fx);
-      await fx.settle();
-      const label = `${theme}, ${width}px wide, ${nav}px navigation, side pane open`;
-      assert.equal(rail(fx).hidden, true, `${label}: the pane has the room`);
-      assert.equal(fx.reserve(), 0, `${label}: nothing reserved, the page is ChatGPT's`);
+      await settled(fx);
+      const label = `${theme}, ${width}px wide, ${nav}px navigation, pane open`;
+      assert.equal(rail(fx).hidden, !beside, `${label}: ${beside ? "our column stays visible beside the pane" : "no room for both: a drawer"}`);
+      if (beside) {
+        const { turn, composer } = rects(fx);
+        const pane = fx.pane.getBoundingClientRect();
+        const columnLeft = width - parseFloat(rail(fx).style.getPropertyValue("--gs-right")) - PANEL_WIDTH;
+        assert.ok(pane.right <= columnLeft, `${label}: the pane (right ${pane.right}) is left of our column (${columnLeft})`);
+        assert.ok(turn.right <= pane.left && composer.right <= pane.left, `${label}: the conversation clears the pane`);
+        assert.equal(fx.doc.querySelector(".gs-hbtn").getAttribute("aria-pressed"), "true");
+      } else assert.equal(fx.reserve(), 0, `${label}: a drawer reserves nothing`);
       assert.equal(fx.doc.querySelectorAll(".gs-hbtn").length, 1, `${label}: one button`);
     }
   }
+  // A pane that stays where it is (it does not follow our padding) would sit under our column: a drawer.
+  const fixed = createFixture({ turns: 20, width: 2200, markup: "real", pane: {}, header: true });
+  mount(fixed);
+  await settled(fixed);
+  assert.equal(rail(fixed).hidden, true);
   const bare = createFixture({ turns: 20, width: 1900, nav: 52, markup: "real", header: true });
   mount(bare);
-  await bare.settle();
+  await settled(bare);
   assert.equal(rail(bare).hidden, false);
 });
 
 test("the native pane appearing hands the room to it, closing or hiding it gives it back; nothing doubles", async () => {
   const fx = createFixture({ turns: 20, width: 1700, markup: "real", header: true });
   mount(fx);
-  await fx.settle();
+  await settled(fx);
   assert.equal(rail(fx).hidden, false, "no native pane: our column");
   const bare = fx.reserve();
   assert.ok(bare >= 0);
@@ -173,7 +192,7 @@ test("the native pane appearing hands the room to it, closing or hiding it gives
 test("a pane that mounts without any resize or mutation hint is found by the trailing scan", async () => {
   const fx = createFixture({ turns: 20, width: 1700, markup: "real" });
   mount(fx);
-  await fx.settle();
+  await settled(fx);
   assert.equal(rail(fx).hidden, false);
   fx.mountPane();
   fx.thread.append(fx.doc.createComment("render")); // an ordinary refresh, inside the scan throttle
@@ -186,7 +205,7 @@ test("headings inside the conversation never count as the native pane", async ()
   const reply = fx.thread.lastElementChild.querySelector("[data-conversation-role]");
   reply.insertAdjacentHTML("beforeend", "<h3>Sources</h3><h3>Outputs</h3>");
   mount(fx);
-  await fx.settle();
+  await settled(fx);
   assert.equal(chatgptAdapter.nativeSummary(fx.doc), null);
   assert.equal(varOf(fx, "--gs-right"), PANEL_GAP);
 });
@@ -323,7 +342,7 @@ test("dispose leaves ChatGPT's pane, its header and the page exactly as they wer
 test("mobile: a native full-width sheet is the only thing shown; our panels stay drawers behind their header buttons", async () => {
   const fx = createFixture({ turns: 12, width: 390, markup: "real", pane: { width: 390, reserves: false }, header: true });
   mount(fx);
-  await fx.settle();
+  await settled(fx);
   assert.equal(rail(fx).hidden, true, "a drawer behind the button");
   assert.equal(fx.reserve(), 0);
   assert.equal(fx.doc.body.hasAttribute("data-gs-column"), false);

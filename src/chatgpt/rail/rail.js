@@ -123,7 +123,7 @@ const MAP_W = 244; // the track's width when it cannot be measured
  * pane: the boot controller rebuilds it on every route change. The collapse states also
  * survive a reload (`prefs`).
  */
-export function createRail({ win, adapter, runtime, store = createRailStateStore(), prefs = createPanePrefs(win.localStorage), layoutPrefs = createPanelPrefs(win.localStorage) }) {
+export function createRail({ win, adapter, runtime, store = createRailStateStore(), prefs = createPanePrefs(win.localStorage), layoutPrefs = createPanelPrefs(win.localStorage), paneSettleMs = PANE_SETTLE_MS }) {
   const doc = win.document;
   const scroll = runtime.scroll;
   const scroller = scroll.element ?? adapter.scroller(doc);
@@ -167,6 +167,7 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
   let interacted = false;
   let lastHost = null;
   let lastPaneOpen = false;
+  let paneYield = false; // an open ChatGPT pane and our column do not both fit: ours is a drawer until it closes or the window resizes
   let settleTimer = null;
   let scannedAt = -Infinity;
   let scanTimer = null;
@@ -450,7 +451,7 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
   }
 
   /** Re-center the conversation around the docked column (or turn it into a drawer) when the page layout changed. */
-  function layout(rescan = false) {
+  function layout(rescan = false, settled = false) {
     remount();
     // A mounted native pane is revalidated cheaply; looking for one is a page scan, so it runs at most every SCAN_MS
     // (at once on resize, route and animation hints) and a trailing pass catches a pane that mounted in between.
@@ -475,9 +476,14 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
     const floating = placeButton(host?.pane);
     // Under a page header the column starts below it; with the button floating, below the button.
     const top = Math.max(Math.round(adapter.headerBottom(doc)), floating ? FLOAT_BOTTOM : 0) + 8;
-    // A new chat has nothing to show. While one of ChatGPT's own panes is open it has the room: our panels step aside
-    // (the page is left to ChatGPT) and are a drawer on request, and they come back when the pane closes.
-    const paneOpen = !!host || adapter.summaryOpen(doc);
+    // A new chat has nothing to show. An open ChatGPT pane keeps our column beside it while the page has room for the
+    // conversation, the pane and the column. Where it has not, ChatGPT shows its pane as a popover over the page, or
+    // the settled pane would overlap the conversation or the column: then ours steps aside (a drawer on request, the
+    // page left to ChatGPT) until the pane closes or the window changes size.
+    const card = adapter.summaryCard(doc);
+    const paneOpen = !!host || !!card || adapter.summaryOpen(doc);
+    if (!paneOpen) paneYield = false;
+    else if (card && !card.inPage && !host) paneYield = true;
     const conversation = els.length > 0;
     if (paneOpen !== lastPaneOpen) {
       // ChatGPT slides its page into the new place over a transition, so what is measured right now is not where it ends up:
@@ -487,13 +493,13 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
       settleTimer = win.setTimeout(() => {
         settleTimer = null;
         layoutSig = null;
-        if (!disposed) layout(true);
-      }, PANE_SETTLE_MS);
+        if (!disposed) layout(true, true);
+      }, paneSettleMs);
     }
-    const key = `${railLayout.signature()}|${shown}|${top}|${paneOpen}|${conversation}`;
+    const key = `${railLayout.signature()}|${shown}|${top}|${paneOpen}|${paneYield}|${conversation}`;
     if (key !== layoutSig) {
-      const room = shown && conversation && !paneOpen;
-      const r = railLayout.evaluate({ right: room ? PANEL_WIDTH : 0 }); // nothing is reserved while hidden
+      const room = shown && conversation && !paneYield;
+      const r = railLayout.evaluate({ right: room ? PANEL_WIDTH : 0, force: room && !!host }); // nothing is reserved while hidden; an inline pane needs the padding to end up beside our column
       docked = room ? r.docked : !(shown && conversation); // hidden by choice counts as "has room": the button then only toggles the choice
       if (docked) drawer = false;
       layoutSig = key;
@@ -501,6 +507,21 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
       // Docked, the column sits in the right gutter the page column leaves; as a drawer, in the window's corner.
       setVar("--gs-right", `${docked ? Math.max(PANEL_GAP, Math.round(win.innerWidth - railLayout.edge()) + PANEL_GAP) : 8}px`);
       applyVisibility();
+    }
+    if (settled && paneOpen && docked && shown && conversation) {
+      // Settled, the pane must clear both the conversation and our column; if it does not there is no room for all three.
+      const box = host ? host.pane.getBoundingClientRect() : card; // where the pane is now, not where it was found
+      const paneLeft = box?.left;
+      const paneRight = box?.right ?? Infinity;
+      const columnLeft = railLayout.edge() - PANEL_GAP - PANEL_WIDTH;
+      const t = els[0]?.getBoundingClientRect();
+      const c = adapter.composer(doc)?.getBoundingClientRect();
+      const contentRight = Math.max(t?.right ?? 0, c?.right ?? 0);
+      if (paneLeft != null && (contentRight > paneLeft - 4 || paneRight > columnLeft)) {
+        paneYield = true;
+        layoutSig = null;
+        scheduleLayout(true);
+      }
     }
     // A drawer ends above the composer, never over it.
     const rect = adapter.composer(doc)?.getBoundingClientRect();
@@ -934,6 +955,7 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
   });
   // The page column moves with the window and with ChatGPT's own sidebar (an animated width change).
   on(win, "resize", () => {
+    paneYield = false; // a different size may have room for the pane and our column after all
     scheduleLayout(true);
     schedule();
   });

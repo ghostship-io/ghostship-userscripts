@@ -996,6 +996,19 @@
       return false;
     },
     /**
+     * ChatGPT's own summary pane wherever it renders, with its box: `{ el, left, right, inPage }`, or null. In a wide page it
+     * is part of the page (`inPage`); in a narrow one ChatGPT shows it as a popover outside the page.
+     */
+    summaryCard(doc) {
+      const page = scope(doc);
+      for (const el2 of doc.querySelectorAll(SUMMARY_HINT)) {
+        if (el2.closest(OWN_UI) || el2.closest(TURN)) continue;
+        const r = el2.getBoundingClientRect();
+        if (r.width) return { el: el2, left: r.left, right: r.right, inPage: page.contains(el2) };
+      }
+      return null;
+    },
+    /**
      * Any other pane docked or floating over the right edge of the page (a Subagents or canvas view, say), found by
      * what is really painted there rather than by its title: the widest element on the right edge that is neither
      * the conversation nor the composer nor ours. `{ pane, container, left, outputs: null }` like `nativeSummary`, or null.
@@ -3219,7 +3232,7 @@
       const r = col.getBoundingClientRect();
       return { left: r.left, right: r.right };
     };
-    function evaluate({ right = 0 } = {}) {
+    function evaluate({ right = 0, force = false } = {}) {
       const cols = findColumns();
       const el2 = target() ?? adapter.composer(doc);
       if (!cols || !el2 || win.innerWidth < DOCK_MIN_VIEWPORT) {
@@ -3238,7 +3251,7 @@
         return { left: c ? Math.min(t.left, c.left) : t.left, right: c ? Math.max(t.right, c.right) : t.right };
       };
       const over = Math.max(0, span().right - (col.right - need));
-      if (over > 0.5) {
+      if (over > 0.5 || force && need > 0) {
         setReserve(cols.pads.slice(0, 1), need);
         const centered = () => {
           const c = adapter.composer(doc)?.getBoundingClientRect();
@@ -3440,7 +3453,7 @@ ${LAYOUT_CSS}`;
   var PANE_SETTLE_MS = 450;
   var FLOAT_BOTTOM = 44;
   var MAP_W = 244;
-  function createRail({ win, adapter, runtime, store = createRailStateStore(), prefs = createPanePrefs(win.localStorage), layoutPrefs = createPanelPrefs(win.localStorage) }) {
+  function createRail({ win, adapter, runtime, store = createRailStateStore(), prefs = createPanePrefs(win.localStorage), layoutPrefs = createPanelPrefs(win.localStorage), paneSettleMs = PANE_SETTLE_MS }) {
     const doc = win.document;
     const scroll = runtime.scroll;
     const scroller = scroll.element ?? adapter.scroller(doc);
@@ -3484,6 +3497,7 @@ ${LAYOUT_CSS}`;
     let interacted = false;
     let lastHost = null;
     let lastPaneOpen = false;
+    let paneYield = false;
     let settleTimer = null;
     let scannedAt = -Infinity;
     let scanTimer = null;
@@ -3716,7 +3730,7 @@ ${LAYOUT_CSS}`;
       layoutSig = null;
       layout(true);
     }
-    function layout(rescan = false) {
+    function layout(rescan = false, settled = false) {
       remount();
       let host = lastHost;
       if (!host || !host.pane.isConnected || !host.container.isConnected || host.outputs && !(host.outputs.section.isConnected && host.outputs.head.isConnected) || !host.pane.getBoundingClientRect().width) {
@@ -3738,7 +3752,10 @@ ${LAYOUT_CSS}`;
       syncOutputs(host);
       const floating = placeButton(host?.pane);
       const top = Math.max(Math.round(adapter.headerBottom(doc)), floating ? FLOAT_BOTTOM : 0) + 8;
-      const paneOpen = !!host || adapter.summaryOpen(doc);
+      const card = adapter.summaryCard(doc);
+      const paneOpen = !!host || !!card || adapter.summaryOpen(doc);
+      if (!paneOpen) paneYield = false;
+      else if (card && !card.inPage && !host) paneYield = true;
       const conversation = els.length > 0;
       if (paneOpen !== lastPaneOpen) {
         lastPaneOpen = paneOpen;
@@ -3746,19 +3763,33 @@ ${LAYOUT_CSS}`;
         settleTimer = win.setTimeout(() => {
           settleTimer = null;
           layoutSig = null;
-          if (!disposed) layout(true);
-        }, PANE_SETTLE_MS);
+          if (!disposed) layout(true, true);
+        }, paneSettleMs);
       }
-      const key = `${railLayout.signature()}|${shown}|${top}|${paneOpen}|${conversation}`;
+      const key = `${railLayout.signature()}|${shown}|${top}|${paneOpen}|${paneYield}|${conversation}`;
       if (key !== layoutSig) {
-        const room = shown && conversation && !paneOpen;
-        const r = railLayout.evaluate({ right: room ? PANEL_WIDTH : 0 });
+        const room = shown && conversation && !paneYield;
+        const r = railLayout.evaluate({ right: room ? PANEL_WIDTH : 0, force: room && !!host });
         docked = room ? r.docked : !(shown && conversation);
         if (docked) drawer = false;
         layoutSig = key;
         setVar("--gs-top", `${top}px`);
         setVar("--gs-right", `${docked ? Math.max(PANEL_GAP, Math.round(win.innerWidth - railLayout.edge()) + PANEL_GAP) : 8}px`);
         applyVisibility();
+      }
+      if (settled && paneOpen && docked && shown && conversation) {
+        const box = host ? host.pane.getBoundingClientRect() : card;
+        const paneLeft = box?.left;
+        const paneRight = box?.right ?? Infinity;
+        const columnLeft = railLayout.edge() - PANEL_GAP - PANEL_WIDTH;
+        const t = els[0]?.getBoundingClientRect();
+        const c = adapter.composer(doc)?.getBoundingClientRect();
+        const contentRight = Math.max(t?.right ?? 0, c?.right ?? 0);
+        if (paneLeft != null && (contentRight > paneLeft - 4 || paneRight > columnLeft)) {
+          paneYield = true;
+          layoutSig = null;
+          scheduleLayout(true);
+        }
       }
       const rect = adapter.composer(doc)?.getBoundingClientRect();
       const clear = rect?.height ? `${Math.max(16, Math.round(win.innerHeight - rect.top + 8))}px` : "96px";
@@ -4138,6 +4169,7 @@ ${LAYOUT_CSS}`;
       savePrefs();
     });
     on(win, "resize", () => {
+      paneYield = false;
       scheduleLayout(true);
       schedule();
     });

@@ -22,7 +22,8 @@ export const LAYOUT_CSS = `
  * @param {object} o.adapter columns(doc), composer(doc)
  * @param {() => Element|undefined} o.target the conversation element (a turn); the composer when absent
  *
- * `evaluate({ right })`: `right` is the width of the panel column to dock (0 when hidden or when a native pane has the room).
+ * `evaluate({ right, force })`: `right` is the width of the panel column to dock (0 when hidden); `force` pads that width even when the
+ * natural gutter would fit it, which an inline native pane needs to end up beside the column rather than under it.
  */
 export function createRailLayout({ win, adapter, target }) {
   const doc = win.document;
@@ -98,7 +99,7 @@ export function createRailLayout({ win, adapter, target }) {
    * chatgpt.com) usually follows the column and must not be padded again; when it does not (the composer would sit
    * off the conversation's center), it is padded too.
    */
-  function evaluate({ right = 0 } = {}) {
+  function evaluate({ right = 0, force = false } = {}) {
     const cols = findColumns();
     const el = target() ?? adapter.composer(doc);
     if (!cols || !el || win.innerWidth < DOCK_MIN_VIEWPORT) {
@@ -118,7 +119,7 @@ export function createRailLayout({ win, adapter, target }) {
       return { left: c ? Math.min(t.left, c.left) : t.left, right: c ? Math.max(t.right, c.right) : t.right };
     };
     const over = Math.max(0, span().right - (col.right - need));
-    if (over > 0.5) {
+    if (over > 0.5 || (force && need > 0)) {
       // The conversation is centered in the page column, so padding the right by exactly what the panels take
       // re-centers it in the space they leave, whatever the page's own margins.
       setReserve(cols.pads.slice(0, 1), need);
