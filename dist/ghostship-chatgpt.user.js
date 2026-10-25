@@ -913,6 +913,22 @@
       const collapsible = !!own && nativeChildren(own.section) > 1 && !others.some((t) => own.section.contains(t));
       return { pane: pane2, container, left: rect.left, outputs: collapsible ? own : null };
     },
+    /**
+     * Where the panel buttons go in the page header's button area: just before the right-most header button, as
+     * `{ parent, before }`; null when there is no header or no button in it (the buttons then float top-right).
+     */
+    headerActions(doc) {
+      const header = scope(doc).querySelector(HEADER);
+      if (!header) return null;
+      const win = doc.defaultView;
+      let best = null;
+      for (const b of header.querySelectorAll("button,a[href]")) {
+        if (b.closest(OWN_UI)) continue;
+        const r = b.getBoundingClientRect();
+        if (r.width && r.right > win.innerWidth / 2 && (!best || r.right > best.right)) best = { el: b, right: r.right };
+      }
+      return best ? { parent: best.el.parentElement, before: best.el } : null;
+    },
     /** Bottom edge of the page header (0 without one): the fallback pane docks below it. */
     headerBottom(doc) {
       return scope(doc).querySelector(HEADER)?.getBoundingClientRect().bottom ?? 0;
@@ -2959,86 +2975,110 @@
   }
 
   // src/chatgpt/rail/rail-layout.js
-  var RAIL_WIDTH = 320;
-  var RAIL_EDGE = 0;
-  var RAIL_RESERVE = RAIL_WIDTH + 2 * RAIL_EDGE;
+  var PANEL_WIDTH = 280;
+  var PANEL_GAP = 12;
   var DOCK_MIN_VIEWPORT = 1024;
   var MIN_CONTENT = 560;
   var LAYOUT_CSS = `
-[data-gs-column][data-gs-column]{box-sizing:border-box;padding-right:var(--gs-reserve,0px)}
+[data-gs-column][data-gs-left]{box-sizing:border-box;padding-left:var(--gs-reserve-left,0px)}
+[data-gs-column][data-gs-right]{box-sizing:border-box;padding-right:var(--gs-reserve,0px)}
 `;
   function createRailLayout({ win, adapter, target }) {
     const doc = win.document;
     let written = [];
     let known = null;
-    let applied = 0;
+    let applied = { left: 0, right: 0 };
     const findColumns = () => {
       if (!known?.length || known.some((el2) => !el2.isConnected)) known = adapter.columns(doc);
       return known;
     };
     function release(el2) {
-      el2.removeAttribute("data-gs-column");
+      for (const a of ["data-gs-column", "data-gs-left", "data-gs-right"]) el2.removeAttribute(a);
       el2.style.removeProperty("--gs-reserve");
+      el2.style.removeProperty("--gs-reserve-left");
       if (!el2.getAttribute("style")) el2.removeAttribute("style");
     }
-    function setReserve(cols, px) {
+    function setReserve(cols, left, right) {
       if (written.some((el2) => !cols.includes(el2))) clear();
       written = cols;
+      const l = Math.max(0, Math.round(left));
+      const r = Math.max(0, Math.round(right));
       for (const col of cols) {
-        if (px > 0) {
+        if (l > 0 || r > 0) {
           if (col.getAttribute("data-gs-column") === null) col.setAttribute("data-gs-column", "");
-          const v = `${Math.round(px)}px`;
-          if (col.style.getPropertyValue("--gs-reserve") !== v) col.style.setProperty("--gs-reserve", v);
-        } else if (applied > 0 || col.hasAttribute("data-gs-column")) release(col);
+        } else if (col.hasAttribute("data-gs-column") || col.hasAttribute("data-gs-left") || col.hasAttribute("data-gs-right")) {
+          release(col);
+          continue;
+        }
+        for (const [attr, prop, v] of [["data-gs-left", "--gs-reserve-left", l], ["data-gs-right", "--gs-reserve", r]]) {
+          if (v > 0) {
+            if (col.getAttribute(attr) === null) col.setAttribute(attr, "");
+            if (col.style.getPropertyValue(prop) !== `${v}px`) col.style.setProperty(prop, `${v}px`);
+          } else if (col.hasAttribute(attr)) {
+            col.removeAttribute(attr);
+            col.style.removeProperty(prop);
+          }
+        }
       }
-      applied = px > 0 ? Math.round(px) : 0;
+      applied = { left: l, right: r };
     }
     function clear() {
       for (const el2 of written) release(el2);
       written = [];
-      applied = 0;
+      applied = { left: 0, right: 0 };
     }
     function signature(paneLeft) {
       const cols = findColumns();
       if (!cols.length) return "none";
       const r = cols[0].getBoundingClientRect();
-      return `${win.innerWidth}|${Math.round(r.left)}|${Math.round(r.right + (written.includes(cols[0]) ? applied : 0))}|${cols.length}|${paneLeft == null ? "-" : Math.round(paneLeft)}`;
+      return `${win.innerWidth}|${Math.round(r.left)}|${Math.round(r.right)}|${cols.length}|${paneLeft == null ? "-" : Math.round(paneLeft)}`;
     }
-    function evaluate(paneLeft) {
-      const native = paneLeft != null;
+    const natural = (col) => {
+      const r = col.getBoundingClientRect();
+      return { left: r.left, right: r.right };
+    };
+    function evaluate({ left = 0, right = 0, paneLeft = null } = {}) {
       const cols = findColumns();
       const el2 = target() ?? adapter.composer(doc);
-      const edge = () => Math.max(el2.getBoundingClientRect().right, adapter.composer(doc)?.getBoundingClientRect().right ?? 0);
-      if (!cols.length || !el2 || !native && win.innerWidth < DOCK_MIN_VIEWPORT) {
-        if (cols.length) setReserve(cols, 0);
+      if (!cols.length || !el2 || win.innerWidth < DOCK_MIN_VIEWPORT) {
+        if (cols.length) setReserve(cols, 0, 0);
         else clear();
-        return { docked: native && !!cols.length, reserve: 0 };
+        return { docked: false, left: 0, right: 0 };
       }
-      setReserve(cols, 0);
-      const limit = native ? paneLeft : win.innerWidth - RAIL_RESERVE;
-      const need = Math.max(0, win.innerWidth - limit);
-      const room = Math.max(0, win.innerWidth - cols[0].getBoundingClientRect().right);
-      const cap = Math.max(0, need - room);
-      let right = edge();
-      let reserve = 0;
-      if (right > limit && cap > 0) {
-        reserve = Math.min(cap, 2 * (right - limit));
-        for (let i = 0; i < 3; i++) {
-          setReserve(cols, reserve);
-          right = edge();
-          const over = right - limit;
-          if (over <= 0.5 || reserve >= cap) break;
-          reserve = Math.min(cap, reserve + over);
-        }
+      setReserve(cols, 0, 0);
+      const col = natural(cols[0]);
+      const edge = paneLeft == null ? col.right : Math.min(col.right, paneLeft);
+      const needL = left > 0 ? left + 2 * PANEL_GAP : 0;
+      const needR = right > 0 ? right + 2 * PANEL_GAP : 0;
+      const span = () => {
+        const c = adapter.composer(doc)?.getBoundingClientRect();
+        const t = el2.getBoundingClientRect();
+        return { left: c ? Math.min(t.left, c.left) : t.left, right: c ? Math.max(t.right, c.right) : t.right };
+      };
+      const over = () => {
+        const s2 = span();
+        return { l: Math.max(0, col.left + needL - s2.left), r: Math.max(0, s2.right - (edge - needR)) };
+      };
+      let o = over();
+      if (o.l > 0.5 || o.r > 0.5) {
+        setReserve(cols, needL, needR + Math.max(0, col.right - edge));
+        o = over();
       }
-      const fits = right <= limit + 0.5 && (reserve === 0 || el2.getBoundingClientRect().width >= MIN_CONTENT);
+      const s = span();
+      const fits = o.l <= 0.5 && o.r <= 0.5 && s.right - s.left >= MIN_CONTENT;
       if (!fits) {
-        setReserve(cols, 0);
-        return { docked: native, reserve: 0 };
+        setReserve(cols, 0, 0);
+        return { docked: false, left: 0, right: 0 };
       }
-      return { docked: true, reserve };
+      return { docked: true, left: applied.left, right: applied.right };
     }
-    return { evaluate, signature, reserve: () => applied, dispose: clear };
+    function edges(paneLeft) {
+      const cols = findColumns();
+      if (!cols.length) return { left: 0, right: win.innerWidth };
+      const col = natural(cols[0]);
+      return { left: col.left, right: paneLeft == null ? col.right : Math.min(col.right, paneLeft) };
+    }
+    return { evaluate, signature, edges, reserve: () => ({ ...applied }), dispose: clear };
   }
 
   // src/chatgpt/rail/rail-state.js
@@ -3079,30 +3119,50 @@
       size: () => slots.size
     };
   }
-  function createPanePrefs(storage, { max = 50, key = "gs.pane.prefs" } = {}) {
-    const read = () => {
-      try {
-        const data = JSON.parse(storage?.getItem(key) ?? "{}");
-        return data && typeof data === "object" && !Array.isArray(data) ? data : {};
-      } catch {
-        return {};
-      }
-    };
+  function jsonStore(storage, key) {
     return {
-      get(id) {
-        const p = id === NEW_CHAT ? null : read()[id];
-        return p && typeof p === "object" ? { outputs: !!p.outputs, overview: !!p.overview, prompts: !!p.prompts } : null;
+      read() {
+        try {
+          const data = JSON.parse(storage?.getItem(key) ?? "{}");
+          return data && typeof data === "object" && !Array.isArray(data) ? data : {};
+        } catch {
+          return {};
+        }
       },
-      set(id, prefs) {
-        if (id === NEW_CHAT) return;
-        const data = read();
-        delete data[id];
-        data[id] = { outputs: !!prefs.outputs, overview: !!prefs.overview, prompts: !!prefs.prompts };
-        for (const old of Object.keys(data).slice(0, Math.max(0, Object.keys(data).length - max))) delete data[old];
+      write(data) {
         try {
           storage?.setItem(key, JSON.stringify(data));
         } catch {
         }
+      }
+    };
+  }
+  function createPanePrefs(storage, { max = 50, key = "gs.pane.prefs" } = {}) {
+    const json = jsonStore(storage, key);
+    return {
+      get(id) {
+        const p = id === NEW_CHAT ? null : json.read()[id];
+        return p && typeof p === "object" ? { outputs: !!p.outputs } : null;
+      },
+      set(id, prefs) {
+        if (id === NEW_CHAT) return;
+        const data = json.read();
+        delete data[id];
+        data[id] = { outputs: !!prefs.outputs };
+        for (const old of Object.keys(data).slice(0, Math.max(0, Object.keys(data).length - max))) delete data[old];
+        json.write(data);
+      }
+    };
+  }
+  function createPanelPrefs(storage, { key = "gs.pane.layout" } = {}) {
+    const json = jsonStore(storage, key);
+    return {
+      get() {
+        const p = json.read();
+        return { minimap: p.minimap !== false, prompts: p.prompts !== false };
+      },
+      set(shown) {
+        json.write({ minimap: !!shown.minimap, prompts: !!shown.prompts });
       }
     };
   }
@@ -3121,27 +3181,31 @@
   var MUTED = "var(--text-secondary,color-mix(in srgb,currentColor 65%,transparent))";
   var FOCUS = "outline:2px solid var(--border-heavy,currentColor);outline-offset:-2px";
   var CHEVRON = '<svg class="gs-chevron" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>';
+  var CLOSE = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>';
+  var MAP_ICON = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M8.5 8h7M8.5 11.5h7M8.5 15h4"/></svg>';
+  var LIST_ICON = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"/></svg>';
   var MENU = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>';
   var CSS2 = `
-.gs-pane{position:fixed;right:0;top:var(--gs-pane-top,0px);bottom:0;z-index:30;display:flex;flex-direction:column;width:${RAIL_WIDTH}px;max-width:100vw;box-sizing:border-box;border-left:1px solid ${LINE};background:var(--main-surface-primary,Canvas);color:var(--text-primary,CanvasText);font:inherit;font-size:14px;line-height:20px}
-.gs-pane[hidden]{display:none}
-.gs-pane *,.gs-pane-slot *{box-sizing:border-box}
-.gs-pane[data-gs-mode="collapsed"]{top:auto;right:8px;bottom:var(--gs-pane-bottom,96px);width:min(${RAIL_WIDTH}px,calc(100vw - 16px));height:min(520px,calc(100vh - var(--gs-pane-bottom,96px) - 16px));border:1px solid ${LINE};border-radius:16px;overflow:hidden}
-.gs-pane[data-gs-mode="collapsed"][data-gs-open="false"]{display:none}
-.gs-pane-slot{display:flex;flex:1 1 auto;flex-direction:column;min-height:min(360px,60vh);max-height:100%;border-top:1px solid ${LINE};font-size:14px;line-height:20px}
-.gs-pane-body{display:flex;flex:1 1 auto;flex-direction:column;min-height:0;overflow:hidden}
-.gs-sec{display:flex;flex:0 0 auto;flex-direction:column;min-height:0}
-.gs-sec-prompts{flex:1 1 auto}
-.gs-sec-head{display:flex;align-items:center;justify-content:space-between;width:100%;min-height:40px;padding:8px 16px;border:0;background:transparent;color:inherit;font:inherit;font-weight:600;text-align:left;cursor:pointer}
-.gs-sec-head:hover,.gs-outputs-toggle:hover{background:${HOVER}}
+.gs-panel{position:fixed;z-index:30;display:flex;flex-direction:column;width:min(${PANEL_WIDTH}px,calc(100vw - 16px));box-sizing:border-box;border:1px solid ${LINE};border-radius:16px;background:var(--main-surface-primary,Canvas);color:var(--text-primary,CanvasText);font:inherit;font-size:14px;line-height:20px;overflow:hidden}
+.gs-panel[hidden]{display:none}
+.gs-panel *,.gs-hbtns *{box-sizing:border-box}
+.gs-panel-map{top:var(--gs-top,8px);right:var(--gs-right,12px);max-height:calc(100vh - var(--gs-top,8px) - 16px)}
+.gs-panel-prompts{left:var(--gs-left,12px);bottom:var(--gs-bottom,16px);max-height:calc(100vh - 96px - var(--gs-bottom,16px))}
+.gs-panel[data-gs-drawer="true"]{max-width:calc(100vw - 16px)}
+.gs-panel-head{display:flex;flex:0 0 auto;align-items:center;justify-content:space-between;min-height:44px;padding:8px 8px 8px 16px;font-weight:600}
+.gs-panel-body{display:flex;flex:1 1 auto;flex-direction:column;min-height:0;padding:0 16px 12px}
+.gs-collapse,.gs-hbtn{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;padding:0;border:0;background:transparent;color:inherit;cursor:pointer}
+.gs-collapse{width:28px;height:28px;border-radius:8px}
+.gs-hbtns{display:inline-flex;align-items:center;gap:2px;margin:0 4px}
+.gs-hbtns[data-gs-float]{position:fixed;top:8px;right:8px;z-index:31;margin:0}
+.gs-hbtn{width:36px;height:36px;border-radius:8px;color:var(--text-secondary,currentColor)}
+.gs-hbtn[aria-pressed="true"]{color:var(--text-primary,currentColor);background:${SELECTED}}
+.gs-collapse:hover,.gs-hbtn:hover,.gs-outputs-toggle:hover{background:${HOVER}}
 .gs-chevron{flex:0 0 auto;transition:transform .15s}
-.gs-sec[data-gs-collapsed="true"] .gs-chevron,[data-gs-outputs][data-gs-collapsed="true"] .gs-chevron{transform:rotate(-90deg)}
-.gs-sec-body{display:flex;flex-direction:column;min-height:0;padding:0 16px 12px}
-.gs-sec-prompts .gs-sec-body{flex:1 1 auto}
-.gs-sec[data-gs-collapsed="true"] .gs-sec-body{display:none}
-.gs-minimap{position:relative;display:flex;justify-content:center;align-items:flex-start;flex:0 0 auto;height:min(240px,30vh);padding:8px;border:1px solid ${LINE};border-radius:8px;background:${FIELD};cursor:pointer;touch-action:none;overflow:hidden}
-.gs-frame{position:relative;flex:0 0 auto;width:100%;height:100%;border:1px solid ${INK};border-radius:4px;background:var(--main-surface-primary,Canvas)}
-.gs-minimap:focus-visible,.gs-search input:focus-visible,.gs-prompt:focus-visible,.gs-pane-toggle:focus-visible,.gs-sec-head:focus-visible,.gs-filter:focus-visible,.gs-outputs-toggle:focus-visible{${FOCUS}}
+[data-gs-outputs][data-gs-collapsed="true"] .gs-chevron{transform:rotate(-90deg)}
+.gs-minimap{position:relative;display:flex;justify-content:center;align-items:flex-start;flex:0 0 auto;min-height:56px;padding:8px;border:1px solid ${LINE};border-radius:8px;background:${FIELD};cursor:pointer;touch-action:none;overflow:hidden}
+.gs-frame{position:relative;flex:0 0 auto;width:100%;height:120px;border:1px solid ${INK};border-radius:4px;background:var(--main-surface-primary,Canvas)}
+.gs-minimap:focus-visible,.gs-search input:focus-visible,.gs-prompt:focus-visible,.gs-hbtn:focus-visible,.gs-collapse:focus-visible,.gs-filter:focus-visible,.gs-outputs-toggle:focus-visible{${FOCUS}}
 .gs-bars{position:absolute;inset:0;--gs-lh:4px}
 .gs-bar{position:absolute;min-height:2px;border-radius:2px;pointer-events:none}
 .gs-bar[data-kind="text"]{background-image:linear-gradient(${INK_FAINT} 0 50%,transparent 50%);background-size:100% var(--gs-lh)}
@@ -3169,9 +3233,6 @@
 .gs-title{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .gs-preview{font-size:12px;line-height:16px;color:${MUTED};white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .gs-empty{padding:8px;color:${MUTED}}
-.gs-pane-toggle{display:none;position:fixed;right:8px;bottom:var(--gs-pane-bottom,96px);z-index:30;align-items:center;justify-content:center;min-width:44px;min-height:44px;border:1px solid ${LINE};border-radius:22px;background:var(--main-surface-primary,Canvas);color:inherit;cursor:pointer}
-.gs-pane-toggle[data-gs-mode="collapsed"]{display:flex}
-.gs-pane-toggle[hidden]{display:none}
 .gs-outputs-toggle{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:28px;height:28px;margin-left:auto;padding:0;border:0;border-radius:8px;background:transparent;color:inherit;cursor:pointer}
 [data-gs-outputs][data-gs-collapsed="true"]>:not([data-gs-outputs-head]){display:none}
 ${LAYOUT_CSS}`;
@@ -3189,9 +3250,8 @@ ${LAYOUT_CSS}`;
   var BLOCK_CAP = 800;
   var CONTENT_W = 768;
   var MAP_PAD = 18;
-  var MAP_W = 270;
-  var MAP_H = 222;
-  function createRail({ win, adapter, runtime, store = createRailStateStore(), prefs = createPanePrefs(win.localStorage) }) {
+  var MAP_W = 244;
+  function createRail({ win, adapter, runtime, store = createRailStateStore(), prefs = createPanePrefs(win.localStorage), layoutPrefs = createPanelPrefs(win.localStorage) }) {
     const doc = win.document;
     const scroll = runtime.scroll;
     const scroller = scroll.element ?? adapter.scroller(doc);
@@ -3201,7 +3261,9 @@ ${LAYOUT_CSS}`;
     let signature = null;
     let query = "";
     let activeId = null;
-    let open = false;
+    let docked = { minimap: true, prompts: true };
+    let drawer = null;
+    const shown = layoutPrefs.get();
     let inViewOnly = false;
     let viewSet = /* @__PURE__ */ new Set();
     let listPinned = true;
@@ -3229,60 +3291,61 @@ ${LAYOUT_CSS}`;
     let scannedAt = -Infinity;
     let scanTimer = null;
     let outputsHost = null;
-    let slot = null;
     const described = /* @__PURE__ */ new Map();
     const style = doc.createElement("style");
     style.id = STYLE_ID2;
     style.textContent = CSS2;
     doc.head.appendChild(style);
-    const root = doc.createElement("aside");
-    root.className = "gs-pane";
-    root.dataset.gsUi = "";
-    root.setAttribute("aria-label", "Conversation summary");
-    root.dataset.gsHost = "fallback";
-    root.dataset.gsMode = "docked";
-    root.dataset.gsOpen = "true";
-    const body = doc.createElement("div");
-    body.className = "gs-pane-body";
-    body.dataset.gsUi = "";
-    body.innerHTML = `
-      <section class="gs-sec gs-sec-overview" data-gs-collapsed="false">
-        <button type="button" class="gs-sec-head" aria-expanded="true" aria-controls="gs-overview-body"><span class="gs-sec-title">Conversation view</span>${CHEVRON}</button>
-        <div class="gs-sec-body" id="gs-overview-body">
-          <div class="gs-minimap" tabindex="0" role="slider" aria-orientation="vertical" aria-label="Current turn overview" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="gs-frame"><div class="gs-bars"></div><div class="gs-view" hidden></div></div></div>
-          <div class="gs-caption" aria-live="off">Drag to navigate \u2022 0% visible</div>
-        </div>
-      </section>
-      <section class="gs-sec gs-sec-prompts" data-gs-collapsed="false">
-        <button type="button" class="gs-sec-head" aria-expanded="true" aria-controls="gs-prompts-body"><span class="gs-sec-title">Prompts</span>${CHEVRON}</button>
-        <div class="gs-sec-body" id="gs-prompts-body">
-          <div class="gs-search"><div class="gs-search-field"><input type="search" placeholder="Search prompts..." aria-label="Search prompts"></div><button type="button" class="gs-filter" aria-pressed="false" aria-label="Only prompts in view" title="Only prompts in view">${MENU}</button></div>
-          <ol class="gs-prompts" aria-label="Prompts, oldest first"></ol>
-        </div>
-      </section>`;
-    root.append(body);
-    const toggle = doc.createElement("button");
-    toggle.type = "button";
-    toggle.className = "gs-pane-toggle";
-    toggle.dataset.gsUi = "";
-    toggle.setAttribute("aria-expanded", "false");
-    toggle.setAttribute("aria-label", "Conversation summary");
-    toggle.innerHTML = MENU;
-    toggle.dataset.gsMode = "docked";
-    doc.body.append(root, toggle);
+    const panel = (name, label, inner) => {
+      const el2 = doc.createElement("aside");
+      el2.className = `gs-panel gs-panel-${name === "minimap" ? "map" : "prompts"}`;
+      el2.dataset.gsUi = "";
+      el2.dataset.gsPanel = name;
+      el2.setAttribute("aria-label", label);
+      el2.innerHTML = `<div class="gs-panel-head"><span class="gs-panel-title">${label}</span><button type="button" class="gs-collapse" aria-label="Hide ${label.toLowerCase()}" title="Hide ${label.toLowerCase()}">${CLOSE}</button></div><div class="gs-panel-body">${inner}</div>`;
+      return el2;
+    };
+    const mapPanel = panel(
+      "minimap",
+      "Conversation view",
+      `<div class="gs-minimap" tabindex="0" role="slider" aria-orientation="vertical" aria-label="Current turn overview" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="gs-frame"><div class="gs-bars"></div><div class="gs-view" hidden></div></div></div><div class="gs-caption" aria-live="off">Drag to navigate \u2022 0% visible</div>`
+    );
+    const promptsPanel = panel(
+      "prompts",
+      "Prompts",
+      `<div class="gs-search"><div class="gs-search-field"><input type="search" placeholder="Search prompts..." aria-label="Search prompts"></div><button type="button" class="gs-filter" aria-pressed="false" aria-label="Only prompts in view" title="Only prompts in view">${MENU}</button></div><ol class="gs-prompts" aria-label="Prompts, oldest first"></ol>`
+    );
+    const panels = { minimap: mapPanel, prompts: promptsPanel };
+    const root = { querySelector: (sel) => mapPanel.querySelector(sel) ?? promptsPanel.querySelector(sel), contains: (n) => mapPanel.contains(n) || promptsPanel.contains(n) };
+    const actions = doc.createElement("span");
+    actions.className = "gs-hbtns";
+    actions.dataset.gsUi = "";
+    const buttons = {};
+    for (const [name, label, icon2] of [["minimap", "Conversation view", MAP_ICON], ["prompts", "Prompts", LIST_ICON]]) {
+      const b = doc.createElement("button");
+      b.type = "button";
+      b.className = "gs-hbtn";
+      b.dataset.gsPanel = name;
+      b.dataset.gsUi = "";
+      b.setAttribute("aria-label", label);
+      b.title = label;
+      b.setAttribute("aria-pressed", "false");
+      b.innerHTML = icon2;
+      actions.append(b);
+      buttons[name] = b;
+    }
+    doc.body.append(mapPanel, promptsPanel);
     const outputsBtn = doc.createElement("button");
     outputsBtn.type = "button";
     outputsBtn.className = "gs-outputs-toggle";
     outputsBtn.dataset.gsUi = "";
     outputsBtn.setAttribute("aria-label", "Outputs");
     outputsBtn.innerHTML = CHEVRON;
-    const $ = (sel) => body.querySelector(sel);
+    const $ = (sel) => root.querySelector(sel);
     const minimap = $(".gs-minimap");
     const frame = $(".gs-frame");
     const bars = $(".gs-bars");
     const view = $(".gs-view");
-    const overviewCard = $(".gs-sec-overview");
-    const promptsCard = $(".gs-sec-prompts");
     const caption = $(".gs-caption");
     const filterBtn = $(".gs-filter");
     const input = $(".gs-search input");
@@ -3293,30 +3356,15 @@ ${LAYOUT_CSS}`;
       target.addEventListener(type, fn, opts);
       cleanups.push(() => target.removeEventListener(type, fn, opts));
     };
-    const setCollapsed = (card, collapsed) => {
-      card.dataset.gsCollapsed = String(collapsed);
-      card.querySelector(".gs-sec-head").setAttribute("aria-expanded", String(!collapsed));
-    };
-    const savePrefs = () => prefs.set(convId, { outputs: outputsCollapsed, overview: overviewCard.dataset.gsCollapsed === "true", prompts: promptsCard.dataset.gsCollapsed === "true" });
-    function setOpen(next) {
-      open = next;
-      if (root.dataset.gsOpen !== String(next)) root.dataset.gsOpen = String(next);
-      if (toggle.getAttribute("aria-expanded") !== String(next)) toggle.setAttribute("aria-expanded", String(next));
-    }
+    const savePrefs = () => prefs.set(convId, { outputs: outputsCollapsed });
     const stored = prefs.get(convId);
-    if (stored) {
-      outputsCollapsed = stored.outputs;
-      setCollapsed(overviewCard, stored.overview);
-      setCollapsed(promptsCard, stored.prompts);
-    }
+    if (stored) outputsCollapsed = stored.outputs;
     if (restore) {
       outputsCollapsed = restore.ui.outputsCollapsed ?? outputsCollapsed;
       query = restore.ui.query;
       input.value = query;
       inViewOnly = restore.ui.inViewOnly;
       filterBtn.setAttribute("aria-pressed", String(inViewOnly));
-      setCollapsed(overviewCard, restore.ui.overviewCollapsed);
-      setCollapsed(promptsCard, restore.ui.promptsCollapsed);
     }
     function persist(bookmark) {
       if (disposed || restore || convId === "new") return;
@@ -3330,7 +3378,7 @@ ${LAYOUT_CSS}`;
       const prev = store.get(convId);
       store.save(convId, {
         sig,
-        ui: { query, inViewOnly, open, outputsCollapsed, overviewCollapsed: overviewCard.dataset.gsCollapsed === "true", promptsCollapsed: promptsCard.dataset.gsCollapsed === "true" },
+        ui: { query, inViewOnly, outputsCollapsed },
         activeId,
         list: { top: list.scrollTop, pinned: listPinned },
         bookmark: bookmark ?? prev?.bookmark ?? null
@@ -3350,7 +3398,6 @@ ${LAYOUT_CSS}`;
       if (saved.activeId && prompts.some((p) => p.id === saved.activeId)) activeId = saved.activeId;
       listPinned = saved.list.pinned;
       listManual = !saved.list.pinned;
-      if (saved.ui.open && root.dataset.gsMode === "collapsed") setOpen(true);
       bookmarkToRestore = saved.bookmark;
       listTopToRestore = saved.list.top;
       didRestore = true;
@@ -3378,11 +3425,7 @@ ${LAYOUT_CSS}`;
       runtime.open(el2, { offset: 0 });
     }
     function setVar(name, value) {
-      for (const el2 of [root, toggle]) if (el2.style.getPropertyValue(name) !== value) el2.style.setProperty(name, value);
-    }
-    function setMode(mode) {
-      if (root.dataset.gsMode !== mode) root.dataset.gsMode = mode;
-      if (toggle.dataset.gsMode !== mode) toggle.dataset.gsMode = mode;
+      for (const el2 of [mapPanel, promptsPanel]) if (el2.style.getPropertyValue(name) !== value) el2.style.setProperty(name, value);
     }
     function releaseOutputs() {
       if (outputsHost) {
@@ -3406,21 +3449,49 @@ ${LAYOUT_CSS}`;
       const expanded = String(!outputsCollapsed);
       if (outputsBtn.getAttribute("aria-expanded") !== expanded) outputsBtn.setAttribute("aria-expanded", expanded);
     }
-    function place(host) {
-      const hostKind = host ? "native" : "fallback";
-      if (host) {
-        slot ??= Object.assign(doc.createElement("div"), { className: "gs-pane-slot" });
-        slot.dataset.gsUi = "";
-        if (slot.parentElement !== host.container) host.container.append(slot);
-        if (body.parentElement !== slot) slot.append(body);
-      } else {
-        if (body.parentElement !== root) root.append(body);
-        slot?.remove();
+    const visible = (name) => docked[name] || drawer === name;
+    function applyVisibility() {
+      for (const name of ["minimap", "prompts"]) {
+        const on2 = visible(name);
+        if (panels[name].hidden === on2) panels[name].hidden = !on2;
+        const pressed = String(on2);
+        if (buttons[name].getAttribute("aria-pressed") !== pressed) buttons[name].setAttribute("aria-pressed", pressed);
+        const drawerMode = String(!docked[name]);
+        if (panels[name].dataset.gsDrawer !== drawerMode) panels[name].dataset.gsDrawer = drawerMode;
       }
-      if (root.dataset.gsHost !== hostKind) root.dataset.gsHost = hostKind;
-      if (root.hidden !== !!host) root.hidden = !!host;
-      if (toggle.hidden !== !!host) toggle.hidden = !!host;
-      syncOutputs(host);
+      if (visible("minimap")) {
+        modelKey = "";
+        schedule();
+      }
+    }
+    function placeButtons() {
+      const spot = adapter.headerActions(doc);
+      if (spot) {
+        if (actions.parentElement !== spot.parent || actions.nextElementSibling !== spot.before) spot.parent.insertBefore(actions, spot.before);
+        if (actions.hasAttribute("data-gs-float")) actions.removeAttribute("data-gs-float");
+      } else {
+        if (actions.parentElement !== doc.body) doc.body.append(actions);
+        if (!actions.hasAttribute("data-gs-float")) actions.setAttribute("data-gs-float", "");
+      }
+    }
+    function toggle(name) {
+      if (docked[name]) {
+        shown[name] = false;
+        layoutPrefs.set(shown);
+        layoutSig = null;
+        layout(true);
+      } else if (drawer === name) {
+        drawer = null;
+      } else {
+        if (!shown[name]) {
+          shown[name] = true;
+          layoutPrefs.set(shown);
+          layoutSig = null;
+          layout(true);
+        }
+        if (!docked[name]) drawer = name;
+      }
+      applyVisibility();
     }
     function layout(rescan = false) {
       let host = lastHost;
@@ -3440,21 +3511,42 @@ ${LAYOUT_CSS}`;
         }
       }
       lastHost = host;
-      place(host);
-      const now = railLayout.signature(host?.left);
-      if (now !== layoutSig) {
-        const { docked } = railLayout.evaluate(host?.left);
-        const was = root.dataset.gsMode;
-        setMode(docked ? "docked" : "collapsed");
-        if (docked) setOpen(true);
-        else if (was === "docked") setOpen(false);
-        layoutSig = railLayout.signature(host?.left);
-        if (!host) setVar("--gs-pane-top", `${Math.max(0, Math.round(adapter.headerBottom(doc)))}px`);
+      syncOutputs(host);
+      placeButtons();
+      const want = ["minimap", "prompts"].filter((n) => shown[n]);
+      const options = want.length === 2 ? [want, ["prompts"], ["minimap"], []] : [want, []];
+      const key = `${railLayout.signature(host?.left)}|${want.join()}`;
+      if (key !== layoutSig) {
+        let chosen = [];
+        for (const option of options) {
+          const r = railLayout.evaluate({ left: option.includes("prompts") ? PANEL_WIDTH : 0, right: option.includes("minimap") ? PANEL_WIDTH : 0, paneLeft: host?.left });
+          if (r.docked || !option.length) {
+            chosen = option;
+            break;
+          }
+        }
+        docked = { minimap: chosen.includes("minimap"), prompts: chosen.includes("prompts") };
+        if (docked.minimap && drawer === "minimap") drawer = null;
+        if (docked.prompts && drawer === "prompts") drawer = null;
+        layoutSig = `${railLayout.signature(host?.left)}|${want.join()}`;
+        const edge = railLayout.edges(host?.left);
+        setVar("--gs-top", `${Math.max(0, Math.round(adapter.headerBottom(doc))) + 8}px`);
+        applyVars(edge);
+        applyVisibility();
       }
-      if (!host && root.dataset.gsMode === "collapsed") {
-        const rect = adapter.composer(doc)?.getBoundingClientRect();
-        setVar("--gs-pane-bottom", rect?.height ? `${Math.max(16, Math.round(win.innerHeight - rect.top + 8))}px` : "96px");
+      const rect = adapter.composer(doc)?.getBoundingClientRect();
+      if (!docked.prompts) {
+        const bottom = rect?.height ? `${Math.max(16, Math.round(win.innerHeight - rect.top + 8))}px` : "96px";
+        if (promptsPanel.style.getPropertyValue("--gs-bottom") !== bottom) promptsPanel.style.setProperty("--gs-bottom", bottom);
       }
+    }
+    function applyVars(edge) {
+      const set = (name, prop, value) => {
+        if (panels[name].style.getPropertyValue(prop) !== value) panels[name].style.setProperty(prop, value);
+      };
+      set("minimap", "--gs-right", `${docked.minimap ? Math.max(PANEL_GAP, Math.round(win.innerWidth - edge.right) + PANEL_GAP) : 8}px`);
+      set("prompts", "--gs-left", `${docked.prompts ? Math.round(edge.left) + PANEL_GAP : 8}px`);
+      set("prompts", "--gs-bottom", "16px");
     }
     function promptEnd(i) {
       return (prompts[i + 1]?.turnIndex ?? els.length) - 1;
@@ -3481,23 +3573,23 @@ ${LAYOUT_CSS}`;
       if (pv && pv.textContent !== d.preview) pv.textContent = d.preview;
     }
     function renderList() {
-      let shown = searchPrompts(prompts, query);
-      if (inViewOnly) shown = shown.filter((p) => viewSet.has(p.id));
+      let shown2 = searchPrompts(prompts, query);
+      if (inViewOnly) shown2 = shown2.filter((p) => viewSet.has(p.id));
       list.textContent = "";
-      if (!shown.length) {
+      if (!shown2.length) {
         const li = doc.createElement("li");
         li.className = "gs-empty";
         li.textContent = prompts.length ? "No matching prompts" : "No prompts yet";
         list.append(li);
       }
-      for (const p of shown) {
+      for (const p of shown2) {
         const { title, preview } = describe2(p);
         const li = doc.createElement("li");
         const b = doc.createElement("button");
         b.type = "button";
         b.className = "gs-prompt";
         b.dataset.id = p.id;
-        b.tabIndex = p.id === (activeId ?? shown.at(-1)?.id) ? 0 : -1;
+        b.tabIndex = p.id === (activeId ?? shown2.at(-1)?.id) ? 0 : -1;
         b.setAttribute("aria-current", String(p.id === activeId));
         b.dataset.inView = String(viewSet.has(p.id));
         b.title = p.preview;
@@ -3592,7 +3684,7 @@ ${LAYOUT_CSS}`;
     }
     function renderMinimap(m) {
       const ext = turnExtent();
-      if (!ext || overviewCard.dataset.gsCollapsed === "true") return;
+      if (!ext || mapPanel.hidden) return;
       const slice = els.slice(prompts[ext.i].turnIndex, promptEnd(ext.i) + 1);
       const turnBox = ext.a.getBoundingClientRect();
       const turnPx = ext.z.getBoundingClientRect().bottom - turnBox.top;
@@ -3614,7 +3706,8 @@ ${LAYOUT_CSS}`;
         bars.textContent = "";
         const items = silhouetteItems(ext, slice, turnBox.top, turnPx);
         const box = minimap.getBoundingClientRect();
-        const scale = Math.min((box.width ? box.width - MAP_PAD : MAP_W) / contentWidth, (box.height ? box.height - MAP_PAD : MAP_H) / Math.max(turnPx, 1));
+        const maxH = clamp2(win.innerHeight * 0.45, 120, 360);
+        const scale = Math.min((box.width ? box.width - MAP_PAD : MAP_W) / contentWidth, maxH / Math.max(turnPx, 1));
         const size = { w: `${Math.max(24, Math.round(contentWidth * scale))}px`, h: `${Math.max(8, Math.round(turnPx * scale))}px` };
         if (frame.style.width !== size.w) frame.style.width = size.w;
         if (frame.style.height !== size.h) frame.style.height = size.h;
@@ -3799,10 +3892,20 @@ ${LAYOUT_CSS}`;
         e.stopPropagation();
       }
     });
-    on(toggle, "click", () => {
-      setOpen(!open);
-      persist();
-    });
+    for (const name of ["minimap", "prompts"]) {
+      on(buttons[name], "click", () => toggle(name));
+      on(panels[name].querySelector(".gs-collapse"), "click", () => {
+        toggle(name);
+        buttons[name].focus?.();
+      });
+      on(panels[name], "keydown", (e) => {
+        if (e.key === "Escape" && !docked[name] && drawer === name && !(name === "prompts" && input.value)) {
+          drawer = null;
+          applyVisibility();
+          buttons[name].focus?.();
+        }
+      });
+    }
     on(outputsBtn, "click", (e) => {
       e.stopPropagation();
       outputsCollapsed = !outputsCollapsed;
@@ -3810,34 +3913,14 @@ ${LAYOUT_CSS}`;
       persist();
       savePrefs();
     });
-    for (const head of body.querySelectorAll(".gs-sec-head")) {
-      on(head, "click", () => {
-        const card = head.closest(".gs-sec");
-        const collapsed = card.dataset.gsCollapsed !== "true";
-        setCollapsed(card, collapsed);
-        if (!collapsed) {
-          modelKey = "";
-          schedule();
-          if (card === promptsCard && listPinned) list.scrollTop = list.scrollHeight;
-        }
-        persist();
-        savePrefs();
-      });
-    }
     on(filterBtn, "click", () => {
       inViewOnly = !inViewOnly;
       filterBtn.setAttribute("aria-pressed", String(inViewOnly));
       renderList();
       persist();
     });
-    on(root, "keydown", (e) => {
-      if (e.key === "Escape" && root.dataset.gsMode === "collapsed" && open && !input.value) {
-        setOpen(false);
-        toggle.focus();
-      }
-    });
     on(win, "resize", () => scheduleLayout(true));
-    on(doc, "transitionend", (e) => !root.contains(e.target) && !body.contains(e.target) && /width|margin|padding|left|right|transform/.test(e.propertyName ?? "") && scheduleLayout(true), { capture: true, passive: true });
+    on(doc, "transitionend", (e) => !root.contains(e.target) && !actions.contains(e.target) && /width|margin|padding|left|right|transform/.test(e.propertyName ?? "") && scheduleLayout(true), { capture: true, passive: true });
     cleanups.push(scroll.onScroll((kind) => {
       if (kind === "user") userScrolled = true;
       schedule();
@@ -3852,10 +3935,10 @@ ${LAYOUT_CSS}`;
     }
     update();
     const api = {
-      element: root,
-      state: () => ({ activeId, open, mode: root.dataset.gsMode, host: root.dataset.gsHost, outputsCollapsed, listPinned, query, reserve: railLayout.reserve() }),
+      element: mapPanel,
+      state: () => ({ activeId, docked: { ...docked }, outputsCollapsed, listPinned, query, reserve: railLayout.reserve() }),
       /** Structure only, safe to expose: no ids, search text or prompts. */
-      shape: () => ({ host: root.dataset.gsHost, mode: root.dataset.gsMode, open, outputsCollapsible: !!outputsHost, outputsCollapsed, reserve: railLayout.reserve() }),
+      shape: () => ({ docked: { ...docked }, minimap: visible("minimap"), prompts: visible("prompts"), drawer, outputsCollapsible: !!outputsHost, outputsCollapsed, reserve: railLayout.reserve() }),
       select: (id) => {
         const p = prompts.find((x) => x.id === id);
         if (p) select(p);
@@ -3869,9 +3952,9 @@ ${LAYOUT_CSS}`;
         cleanups.forEach((fn) => fn());
         railLayout.dispose();
         releaseOutputs();
-        slot?.remove();
-        root.remove();
-        toggle.remove();
+        mapPanel.remove();
+        promptsPanel.remove();
+        actions.remove();
         style.remove();
       }
     };

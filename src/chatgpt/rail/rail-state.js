@@ -41,35 +41,56 @@ export function createRailStateStore({ max = 24 } = {}) {
   };
 }
 
-/**
- * Which sections of a conversation's pane the user collapsed, remembered across reloads (bounded, most
- * recent last). Only these booleans are stored, under the conversation id, in the page's own storage.
- */
-export function createPanePrefs(storage, { max = 50, key = "gs.pane.prefs" } = {}) {
-  const read = () => {
-    try {
-      const data = JSON.parse(storage?.getItem(key) ?? "{}");
-      return data && typeof data === "object" && !Array.isArray(data) ? data : {};
-    } catch {
-      return {};
-    }
-  };
+/** A small bounded JSON map in the page's own storage; unreadable or full storage degrades to in-memory use. */
+function jsonStore(storage, key) {
   return {
-    get(id) {
-      const p = id === NEW_CHAT ? null : read()[id];
-      return p && typeof p === "object" ? { outputs: !!p.outputs, overview: !!p.overview, prompts: !!p.prompts } : null;
+    read() {
+      try {
+        const data = JSON.parse(storage?.getItem(key) ?? "{}");
+        return data && typeof data === "object" && !Array.isArray(data) ? data : {};
+      } catch {
+        return {};
+      }
     },
-    set(id, prefs) {
-      if (id === NEW_CHAT) return;
-      const data = read();
-      delete data[id];
-      data[id] = { outputs: !!prefs.outputs, overview: !!prefs.overview, prompts: !!prefs.prompts };
-      for (const old of Object.keys(data).slice(0, Math.max(0, Object.keys(data).length - max))) delete data[old];
+    write(data) {
       try {
         storage?.setItem(key, JSON.stringify(data));
       } catch {
         // storage full or blocked: the in-memory state still works
       }
+    },
+  };
+}
+
+/** Whether a conversation's native Outputs list is collapsed, remembered across reloads (bounded, most recent last). */
+export function createPanePrefs(storage, { max = 50, key = "gs.pane.prefs" } = {}) {
+  const json = jsonStore(storage, key);
+  return {
+    get(id) {
+      const p = id === NEW_CHAT ? null : json.read()[id];
+      return p && typeof p === "object" ? { outputs: !!p.outputs } : null;
+    },
+    set(id, prefs) {
+      if (id === NEW_CHAT) return;
+      const data = json.read();
+      delete data[id];
+      data[id] = { outputs: !!prefs.outputs };
+      for (const old of Object.keys(data).slice(0, Math.max(0, Object.keys(data).length - max))) delete data[old];
+      json.write(data);
+    },
+  };
+}
+
+/** Which panels the user wants docked (conversation view top-right, prompts bottom-left): one choice per browser, both on by default. */
+export function createPanelPrefs(storage, { key = "gs.pane.layout" } = {}) {
+  const json = jsonStore(storage, key);
+  return {
+    get() {
+      const p = json.read();
+      return { minimap: p.minimap !== false, prompts: p.prompts !== false };
+    },
+    set(shown) {
+      json.write({ minimap: !!shown.minimap, prompts: !!shown.prompts });
     },
   };
 }

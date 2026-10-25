@@ -196,6 +196,22 @@ export const chatgptAdapter = {
     const collapsible = !!own && nativeChildren(own.section) > 1 && !others.some((t) => own.section.contains(t));
     return { pane, container, left: rect.left, outputs: collapsible ? own : null };
   },
+  /**
+   * Where the panel buttons go in the page header's button area: just before the right-most header button, as
+   * `{ parent, before }`; null when there is no header or no button in it (the buttons then float top-right).
+   */
+  headerActions(doc) {
+    const header = scope(doc).querySelector(HEADER);
+    if (!header) return null;
+    const win = doc.defaultView;
+    let best = null;
+    for (const b of header.querySelectorAll("button,a[href]")) {
+      if (b.closest(OWN_UI)) continue;
+      const r = b.getBoundingClientRect();
+      if (r.width && r.right > win.innerWidth / 2 && (!best || r.right > best.right)) best = { el: b, right: r.right };
+    }
+    return best ? { parent: best.el.parentElement, before: best.el } : null;
+  },
   /** Bottom edge of the page header (0 without one): the fallback pane docks below it. */
   headerBottom(doc) {
     return scope(doc).querySelector(HEADER)?.getBoundingClientRect().bottom ?? 0;

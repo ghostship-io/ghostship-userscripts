@@ -4,6 +4,7 @@ Agents add entries under Unreleased and never touch version fields. After a merg
 
 ## Unreleased
 
+- The right-hand pane is replaced by two panels in ChatGPT's own style: the conversation view (minimap) pinned top-right, growing down, and the prompt list pinned bottom-left, growing up, with the conversation and composer re-centered in the space between them, around any side pane and with the sidebar open or closed. Each panel collapses to a button in ChatGPT's header button area and the same button restores it (remembered per browser); when there is no room the panels become drawers opened by those buttons (#628).
 - The minimap keeps the conversation's real aspect ratio inside a bordered frame on a recessed track (the "Conversation view"), with the viewport box inside the frame, instead of stretching to the pane width (#628).
 
 ## [0.7.1] - 2026-10-25

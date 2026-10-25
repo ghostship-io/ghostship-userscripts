@@ -1,0 +1,74 @@
+<!doctype html>
+<!-- Synthetic stand-in for ChatGPT's page layout (lorem text only): sidebar, header with button group, conversation
+     scroller, composer and an optional side pane. Served at /c/mock by scripts/visual.mjs with the built script. -->
+<html class="dark">
+<head>
+<meta charset="utf-8">
+<title>mock</title>
+<style>
+:root{--main-surface-primary:#212121;--text-primary:#ececec;--text-secondary:#b4b4b4;--border-light:rgba(255,255,255,.12);--surface-hover:rgba(255,255,255,.07);--bg-elevated-secondary:#2f2f2f;--message-surface:#2f2f2f;--interactive-bg-secondary-selected:rgba(255,255,255,.14);color-scheme:dark}
+html.light{--main-surface-primary:#fff;--text-primary:#0d0d0d;--text-secondary:#5d5d5d;--border-light:rgba(0,0,0,.1);--surface-hover:rgba(0,0,0,.05);--bg-elevated-secondary:#f4f4f4;--message-surface:#f4f4f4;--interactive-bg-secondary-selected:rgba(0,0,0,.08);color-scheme:light}
+*{box-sizing:border-box}
+body{margin:0;height:100vh;display:flex;overflow:hidden;background:var(--main-surface-primary);color:var(--text-primary);font:16px/1.6 system-ui,sans-serif}
+nav{flex:0 0 var(--nav,52px);border-right:1px solid var(--border-light);background:var(--bg-elevated-secondary);padding:12px 8px;font-size:14px;color:var(--text-secondary);overflow:hidden}
+main{flex:1 1 0;min-width:0;display:flex;flex-direction:column;position:relative}
+#page-header{flex:0 0 56px;display:flex;align-items:center;justify-content:space-between;padding:0 12px 0 16px;font-weight:600}
+#page-header .acts{display:flex;align-items:center;gap:4px}
+#page-header .acts>button{height:36px;padding:0 12px;border:0;border-radius:8px;background:transparent;color:inherit;font:inherit;font-size:14px}
+[data-app-action-timeline-scroll]{flex:1 1 0;overflow-y:auto}
+[data-thread-find-target]{max-width:768px;margin:0 auto;padding:0 16px 24px}
+[data-turn-key]{padding:16px 0}
+[data-user-message-bubble]{margin-left:auto;width:max-content;max-width:80%;padding:8px 16px;border-radius:18px;background:var(--message-surface)}
+[data-conversation-role]{margin-top:12px}
+pre{margin:12px 0;padding:12px;border-radius:8px;background:var(--bg-elevated-secondary);overflow:auto;font-size:13px}
+table{border-collapse:collapse;width:100%;margin:12px 0}td,th{border-bottom:1px solid var(--border-light);padding:6px 8px;text-align:left}
+.img{height:160px;margin:12px 0;border-radius:8px;background:var(--bg-elevated-secondary)}
+form[data-chatgpt-composer]{flex:0 0 auto;width:100%;max-width:768px;margin:0 auto 16px;padding:0 16px}
+form[data-chatgpt-composer] [contenteditable]{min-height:52px;padding:14px 18px;border-radius:26px;background:var(--bg-elevated-secondary);outline:0}
+aside.side{flex:0 0 360px;border-left:1px solid var(--border-light);padding:16px;overflow:auto}
+aside.side h3{margin:0 0 8px;font-size:14px;font-weight:600}
+aside.side section{margin-bottom:20px}
+aside.side .head{display:flex;align-items:center}
+aside.side li{padding:4px 0;font-size:14px;color:var(--text-secondary);list-style:none}
+aside.side ul{margin:0;padding:0}
+</style>
+</head>
+<body>
+<nav>History</nav>
+<main>
+  <header id="page-header"><div>ChatGPT</div><div class="acts"><button type="button">Share</button><button type="button">More</button></div></header>
+  <div data-app-action-timeline-scroll><div data-thread-find-target="conversation" id="thread"></div></div>
+  <form data-chatgpt-composer><div contenteditable="true" role="textbox" aria-label="Ask"></div></form>
+</main>
+<script>
+const q = new URLSearchParams(location.search);
+if (q.get("theme") === "light") document.documentElement.className = "light";
+if (q.get("nav") === "open") document.documentElement.style.setProperty("--nav", "260px");
+const lorem = (n) => "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor. ".repeat(n);
+const thread = document.getElementById("thread");
+for (let i = 0; i < 14; i++) {
+  const turn = document.createElement("div");
+  turn.setAttribute("data-turn-key", "turn-" + i);
+  const heavy = i % 5 === 2;
+  turn.innerHTML = `<div data-user-message-bubble="true">Prompt ${i + 1}: lorem ipsum about topic ${i % 4}. Please elaborate on the plan.</div>` +
+    `<div data-conversation-role="assistant"><h2>Section ${i + 1}</h2><p>${lorem(3)}</p>` +
+    (heavy ? `<pre><code>${Array.from({ length: 12 }, (_, k) => "line " + k + " = value;").join("\n")}</code></pre><table><tr><th>Name</th><th>Value</th></tr>${"<tr><td>row</td><td>cell</td></tr>".repeat(5)}</table><div class="img"></div>` : "") +
+    `<p>${lorem(i % 3 + 1)}</p></div>`;
+  thread.append(turn);
+}
+if (q.get("pane")) {
+  const aside = document.createElement("aside");
+  aside.className = "side";
+  aside.setAttribute("aria-label", "Summary");
+  aside.innerHTML = `<div class="content"><section><div class="head"><h3>Outputs</h3></div><ul><li>Report.md</li><li>Notes.txt</li><li>Chart.png</li></ul></section><section><div class="head"><h3>Sources</h3></div><ul><li>Example source one</li><li>Example source two</li></ul></section></div>`;
+  document.body.append(aside);
+}
+// Optional: act like a user pressing the panels' header buttons after the script has started.
+const press = q.get("press");
+if (press) setTimeout(() => press.split(",").forEach((name) => document.querySelector('.gs-hbtn[data-gs-panel="' + name + '"]')?.click()), 1800);
+const el = document.querySelector("[data-app-action-timeline-scroll]");
+el.scrollTop = el.scrollHeight;
+</script>
+<script src="/ghostship-chatgpt.user.js"></script>
+</body>
+</html>

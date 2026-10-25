@@ -138,7 +138,7 @@ test("the minimap keeps the conversation's real aspect ratio inside a clear fram
     const h = parseFloat(frame.style.height);
     const el = chatgptAdapter.turns(fx.doc)[turn].getBoundingClientRect();
     assert.ok(Math.abs(w / h - el.width / el.height) < 0.02 * (w / h) + 0.05, `${label}: ${w}x${h} vs the turn's ${el.width}x${el.height}`);
-    assert.ok(w <= 288 - 18 && h <= 240 - 18, `${label}: inside the track`);
+    assert.ok(w <= 288 - 18 && h <= 360, `${label}: inside the track width, and the panel grows no taller than its cap`);
     assert.ok(w > 0 && h > 0);
     rail.dispose();
   }
@@ -148,6 +148,7 @@ test("the minimap keeps the conversation's real aspect ratio inside a clear fram
   const css = fx.doc.getElementById("gs-pane-style").textContent;
   assert.match(css, /\.gs-frame\{[^}]*border:1px solid[^}]*background:var\(--main-surface-primary/);
   assert.match(css, /\.gs-minimap\{[^}]*padding:8px[^}]*background:var\(--bg-elevated-secondary/);
-  assert.equal(fx.doc.querySelector(".gs-sec-overview .gs-sec-title").textContent, "Conversation view");
+  assert.doesNotMatch(css, /\.gs-minimap\{(?:[^}]*;)?height:/, "the track grows with the conversation view instead of a fixed height");
+  assert.equal(fx.doc.querySelector('[data-gs-panel="minimap"] .gs-panel-title').textContent, "Conversation view");
   rail.dispose();
 });
