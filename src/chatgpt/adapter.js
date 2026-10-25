@@ -29,9 +29,9 @@ const scope = (root) => (root.nodeType === 9 ? root.querySelector(ACTIVE_PAGE) ?
 const SUMMARY_TITLE = /^(outputs?|sources?)$/i;
 const HEADINGS = 'h1,h2,h3,h4,h5,h6,[role="heading"]';
 const SUMMARY_REGION = 'aside,[role="complementary"],[role="region"],[aria-label*="summary" i],[data-testid*="summary" i]';
-// Titles are headings anywhere, or disclosure buttons inside a region; one native query, so a page with a long
-// conversation list in its sidebar does not cost a JS loop per button on every layout check.
-const SUMMARY_TITLES = `${HEADINGS},${SUMMARY_REGION.split(",").map((r) => `${r} button,${r} [role="button"]`).join(",")}`;
+// Titles are headings anywhere, or disclosure buttons inside a region (queried per region, never page-wide).
+const BUTTONS = 'button,[role="button"]';
+const BUTTON_REGION = 'aside,[role="complementary"],[role="region"]';
 const OWN_UI = "[data-gs-ui]";
 
 const commonAncestor = (a, b) => {
@@ -119,7 +119,9 @@ export const chatgptAdapter = {
     const win = doc.defaultView;
     const found = [];
     let outputs = null;
-    for (const title of page.querySelectorAll(SUMMARY_TITLES)) {
+    const candidates = [...page.querySelectorAll(HEADINGS)];
+    for (const region of page.querySelectorAll(BUTTON_REGION)) if (!region.matches(TURN) && !region.closest(TURN)) candidates.push(...region.querySelectorAll(BUTTONS));
+    for (const title of new Set(candidates)) {
       const name = title.textContent.trim();
       if (name.length > 12 || !SUMMARY_TITLE.test(name) || title.closest(TURN) || title.closest(ROLE) || title.closest(OWN_UI)) continue;
       const rect = title.getBoundingClientRect();

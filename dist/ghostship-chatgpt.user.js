@@ -759,7 +759,8 @@
   var SUMMARY_TITLE = /^(outputs?|sources?)$/i;
   var HEADINGS = 'h1,h2,h3,h4,h5,h6,[role="heading"]';
   var SUMMARY_REGION = 'aside,[role="complementary"],[role="region"],[aria-label*="summary" i],[data-testid*="summary" i]';
-  var SUMMARY_TITLES = `${HEADINGS},${SUMMARY_REGION.split(",").map((r) => `${r} button,${r} [role="button"]`).join(",")}`;
+  var BUTTONS = 'button,[role="button"]';
+  var BUTTON_REGION = 'aside,[role="complementary"],[role="region"]';
   var OWN_UI = "[data-gs-ui]";
   var commonAncestor = (a, b) => {
     for (let el2 = a; el2; el2 = el2.parentElement) if (el2.contains(b)) return el2;
@@ -841,7 +842,9 @@
       const win = doc.defaultView;
       const found = [];
       let outputs = null;
-      for (const title of page.querySelectorAll(SUMMARY_TITLES)) {
+      const candidates = [...page.querySelectorAll(HEADINGS)];
+      for (const region2 of page.querySelectorAll(BUTTON_REGION)) if (!region2.matches(TURN) && !region2.closest(TURN)) candidates.push(...region2.querySelectorAll(BUTTONS));
+      for (const title of new Set(candidates)) {
         const name = title.textContent.trim();
         if (name.length > 12 || !SUMMARY_TITLE.test(name) || title.closest(TURN) || title.closest(ROLE) || title.closest(OWN_UI)) continue;
         const rect2 = title.getBoundingClientRect();
@@ -2522,6 +2525,7 @@ ${LAYOUT_CSS}`;
   }
   var clamp2 = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
   var PREVIEW_MAX = 100;
+  var SCAN_MS = 400;
   var BLOCK_CAP = 800;
   function createRail({ win, adapter, runtime, store = createRailStateStore(), prefs = createPanePrefs(win.localStorage) }) {
     const doc = win.document;
@@ -2544,6 +2548,7 @@ ${LAYOUT_CSS}`;
     let trailing = null;
     let scheduled = false;
     let layoutQueued = false;
+    let forceScan = false;
     let layoutSig = null;
     let disposed = false;
     let drag = false;
@@ -2557,6 +2562,8 @@ ${LAYOUT_CSS}`;
     let outputsCollapsed = false;
     let openPending = convId !== "new";
     let lastHost = null;
+    let scannedAt = -Infinity;
+    let scanTimer = null;
     let outputsHost = null;
     let slot = null;
     const described = /* @__PURE__ */ new Map();
@@ -2750,8 +2757,23 @@ ${LAYOUT_CSS}`;
       if (toggle.hidden !== !!host) toggle.hidden = !!host;
       syncOutputs(host);
     }
-    function layout() {
-      const host = adapter.nativeSummary(doc);
+    function layout(rescan = false) {
+      let host = lastHost;
+      if (!host || !host.pane.isConnected || !host.container.isConnected || host.outputs && !(host.outputs.section.isConnected && host.outputs.head.isConnected) || !host.pane.getBoundingClientRect().width) {
+        const t = win.performance.now();
+        if (rescan || t - scannedAt >= SCAN_MS) {
+          host = adapter.nativeSummary(doc);
+          scannedAt = t;
+        } else {
+          host = null;
+          if (!scanTimer) {
+            scanTimer = win.setTimeout(() => {
+              scanTimer = null;
+              if (!disposed) layout(true);
+            }, SCAN_MS);
+          }
+        }
+      }
       lastHost = host;
       place(host);
       const now = railLayout.signature(host?.left);
@@ -2762,13 +2784,11 @@ ${LAYOUT_CSS}`;
         if (docked) setOpen(true);
         else if (was === "docked") setOpen(false);
         layoutSig = railLayout.signature(host?.left);
+        if (!host) setVar("--gs-pane-top", `${Math.max(0, Math.round(adapter.headerBottom(doc)))}px`);
       }
-      if (host) return;
-      if (root.dataset.gsMode === "collapsed") {
+      if (!host && root.dataset.gsMode === "collapsed") {
         const rect = adapter.composer(doc)?.getBoundingClientRect();
         setVar("--gs-pane-bottom", rect?.height ? `${Math.max(16, Math.round(win.innerHeight - rect.top + 8))}px` : "96px");
-      } else {
-        setVar("--gs-pane-top", `${Math.max(0, Math.round(adapter.headerBottom(doc)))}px`);
       }
     }
     function promptEnd(i) {
@@ -2991,12 +3011,15 @@ ${LAYOUT_CSS}`;
       scheduled = true;
       win.requestAnimationFrame(update);
     }
-    function scheduleLayout() {
+    function scheduleLayout(rescan = false) {
+      if (rescan === true) forceScan = true;
       if (layoutQueued || disposed) return;
       layoutQueued = true;
       win.requestAnimationFrame(() => {
         layoutQueued = false;
-        if (!disposed) layout();
+        const force = forceScan;
+        forceScan = false;
+        if (!disposed) layout(force);
       });
     }
     function refresh(index) {
@@ -3141,8 +3164,8 @@ ${LAYOUT_CSS}`;
         toggle.focus();
       }
     });
-    on(win, "resize", scheduleLayout);
-    on(doc, "transitionend", (e) => !root.contains(e.target) && !body.contains(e.target) && /width|margin|padding|left|right|transform/.test(e.propertyName ?? "") && scheduleLayout(), { capture: true, passive: true });
+    on(win, "resize", () => scheduleLayout(true));
+    on(doc, "transitionend", (e) => !root.contains(e.target) && !body.contains(e.target) && /width|margin|padding|left|right|transform/.test(e.propertyName ?? "") && scheduleLayout(true), { capture: true, passive: true });
     cleanups.push(scroll.onScroll((kind) => {
       if (kind === "user") userScrolled = true;
       schedule();
@@ -3170,6 +3193,7 @@ ${LAYOUT_CSS}`;
       dispose() {
         disposed = true;
         if (trailing) win.clearTimeout(trailing);
+        if (scanTimer) win.clearTimeout(scanTimer);
         cleanups.forEach((fn) => fn());
         railLayout.dispose();
         releaseOutputs();

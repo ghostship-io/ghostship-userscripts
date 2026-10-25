@@ -406,3 +406,34 @@ test("detection is structural: disclosure-button titles, localized wrappers and 
   assert.equal(visibleHosts(flat).length, 1);
   m.stop();
 });
+
+test("ChatGPT re-rendering only the Outputs section: the disclosure follows to the new nodes", async () => {
+  const fx = createFixture({ turns: 20, width: 1600, markup: "real", pane: {} });
+  const { q } = mount(fx);
+  await fx.settle();
+  q(".gs-outputs-toggle").click();
+  const old = outputs(fx);
+  const fresh = old.cloneNode(true);
+  fresh.querySelectorAll("[data-gs-ui],[data-gs-outputs-head]").forEach((n) => (n.matches("[data-gs-ui]") ? n.remove() : n.removeAttribute("data-gs-outputs-head")));
+  fresh.removeAttribute("data-gs-outputs");
+  fresh.removeAttribute("data-gs-collapsed");
+  old.replaceWith(fresh);
+  fx.win.dispatchEvent(new fx.win.Event("resize"));
+  await fx.settle();
+  assert.equal(fx.doc.querySelectorAll(".gs-outputs-toggle").length, 1);
+  assert.equal(outputs(fx), fresh);
+  assert.equal(fresh.dataset.gsCollapsed, "true");
+  assert.equal(old.hasAttribute("data-gs-outputs"), false, "the detached section is released");
+});
+
+test("a pane that mounts without any resize or mutation hint is found by the trailing scan", async () => {
+  const fx = createFixture({ turns: 20, width: 1600, markup: "real" });
+  const { q } = mount(fx);
+  await fx.settle();
+  assert.equal(q(".gs-pane").dataset.gsHost, "fallback");
+  fx.mountPane();
+  fx.thread.append(fx.doc.createComment("render")); // an ordinary refresh, inside the scan throttle
+  await fx.settle();
+  assert.equal(q(".gs-pane").dataset.gsHost, "native", "the trailing scan caught it");
+  assert.equal(visibleHosts(fx).length, 1);
+});

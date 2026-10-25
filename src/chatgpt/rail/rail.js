@@ -92,6 +92,7 @@ export function describePrompt(text, reply = "") {
 
 const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
 const PREVIEW_MAX = 100;
+const SCAN_MS = 400; // at most one page scan for ChatGPT's pane per this long
 const BLOCK_CAP = 800; // rendered blocks measured per rebuild
 
 /**
@@ -128,6 +129,7 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
   let trailing = null;
   let scheduled = false;
   let layoutQueued = false;
+  let forceScan = false;
   let layoutSig = null;
   let disposed = false;
   let drag = false;
@@ -141,6 +143,8 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
   let outputsCollapsed = false;
   let openPending = convId !== "new"; // the one scroll that positions a freshly opened conversation
   let lastHost = null;
+  let scannedAt = -Infinity;
+  let scanTimer = null;
   let outputsHost = null; // { section, head } of the native Outputs section we added the disclosure to
   let slot = null;
   const described = new Map();
@@ -374,8 +378,25 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
   }
 
   /** Reserve the pane's column in the page (or collapse to the toggle) when the page layout changed. */
-  function layout() {
-    const host = adapter.nativeSummary(doc);
+  function layout(rescan = false) {
+    // A mounted pane is revalidated cheaply; looking for one is a page scan, so it runs at most every SCAN_MS
+    // (at once on resize, route and animation hints) and a trailing pass catches a pane that mounted in between.
+    let host = lastHost;
+    if (!host || !host.pane.isConnected || !host.container.isConnected || (host.outputs && !(host.outputs.section.isConnected && host.outputs.head.isConnected)) || !host.pane.getBoundingClientRect().width) {
+      const t = win.performance.now();
+      if (rescan || t - scannedAt >= SCAN_MS) {
+        host = adapter.nativeSummary(doc);
+        scannedAt = t;
+      } else {
+        host = null;
+        if (!scanTimer) {
+          scanTimer = win.setTimeout(() => {
+            scanTimer = null;
+            if (!disposed) layout(true);
+          }, SCAN_MS);
+        }
+      }
+    }
     lastHost = host;
     place(host);
     const now = railLayout.signature(host?.left);
@@ -386,13 +407,11 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
       if (docked) setOpen(true);
       else if (was === "docked") setOpen(false);
       layoutSig = railLayout.signature(host?.left);
+      if (!host) setVar("--gs-pane-top", `${Math.max(0, Math.round(adapter.headerBottom(doc)))}px`);
     }
-    if (host) return;
-    if (root.dataset.gsMode === "collapsed") {
+    if (!host && root.dataset.gsMode === "collapsed") {
       const rect = adapter.composer(doc)?.getBoundingClientRect();
       setVar("--gs-pane-bottom", rect?.height ? `${Math.max(16, Math.round(win.innerHeight - rect.top + 8))}px` : "96px");
-    } else {
-      setVar("--gs-pane-top", `${Math.max(0, Math.round(adapter.headerBottom(doc)))}px`);
     }
   }
 
@@ -653,12 +672,15 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
   }
 
   /** A cheap, batched check of the page column; the full rail update is not needed for it. */
-  function scheduleLayout() {
+  function scheduleLayout(rescan = false) {
+    if (rescan === true) forceScan = true;
     if (layoutQueued || disposed) return;
     layoutQueued = true;
     win.requestAnimationFrame(() => {
       layoutQueued = false;
-      if (!disposed) layout();
+      const force = forceScan;
+      forceScan = false;
+      if (!disposed) layout(force);
     });
   }
 
@@ -813,8 +835,8 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
     }
   });
   // The page column moves with the window and with ChatGPT's own sidebar (an animated width change).
-  on(win, "resize", scheduleLayout);
-  on(doc, "transitionend", (e) => !root.contains(e.target) && !body.contains(e.target) && /width|margin|padding|left|right|transform/.test(e.propertyName ?? "") && scheduleLayout(), { capture: true, passive: true });
+  on(win, "resize", () => scheduleLayout(true));
+  on(doc, "transitionend", (e) => !root.contains(e.target) && !body.contains(e.target) && /width|margin|padding|left|right|transform/.test(e.propertyName ?? "") && scheduleLayout(true), { capture: true, passive: true });
 
   cleanups.push(scroll.onScroll((kind) => {
     if (kind === "user") userScrolled = true;
@@ -844,6 +866,7 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
     dispose() {
       disposed = true;
       if (trailing) win.clearTimeout(trailing);
+      if (scanTimer) win.clearTimeout(scanTimer);
       cleanups.forEach((fn) => fn());
       railLayout.dispose();
       releaseOutputs();
