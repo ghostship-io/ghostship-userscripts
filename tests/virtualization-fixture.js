@@ -35,8 +35,9 @@ export function createFixture({ turns = 40, viewport = 800, markup = "chatgpt", 
     const v = el.style.getPropertyValue("--gs-h");
     return v ? parseFloat(v) : null;
   };
+  // "real" markup: each turn is one [data-turn-key] element inside its own wrapper div.
   const heightOf = (el) =>
-    el.getAttribute("data-gs-state") === "inactive" && placeholder(el) !== null ? placeholder(el) : el.__h ?? 0;
+    el.__wrap ? heightOf(el.firstElementChild) : el.getAttribute("data-gs-state") === "inactive" && placeholder(el) !== null ? placeholder(el) : el.__h ?? 0;
   const scrollHeight = () => [...thread.children].reduce((s, el) => s + heightOf(el), 0);
   const maxTop = () => Math.max(0, scrollHeight() - viewport);
   const topOf = (el) => {
@@ -61,12 +62,14 @@ export function createFixture({ turns = 40, viewport = 800, markup = "chatgpt", 
     let top = 0;
     let height = 0;
     if (this === scroller) height = viewport;
-    else if (this.parentElement === thread) {
-      top = topOf(this) - sim.top;
-      height = heightOf(this);
+    else if (this.parentElement === thread || this.parentElement?.__wrap) {
+      const unit = this.parentElement === thread ? this : this.parentElement;
+      top = topOf(unit) - sim.top;
+      height = heightOf(unit);
     }
-    const width = this.parentElement === thread ? 768 : 0;
-    const left = this.parentElement === thread ? (win.innerWidth - width) / 2 : 0;
+    const inThread = this.parentElement === thread || this.parentElement?.__wrap;
+    const width = inThread ? 768 : 0;
+    const left = inThread ? (win.innerWidth - width) / 2 : 0;
     return { top, bottom: top + height, height, left, right: left + width, width, x: left, y: top };
   };
   EP.scrollIntoView = function () {
@@ -143,6 +146,20 @@ export function createFixture({ turns = 40, viewport = 800, markup = "chatgpt", 
   };
   const addTurn = (i) => {
     const heavy = i % 7 === 3;
+    if (markup === "real") {
+      seq++;
+      const wrapper = doc.createElement("div");
+      const turn = doc.createElement("div");
+      turn.setAttribute("data-turn-key", `bbb2${String(seq).padStart(4, "0")}-0000-0000-0000-000000000000`);
+      turn.innerHTML =
+        `<div data-user-message-bubble="true">Prompt ${i} about ${TOPICS[i % TOPICS.length]}</div>` +
+        `<div data-conversation-role="assistant">${wordy(40)}${heavy ? "<h2>Details</h2>" + codeBlock(300) + table(40) : ""}${wordy(10)}</div>`;
+      turn.__h = 90 + (i % 3) * 20 + (heavy ? 1400 : 300 + (i % 4) * 60);
+      wrapper.__wrap = true;
+      wrapper.append(turn);
+      thread.append(wrapper);
+      return;
+    }
     thread.append(article("user", `Prompt ${i} about ${TOPICS[i % TOPICS.length]}`, 90 + (i % 3) * 20));
     thread.append(
       article(
@@ -152,6 +169,14 @@ export function createFixture({ turns = 40, viewport = 800, markup = "chatgpt", 
       ),
     );
   };
+  if (markup === "real") {
+    scroller.removeAttribute("data-scroll-root");
+    scroller.setAttribute("data-app-action-timeline-scroll", "");
+    thread.setAttribute("data-thread-find-target", "conversation");
+    const form = doc.getElementById("composer");
+    form.setAttribute("data-chatgpt-composer", "");
+    form.innerHTML = '<div contenteditable="true" role="textbox" aria-label="Ask"></div>';
+  }
   for (let i = 0; i < turns; i++) addTurn(i);
   sim.top = maxTop();
 
@@ -169,6 +194,7 @@ export function createFixture({ turns = 40, viewport = 800, markup = "chatgpt", 
     replaceThread(count = 0) {
       const next = doc.createElement("main");
       next.id = "thread";
+      if (markup === "real") next.setAttribute("data-thread-find-target", "conversation");
       thread.replaceWith(next);
       thread = next;
       for (let i = 0; i < count; i++) addTurn(i);

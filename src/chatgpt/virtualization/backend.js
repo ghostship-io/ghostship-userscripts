@@ -12,11 +12,13 @@ const CSS = `
 export function discover(doc, adapter) {
   const els = adapter.turns(doc);
   if (!els.length) return { reason: "no-turns" };
-  const parent = els[0].parentElement;
-  if (!parent || els.some((e) => e.parentElement !== parent)) return { reason: "turns-not-siblings" };
+  const parent = adapter.turnRoot(doc);
+  if (!parent || els.some((e) => !parent.contains(e))) return { reason: "turns-outside-root", els };
+  const scroller = adapter.scroller(doc);
+  if (scroller !== doc.documentElement && scroller !== doc.scrollingElement && !scroller.contains(parent)) return { reason: "root-outside-scroller", els };
   const turns = groupTurns(els, adapter.role);
   if (!turns) return { reason: "unknown-role" };
-  return { parent, turns };
+  return { parent, turns, els };
 }
 
 /**
@@ -28,8 +30,7 @@ export function discover(doc, adapter) {
  * touching the page; if the markup stops matching later, or a sync throws, the
  * runtime's `fallback` is called.
  *
- * Observers: one hub subscription (childList of the turn container, no
- * subtree) plus one ResizeObserver that only watches active turn elements.
+ * Observers: one hub subscription (childList of the turn root) plus one ResizeObserver that only watches active turn elements.
  */
 export function createTurnBackend() {
   let api = null;
@@ -105,7 +106,7 @@ function mountTurns({ doc, adapter, scroll, observers, config, fallback }) {
     scroll.restore();
     schedule();
   });
-  const stopObserving = observers.subscribe(parent, () => refresh(), { childList: true });
+  const stopObserving = observers.subscribe(parent, () => refresh(), { childList: true, subtree: true });
 
   function observe(el, on) {
     if (on && !observed.has(el)) {
@@ -203,6 +204,10 @@ function mountTurns({ doc, adapter, scroll, observers, config, fallback }) {
   /** Turn list changed (new message, React re-render/remount): re-group and re-apply. */
   function refresh() {
     if (disposed) return;
+    // Streaming mutates the subtree constantly; only a changed turn list needs regrouping.
+    const current = adapter.turns(doc);
+    const flat = allElements();
+    if (current.length === flat.length && current.every((el, i) => el === flat[i]) && adapter.turnRoot(doc) === parent) return;
     const next = discover(doc, adapter);
     if (!next.parent || next.parent !== parent) return fallback?.(next.reason ?? "container-changed");
     const wasAtLatest = windowStart + size >= turns.length;

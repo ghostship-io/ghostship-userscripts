@@ -338,7 +338,7 @@
       for (const el2 of anchors()) {
         const r = el2.getBoundingClientRect();
         if (r.bottom > base + EPS) {
-          anchor = { el: el2, key: el2.getAttribute("data-testid") ?? "", offset: r.top - base };
+          anchor = { el: el2, key: el2.getAttribute("data-turn-key") ?? el2.getAttribute("data-testid") ?? "", offset: r.top - base };
           return anchor;
         }
       }
@@ -704,28 +704,34 @@
   }
 
   // src/chatgpt/adapter.js
-  var TURN = '[data-testid^="conversation-turn-"]';
+  var TURN = '[data-turn-key], [data-testid^="conversation-turn-"]';
+  var TURN_ROOT = '[data-thread-find-target="conversation"]';
   var ROLE = "[data-message-author-role]";
   var BLOCKS = "h1,h2,h3,h4,h5,h6,p,li,pre,table,img,blockquote";
-  var USER = '[data-message-author-role="user"]';
-  var COMPOSER = "#prompt-textarea";
+  var USER = '[data-message-author-role="user"], [data-user-message-bubble]';
+  var REPLY = "[data-conversation-role]";
+  var COMPOSER = '#prompt-textarea, [data-chatgpt-composer] [contenteditable="true"], form [contenteditable="true"][role="textbox"]';
+  var SCROLLER = "[data-scroll-root], [data-app-action-timeline-scroll]";
+  var nonEmptyRole = (el2, sel, attr) => (el2.matches(sel) ? el2 : el2.querySelector(sel))?.getAttribute(attr) || null;
   var chatgptAdapter = {
     turns: (root) => [...root.querySelectorAll(TURN)],
-    role: (turn) => (turn.matches(ROLE) ? turn : turn.querySelector(ROLE))?.getAttribute("data-message-author-role") || null,
+    role: (turn) => nonEmptyRole(turn, ROLE, "data-message-author-role") ?? (turn.querySelector("[data-user-message-bubble]") ? "user" : nonEmptyRole(turn, REPLY, "data-conversation-role")),
     blocks: (turnEls) => turnEls.flatMap((el2) => [...el2.querySelectorAll(BLOCKS)]),
     userMessage: (turn) => turn.querySelector(USER),
-    turnId: (turn, index) => turn.getAttribute("data-testid") ?? `turn-${index}`,
+    turnId: (turn, index) => turn.getAttribute("data-turn-key") ?? turn.getAttribute("data-testid") ?? `turn-${index}`,
+    /** The stable element whose subtree contains every turn; observed for new turns. */
+    turnRoot: (doc) => doc.querySelector(TURN_ROOT) ?? doc.querySelector(TURN)?.parentElement ?? null,
     /** The element the queue panel is inserted directly before: the composer form, else the input itself. */
     composer: (doc) => doc.querySelector(COMPOSER)?.closest("form") ?? doc.querySelector(COMPOSER),
     conversationId: (win) => win.location.pathname.match(/^\/c\/([\w-]+)/)?.[1] ?? "new",
-    scroller: (doc) => doc.querySelector("[data-scroll-root]") ?? doc.scrollingElement ?? doc.documentElement,
+    scroller: (doc) => doc.querySelector(SCROLLER) ?? doc.scrollingElement ?? doc.documentElement,
     /** Identity of the pieces the script attaches to; a change means the page re-rendered or navigated. */
     layout(doc, win) {
       const first = doc.querySelector(TURN);
       return {
         route: this.conversationId(win),
         composer: doc.querySelector(COMPOSER),
-        container: first?.parentElement ?? null,
+        container: first ? this.turnRoot(doc) : null,
         scroller: first ? this.scroller(doc) : null
       };
     },
@@ -2427,11 +2433,13 @@
   function discover(doc, adapter) {
     const els = adapter.turns(doc);
     if (!els.length) return { reason: "no-turns" };
-    const parent = els[0].parentElement;
-    if (!parent || els.some((e) => e.parentElement !== parent)) return { reason: "turns-not-siblings" };
+    const parent = adapter.turnRoot(doc);
+    if (!parent || els.some((e) => !parent.contains(e))) return { reason: "turns-outside-root", els };
+    const scroller = adapter.scroller(doc);
+    if (scroller !== doc.documentElement && scroller !== doc.scrollingElement && !scroller.contains(parent)) return { reason: "root-outside-scroller", els };
     const turns = groupTurns(els, adapter.role);
     if (!turns) return { reason: "unknown-role" };
-    return { parent, turns };
+    return { parent, turns, els };
   }
   function createTurnBackend() {
     let api = null;
@@ -2500,7 +2508,7 @@
       scroll.restore();
       schedule();
     });
-    const stopObserving = observers.subscribe(parent, () => refresh(), { childList: true });
+    const stopObserving = observers.subscribe(parent, () => refresh(), { childList: true, subtree: true });
     function observe(el2, on) {
       if (on && !observed.has(el2)) {
         observed.add(el2);
@@ -2589,6 +2597,9 @@
     }
     function refresh() {
       if (disposed) return;
+      const current = adapter.turns(doc);
+      const flat = allElements();
+      if (current.length === flat.length && current.every((el2, i) => el2 === flat[i]) && adapter.turnRoot(doc) === parent) return;
       const next = discover(doc, adapter);
       if (!next.parent || next.parent !== parent) return fallback?.(next.reason ?? "container-changed");
       const wasAtLatest = windowStart + size >= turns.length;
