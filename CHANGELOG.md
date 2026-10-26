@@ -4,7 +4,9 @@ Agents add entries under Unreleased and never touch version fields. After a merg
 
 ## Unreleased
 
-- The conversation view (minimap) always shows the whole current turn: the frame is one fixed sheet, a short turn sits on it between grayed bezels and a long one is squashed to the sheet (denser, still the full width) instead of sliding under the frame as you scroll; the box marks how much of the turn is on screen and where. Click or drag anywhere to jump there.
+## [0.7.8] - 2026-10-26
+
+- The conversation view (minimap) always shows the whole current turn: the frame is one fixed sheet, a short turn sits on it between grayed bezels and a long one is squashed to the sheet (denser, still the full width) instead of sliding under the frame as you scroll; the box marks how much of the turn is on screen and where. Click or drag anywhere to jump there. (#24)
 
 ## [0.7.7] - 2026-10-26
 
