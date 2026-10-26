@@ -20,6 +20,13 @@ jobs:
       - name: Release policy (versions are set by the release step; a change needs a changelog entry)
         if: github.event_name == 'pull_request'
         run: git fetch origin "${{ github.base_ref }}" && node scripts/check-pr.mjs "origin/${{ github.base_ref }}"
+      - name: Evidence images (every validation/* branch needs a verified sanitization manifest)
+        run: |
+          for ref in $(git for-each-ref --format='%(refname:short)' 'refs/remotes/origin/validation/*'); do
+            dir=$(mktemp -d)
+            git archive "$ref" | tar -x -C "$dir"
+            node scripts/check-evidence.mjs "$dir"
+          done
       - name: Release plan (dry run)
         run: node scripts/release.mjs
       - run: npm test
