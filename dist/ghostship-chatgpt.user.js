@@ -1694,7 +1694,7 @@ onmessage = (e) => {
 
   // src/chatgpt/queue/store.js
   var DB_NAME = "ghostship-chatgpt-queue";
-  var DB_VERSION = 2;
+  var DB_VERSION = 3;
   var LEGACY_ACCOUNT = "unknown";
   var keyOf = (target) => `${target.accountId}:${target.conversationId}`;
   function request(req) {
@@ -1789,6 +1789,20 @@ onmessage = (e) => {
       at: now
     };
   }
+  var heldRecord = (record, now) => ({ ...record, status: "blocked", version: record.version + 1, updatedAt: now, lastError: legacyError("legacy-paused", [], now) });
+  function holdPausedQueues(tx, now) {
+    const states = tx.objectStore("state").getAll();
+    states.onsuccess = () => {
+      for (const state of states.result) {
+        if (state.paused !== true) continue;
+        tx.objectStore("state").put({ ...state, paused: false });
+        const pending = tx.objectStore("pending").get(state.key);
+        pending.onsuccess = () => {
+          if (pending.result && pending.result.status === "pending") tx.objectStore("pending").put(heldRecord(pending.result, now));
+        };
+      }
+    };
+  }
   var Tx = class {
     #tx;
     constructor(tx) {
@@ -1850,6 +1864,10 @@ onmessage = (e) => {
       open.onupgradeneeded = (event) => {
         const db2 = open.result;
         const tx = open.transaction;
+        if (event.oldVersion >= 2) {
+          holdPausedQueues(tx, now());
+          return;
+        }
         const pending = db2.createObjectStore("pending", { keyPath: "key" });
         pending.createIndex("conversationId", "conversationId");
         const inflight = db2.createObjectStore("inflight", { keyPath: "key" });
@@ -1863,7 +1881,7 @@ onmessage = (e) => {
           const migrated = migrateLegacy(rows.result, queues.result, now());
           for (const record of migrated.pending) tx.objectStore("pending").put(record);
           for (const record of migrated.inflight) tx.objectStore("inflight").put(record);
-          for (const record of migrated.state) tx.objectStore("state").put(record);
+          for (const record of migrated.state) tx.objectStore("state").put({ ...record, paused: false });
           db2.deleteObjectStore("queues");
           db2.deleteObjectStore("leases");
         };
