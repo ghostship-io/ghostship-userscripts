@@ -252,6 +252,44 @@
       "avatar": "absent",
       "labels": [],
       "fill": "5a5a5a"
+    },
+    "969/s3/q1-append-first.png": {
+      "sha256": "40f32f7071c453bee127685d8bd57956132835eb873ec1062308b8aa1aeec0e6",
+      "avatar": "absent",
+      "labels": [],
+      "fill": "5a5a5a"
+    },
+    "969/s3/q2-append-second.png": {
+      "sha256": "1026e5b0a3fb8aeb1d9e4664b11e98f286bde661e23a8df1b018a19ade24addc",
+      "avatar": "absent",
+      "labels": [],
+      "fill": "5a5a5a"
+    },
+    "969/s3/q3-resumed-queued.png": {
+      "sha256": "ca824e19620ad1e3e0d08b558ffccff005e341919ba4a663db7880e317bba7b9",
+      "avatar": "absent",
+      "labels": [],
+      "fill": "5a5a5a"
+    },
+    "969/s3/q4-resumed-sent.png": {
+      "sha256": "09bc7fa3f875b3f80521b981d032494957b2c2cf2a8282770619b3a9fde0a552",
+      "avatar": "absent",
+      "labels": [],
+      "fill": "5a5a5a"
+    },
+    "969/s3/q5-sidebar-pencil.png": {
+      "sha256": "f12f602bd1bca8cb0fe53c7ee5e0f6b72f43f245049cb52521da1c4133814a6f",
+      "avatar": "absent",
+      "labels": [
+        {
+          "x": 4,
+          "y": 4,
+          "w": 190,
+          "h": 26,
+          "why": "sidebar conversation title"
+        }
+      ],
+      "fill": "5a5a5a"
     }
   }
 }
