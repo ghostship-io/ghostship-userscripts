@@ -38,7 +38,7 @@ test("runtime: no composer falls back to safe mode without touching the page", a
 test("runtime: a composer without turns (new chat) runs composer-only, mounts the queue and leaves scrolling alone", async () => {
   const dom = await loadFixture();
   const { window } = dom;
-  window.document.querySelectorAll("[data-testid]").forEach((el) => el.removeAttribute("data-testid"));
+  window.document.querySelectorAll("[data-testid],[data-message-author-role]").forEach((el) => { el.removeAttribute("data-testid"); el.removeAttribute("data-message-author-role"); });
   const mounted = [];
   const queueUi = () => {
     mounted.push("queue");

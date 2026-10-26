@@ -289,8 +289,12 @@ export function createQueueUi({
     const input = adapter.composerInput(doc);
     return input && event.target instanceof win.Node && (input === event.target || input.contains(event.target));
   };
-  /** Hijack the send gesture only while a response runs (or an edit is open), and never in an unsaved new chat. */
-  const hijacking = () => dispatching || model.edit !== null || (adapter.generating(doc) && target.conversationId !== "new");
+  /**
+   * Hijack the send gesture while anything is running: a response, an edit, or a queued prompt that has not gone out yet
+   * (it is about to, so a native send would jump ahead of it). Never in an unsaved new chat.
+   */
+  const hijacking = () =>
+    dispatching || model.edit !== null || (target.conversationId !== "new" && (adapter.generating(doc) || model.pending !== null || model.inflight !== null));
 
   function onKeydown(event) {
     if (!inComposer(event)) return;

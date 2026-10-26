@@ -754,28 +754,38 @@
   }
 
   // src/chatgpt/adapter.js
-  var TURN = '[data-turn-key], [data-testid^="conversation-turn-"]';
+  var TURN_PRIMARY = '[data-turn-key], [data-testid^="conversation-turn-"]';
+  var TURN_FALLBACK = "article:has([data-message-author-role])";
+  var TURN = `${TURN_PRIMARY}, ${TURN_FALLBACK}`;
+  var turnSelector = (page) => page.querySelector(TURN_PRIMARY) ? TURN_PRIMARY : TURN_FALLBACK;
+  var turnEls = (page) => page.querySelectorAll(turnSelector(page));
+  var firstTurn = (page) => page.querySelector(turnSelector(page));
   var TURN_ROOT = '[data-thread-find-target="conversation"]';
   var ROLE = "[data-message-author-role]";
   var BLOCKS = "h1,h2,h3,h4,h5,h6,p,li,pre,table,img,blockquote";
   var USER = '[data-message-author-role="user"], [data-user-message-bubble]';
   var REPLY = "[data-conversation-role]";
-  var COMPOSER = '#prompt-textarea, [data-chatgpt-composer] [contenteditable="true"], form [contenteditable="true"][role="textbox"]';
+  var COMPOSERS = ['[contenteditable="true"][role="textbox"]', "#prompt-textarea", '[data-chatgpt-composer] [contenteditable="true"]', 'form [contenteditable="true"]', "form textarea"];
   var SEND = 'button[data-testid="send-button"]';
-  var SEND_FALLBACK = 'button[type="submit"][aria-label^="Send" i]';
+  var SEND_LABEL = 'button[type="submit"][aria-label^="Send" i]';
   var STOP = 'button[data-testid="stop-button"]';
-  var STOP_FALLBACK = 'button[aria-label^="Stop" i]';
+  var STOP_LABEL = 'button[aria-label^="Stop" i]';
   var STREAMING = ".result-streaming, [data-is-streaming='true']";
   var STEER = 'button[data-testid="steer-button"], button[aria-label^="Steer" i]';
   var PROFILE = '[data-testid="accounts-profile-button"], [data-testid="profile-button"]';
   var ATTACHMENT = '[data-testid*="attachment" i], [data-testid*="file-thumbnail" i]';
   var SCROLLER = "[data-scroll-root], [data-app-action-timeline-scroll]";
-  var HEADER = "#page-header, header";
+  var HEADER = "#page-header, header, [role='banner']";
   var ASSISTANT = '[data-message-author-role="assistant"], [data-conversation-role="assistant"]';
   var SCROLLABLE = /* @__PURE__ */ new Set(["auto", "scroll", "overlay"]);
   var ABSOLUTE = /* @__PURE__ */ new Set(["absolute", "fixed"]);
+  var OWN_UI = "[data-gs-ui]";
   var ACTIVE_PAGE = '[data-app-shell-active-page="true"]';
   var scope = (root) => root.nodeType === 9 ? root.querySelector(ACTIVE_PAGE) ?? root : root;
+  var findComposer = (page) => {
+    for (const sel of COMPOSERS) for (const el2 of page.querySelectorAll(sel)) if (!el2.closest(OWN_UI) && !el2.closest(TURN)) return el2;
+    return null;
+  };
   var pageHeader = (doc) => {
     for (const h of scope(doc).querySelectorAll(HEADER)) {
       if (h.closest(OWN_UI) || h.closest(TURN)) continue;
@@ -790,7 +800,6 @@
   var SUMMARY_REGION = `aside,[role="complementary"],[role="region"],[aria-label*="summary" i],[data-testid*="summary" i],${SUMMARY_HINT}`;
   var BUTTONS = 'button,[role="button"]';
   var BUTTON_REGION = `aside,[role="complementary"],[role="region"],${SUMMARY_HINT}`;
-  var OWN_UI = "[data-gs-ui]";
   var SUMMARY_TOGGLE = 'button[data-thread-summary-panel-toggle="true"]';
   var THINKING_TITLE = /^(thought|worked|thinking|stopped thinking|reasoned)\b/i;
   var commonAncestor = (a, b) => {
@@ -817,17 +826,17 @@
     return null;
   }
   var chatgptAdapter = {
-    turns: (root) => [...scope(root).querySelectorAll(TURN)],
+    turns: (root) => [...turnEls(scope(root))],
     role: (turn) => nonEmptyRole(turn, ROLE, "data-message-author-role") ?? (turn.querySelector("[data-user-message-bubble]") ? "user" : nonEmptyRole(turn, REPLY, "data-conversation-role")),
-    blocks: (turnEls) => turnEls.flatMap((el2) => [...el2.querySelectorAll(BLOCKS)]),
+    blocks: (turnEls2) => turnEls2.flatMap((el2) => [...el2.querySelectorAll(BLOCKS)]),
     // Queue transport (live dispatcher): the editable composer input and its Send/Stop buttons.
-    composerInput: (doc) => scope(doc).querySelector(COMPOSER),
-    sendButton: (doc) => scope(doc).querySelector(SEND) ?? scope(doc).querySelector(COMPOSER)?.closest("form")?.querySelector(SEND_FALLBACK) ?? null,
+    composerInput: (doc) => findComposer(scope(doc)),
+    sendButton: (doc) => findComposer(scope(doc))?.closest("form")?.querySelector(SEND_LABEL) ?? scope(doc).querySelector(SEND) ?? null,
     // Inside the composer form only: the queue card has its own Steer button, which must never be mistaken for it.
-    steerButton: (doc) => scope(doc).querySelector(COMPOSER)?.closest("form")?.querySelector(STEER) ?? null,
+    steerButton: (doc) => findComposer(scope(doc))?.closest("form")?.querySelector(STEER) ?? null,
     stopButton(doc) {
       const page = scope(doc);
-      return page.querySelector(STOP) ?? page.querySelector(COMPOSER)?.closest("form")?.querySelector(STOP_FALLBACK) ?? null;
+      return findComposer(page)?.closest("form")?.querySelector(STOP_LABEL) ?? page.querySelector(STOP) ?? null;
     },
     /**
      * A response is being produced: a Stop control is shown, the reply is still streaming, or the composer offers to steer it
@@ -853,7 +862,7 @@
     },
     /** Files on the message being composed; the queue cannot restore them, so it flags them. */
     composerAttachments(doc) {
-      const form = scope(doc).querySelector(COMPOSER)?.closest("form");
+      const form = findComposer(scope(doc))?.closest("form");
       return [...form?.querySelectorAll(ATTACHMENT) ?? []].map((node) => ({
         name: node.getAttribute("aria-label")?.slice(0, 80) || "attachment",
         size: 0,
@@ -865,9 +874,9 @@
     userMessage: (turn) => turn.querySelector(USER),
     turnId: (turn, index) => turn.getAttribute("data-turn-key") ?? turn.getAttribute("data-testid") ?? `turn-${index}`,
     /** The stable element whose subtree contains every turn; observed for new turns. */
-    turnRoot: (doc) => scope(doc).querySelector(TURN_ROOT) ?? scope(doc).querySelector(TURN)?.parentElement ?? null,
+    turnRoot: (doc) => scope(doc).querySelector(TURN_ROOT) ?? firstTurn(scope(doc))?.parentElement ?? null,
     /** The element the queue panel is inserted directly before: the composer form, else the input itself. */
-    composer: (doc) => scope(doc).querySelector(COMPOSER)?.closest("form") ?? scope(doc).querySelector(COMPOSER),
+    composer: (doc) => findComposer(scope(doc))?.closest("form") ?? findComposer(scope(doc)),
     /** The active page element itself; it changes when ChatGPT switches to another mounted conversation page. */
     pageElement: (doc) => scope(doc),
     /**
@@ -884,7 +893,7 @@
       const out = [];
       for (const link of doc.querySelectorAll('a[href*="/c/"]')) {
         const id = link.getAttribute("href")?.match(/^(?:\/g\/[^/]+)?\/c\/([\w-]+)/)?.[1];
-        if (!id || link.closest(OWN_UI) || link.closest(TURN) || !link.closest("nav")) continue;
+        if (!id || link.closest(OWN_UI) || link.closest(TURN) || !link.closest("nav, [role='navigation']")) continue;
         const title = link.querySelector("[data-thread-title]");
         out.push({ id, link, host: title?.parentElement ?? link });
       }
@@ -899,7 +908,7 @@
       const page = scope(doc);
       const known = page.querySelector(SCROLLER);
       const win = doc.defaultView;
-      for (let el2 = page.querySelector(TURN)?.parentElement; el2 && el2 !== doc.body && el2 !== doc.documentElement; el2 = el2.parentElement) {
+      for (let el2 = firstTurn(page)?.parentElement; el2 && el2 !== doc.body && el2 !== doc.documentElement; el2 = el2.parentElement) {
         if (el2 === known) break;
         if (SCROLLABLE.has(win.getComputedStyle(el2).overflowY) && el2.scrollHeight > el2.clientHeight && (!known || known.contains(el2))) return el2;
       }
@@ -913,7 +922,7 @@
       const composer = this.composer(doc);
       const scroller = this.scroller(doc);
       if (!composer || !scroller) return null;
-      if (!scope(doc).querySelector(TURN)) {
+      if (!firstTurn(scope(doc))) {
         const win = doc.defaultView;
         let node2 = composer;
         for (let up = node2.parentElement; up && up !== doc.body && up !== doc.documentElement; up = up.parentElement) {
@@ -1063,7 +1072,7 @@
      */
     thinkingToggles(doc) {
       const out = [];
-      scope(doc).querySelectorAll(TURN).forEach((turn, turnIndex) => {
+      turnEls(scope(doc)).forEach((turn, turnIndex) => {
         let nth = 0;
         for (const button2 of turn.querySelectorAll("button[aria-expanded]")) {
           if (button2.closest(OWN_UI) || !THINKING_TITLE.test((button2.textContent ?? "").trim())) continue;
@@ -1085,10 +1094,10 @@
     },
     /** Identity of the pieces the script attaches to; a change means the page re-rendered or navigated. */
     layout(doc, win) {
-      const first = scope(doc).querySelector(TURN);
+      const first = firstTurn(scope(doc));
       return {
         route: this.conversationId(win),
-        composer: scope(doc).querySelector(COMPOSER),
+        composer: findComposer(scope(doc)),
         container: first ? this.turnRoot(doc) : null,
         scroller: first ? this.scroller(doc) : null
       };
@@ -1100,7 +1109,7 @@
      */
     loadError(doc) {
       const page = scope(doc);
-      if (page.querySelector(TURN)) return null;
+      if (firstTurn(page)) return null;
       for (const control of page.querySelectorAll('button, a, [role="button"]')) {
         if (!RETRY_LABEL.test((control.textContent ?? "").trim())) continue;
         let card = control;
@@ -1115,9 +1124,9 @@
     /** `ok` means the composer is there (a new chat has no turns); `hasTurns` selects the full feature set. */
     selfCheck(doc) {
       const page = scope(doc);
-      const hasTurns = !!page.querySelector(TURN);
+      const hasTurns = !!firstTurn(page);
       const missing = [];
-      if (!page.querySelector(COMPOSER)) missing.push("composer");
+      if (!findComposer(page)) missing.push("composer");
       if (!hasTurns) missing.push("turns");
       return { ok: !missing.includes("composer"), hasTurns, missing };
     }
@@ -2863,7 +2872,7 @@ onmessage = (e) => {
       const input = adapter.composerInput(doc);
       return input && event.target instanceof win.Node && (input === event.target || input.contains(event.target));
     };
-    const hijacking = () => dispatching || model.edit !== null || adapter.generating(doc) && target.conversationId !== "new";
+    const hijacking = () => dispatching || model.edit !== null || target.conversationId !== "new" && (adapter.generating(doc) || model.pending !== null || model.inflight !== null);
     function onKeydown(event) {
       if (!inComposer(event)) return;
       if (event.key === "Escape" && model.edit) {

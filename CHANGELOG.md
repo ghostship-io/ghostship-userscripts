@@ -9,6 +9,9 @@ Agents add entries under Unreleased and never touch version fields. After a merg
 - A queued prompt stays with its conversation: leave for another conversation and it waits, and when you open that conversation again it is sent as soon as the page has loaded and the response is idle. Every send first checks that the page itself holds the target conversation (not just the address bar), that its turns have been showing for over a second and that the composer is its own; otherwise it holds and the card says why ("Waiting for the conversation to load / open").
 - A pencil appears on the sidebar row of every conversation that holds a queued prompt, the open one included, so a queue left behind is visible.
 - The queue keeps working in a hidden tab or a background window: while a prompt waits there, a tiny worker timer (no network, no page data; falls back to the page's own timers where a policy blocks it) drives the pass and every wait, and the response ending wakes it at once, instead of Chrome's throttled page timers (one a second, one a minute after five minutes).
+- ChatGPT's collapsed thinking traces open by themselves when they scroll into view, once each (one you close stays closed); turn off with `{"expandThinking":false}`.
+- Anything running now sends your message to the queue, not only a running response: once the response has ended but the queued prompt has not gone out yet, a message you type still joins it (one queue item per conversation) instead of being sent ahead of it.
+- The page hooks survive routine site changes: the composer, Send, Stop and the turns are found by role, accessible name and semantic structure first (an editable textbox, a "Send"/"Stop" button in the composer form, an `<article>` holding a message), with test ids and data attributes as fallbacks, and none of them depends on class names, ids, wrapper divs, extra buttons or sibling order.
 
 ## [0.7.6] - 2026-10-26
 

@@ -150,6 +150,27 @@ test("a form submit or native Send/steer click while generating appends too, and
   assert.equal(t.queued(), "via submit\n\nvia steer button\n\nonce");
 });
 
+test("anything running appends: a message typed after the response ended but before the queued prompt went out joins it, never jumps ahead", async () => {
+  // Defect: Enter left to ChatGPT once the response was over, so the new message was sent natively ahead of the queued one.
+  const t = await mount();
+  t.page.startStreaming();
+  await t.enter("first");
+  t.page.finishStreaming();
+  assert.equal(t.queued(), "first", "the queued prompt is still waiting");
+  const event = await t.enter("second");
+  assert.equal(event.defaultPrevented, true, "not sent natively");
+  assert.equal(t.page.text(), "", "the composer is cleared once the write is confirmed");
+  assert.equal(t.rows(), 1, "still the one queue item");
+  assert.equal(t.queued(), "first\n\nsecond");
+  assert.deepEqual(t.page.log, [], "nothing went to ChatGPT natively");
+  // Once it has gone out nothing is running any more and Enter is ChatGPT's again.
+  await t.tick();
+  await t.tick();
+  assert.equal(t.queued(), null);
+  t.page.type("plain");
+  assert.equal((await t.press({ key: "Enter" })).defaultPrevented, false);
+});
+
 test("whenever ChatGPT offers to steer, Send goes to the queue by default, even where it shows no Stop control", async () => {
   // Defect: a page whose running response shows only a Steer control (no Stop, no streaming marker) steered natively.
   const t = await mount({ page: await fakePage({ steer: true }) });

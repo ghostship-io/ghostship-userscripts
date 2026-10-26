@@ -1,23 +1,39 @@
 // Every ChatGPT DOM assumption lives here. When the site changes, selfCheck()
 // fails and the runtime stays in safe mode instead of touching the page. A page
 // with a composer but no turns (a new chat) runs in composer-only mode.
+//
+// Durability rules (tests/adapter-durability.test.js enforces them, and HOOKS below lists every hook):
+//  - a hook anchors on the most stable signal first: roles, accessible names (aria-label), landmarks and behaviour
+//    (what is editable, scrollable, expanded); test ids and data attributes come after, classes last and only
+//    as one of several signals;
+//  - every hook has a fallback, so a routine change to something it does not hook (class names, test ids, wrapper
+//    divs, extra buttons or banners, the order of siblings) leaves it working;
+//  - no selector uses a position (`:nth-*`, child combinators, depth) or a generated class name;
+//  - when the thing hooked itself changes, the hook fails closed (null / selfCheck) and the script stands down.
 // Turns: ChatGPT now renders one `[data-turn-key]` element per complete prompt/response
-// turn (each inside its own wrapper); older builds used `conversation-turn-N` articles per message.
-const TURN = '[data-turn-key], [data-testid^="conversation-turn-"]';
+// turn (each inside its own wrapper); older builds used `conversation-turn-N` articles per message. An `article`
+// holding a message is the semantic fallback when neither marker is there.
+const TURN_PRIMARY = '[data-turn-key], [data-testid^="conversation-turn-"]';
+const TURN_FALLBACK = "article:has([data-message-author-role])";
+const TURN = `${TURN_PRIMARY}, ${TURN_FALLBACK}`; // membership ("is this inside a turn?")
+const turnSelector = (page) => (page.querySelector(TURN_PRIMARY) ? TURN_PRIMARY : TURN_FALLBACK);
+const turnEls = (page) => page.querySelectorAll(turnSelector(page));
+const firstTurn = (page) => page.querySelector(turnSelector(page));
 const TURN_ROOT = '[data-thread-find-target="conversation"]';
 const ROLE = "[data-message-author-role]";
 const BLOCKS = "h1,h2,h3,h4,h5,h6,p,li,pre,table,img,blockquote";
 const USER = '[data-message-author-role="user"], [data-user-message-bubble]';
 const REPLY = "[data-conversation-role]";
-// The prompt box is a ProseMirror contenteditable inside the composer form (no #prompt-textarea any more).
-const COMPOSER = '#prompt-textarea, [data-chatgpt-composer] [contenteditable="true"], form [contenteditable="true"][role="textbox"]';
+// The prompt box is an editable textbox inside the composer form. In order: the ARIA textbox role, the known id and
+// form marker, then any editable field in a form. Fields inside a conversation turn (editing a sent message) never count.
+const COMPOSERS = ['[contenteditable="true"][role="textbox"]', "#prompt-textarea", '[data-chatgpt-composer] [contenteditable="true"]', 'form [contenteditable="true"]', "form textarea"];
 const SEND = 'button[data-testid="send-button"]';
-// ChatGPT's composer no longer carries test ids: its Send is the form's submit button labelled "Send".
-const SEND_FALLBACK = 'button[type="submit"][aria-label^="Send" i]';
+// Send is the composer form's submit button by its accessible name ("Send ..."); the old test id is the fallback.
+const SEND_LABEL = 'button[type="submit"][aria-label^="Send" i]';
 const STOP = 'button[data-testid="stop-button"]';
-// ChatGPT's Stop control is not always the same testid. Inside the composer form any "Stop ..." button
-// counts, and so does a reply that is still marked as streaming; missing one signal never reads as idle.
-const STOP_FALLBACK = 'button[aria-label^="Stop" i]';
+// Stop is the composer form's button by its accessible name ("Stop ..."); the test id is the fallback, and a reply
+// still marked as streaming counts too: missing one signal never reads as idle.
+const STOP_LABEL = 'button[aria-label^="Stop" i]';
 const STREAMING = ".result-streaming, [data-is-streaming='true']";
 // The native steer path (Send while a response runs), only when a button says so; never guessed.
 const STEER = 'button[data-testid="steer-button"], button[aria-label^="Steer" i]';
@@ -27,14 +43,20 @@ const PROFILE = '[data-testid="accounts-profile-button"], [data-testid="profile-
 const ATTACHMENT = '[data-testid*="attachment" i], [data-testid*="file-thumbnail" i]';
 const SCROLLER = "[data-scroll-root], [data-app-action-timeline-scroll]";
 // The page header: a plain `<header>` in the active page (a hidden page keeps its own, zero-sized one), or `#page-header`.
-const HEADER = "#page-header, header";
+const HEADER = "#page-header, header, [role='banner']";
 const ASSISTANT = '[data-message-author-role="assistant"], [data-conversation-role="assistant"]';
 const SCROLLABLE = new Set(["auto", "scroll", "overlay"]);
 const ABSOLUTE = new Set(["absolute", "fixed"]);
 // ChatGPT keeps pages you navigated away from mounted but inactive (hidden, with their own composer, turns and
 // scroller). Everything the script attaches to must come from the active page.
+const OWN_UI = "[data-gs-ui]";
 const ACTIVE_PAGE = '[data-app-shell-active-page="true"]';
 const scope = (root) => (root.nodeType === 9 ? root.querySelector(ACTIVE_PAGE) ?? root : root);
+/** The composer's editable field in `page`: the first selector that matches outside turns and our own UI. */
+const findComposer = (page) => {
+  for (const sel of COMPOSERS) for (const el of page.querySelectorAll(sel)) if (!el.closest(OWN_UI) && !el.closest(TURN)) return el;
+  return null;
+};
 /** The visible page header of the active page, or null. */
 const pageHeader = (doc) => {
   for (const h of scope(doc).querySelectorAll(HEADER)) {
@@ -57,7 +79,6 @@ const SUMMARY_REGION = `aside,[role="complementary"],[role="region"],[aria-label
 // Titles are headings anywhere, or disclosure buttons inside a region (queried per region, never page-wide).
 const BUTTONS = 'button,[role="button"]';
 const BUTTON_REGION = `aside,[role="complementary"],[role="region"],${SUMMARY_HINT}`;
-const OWN_UI = "[data-gs-ui]";
 // The header button that opens and closes ChatGPT's summary pane (aria-pressed says which).
 const SUMMARY_TOGGLE = 'button[data-thread-summary-panel-toggle="true"]';
 // The title of a thinking trace's disclosure button.
@@ -96,18 +117,58 @@ function hintedPane(page, win, composer) {
   return null;
 }
 
+/**
+ * Every hook of the adapter, its anchor and its fallback (tests/adapter-durability.test.js requires one entry per
+ * adapter method and perturbs the page to prove the anchors do not lean on unrelated structure).
+ */
+export const HOOKS = {
+  turns: { anchor: "the turn markers (data-turn-key, conversation-turn test ids)", fallback: "an <article> holding a message with an author role" },
+  role: { anchor: "the message's author role attribute", fallback: "the user-bubble marker, then the conversation role" },
+  blocks: { anchor: "semantic content elements (headings, p, li, pre, table, img, blockquote)", fallback: "none needed: standard HTML" },
+  composerInput: { anchor: "an editable element with the ARIA textbox role, outside turns", fallback: "#prompt-textarea, the composer form marker, any editable field or textarea in a form" },
+  sendButton: { anchor: "the composer form's submit button by its accessible name (\"Send ...\")", fallback: "the send-button test id" },
+  steerButton: { anchor: "a button in the composer form by its accessible name (\"Steer ...\")", fallback: "the steer-button test id" },
+  stopButton: { anchor: "a button in the composer form by its accessible name (\"Stop ...\")", fallback: "the stop-button test id" },
+  generating: { anchor: "Stop or Steer control present", fallback: "a reply marked as streaming" },
+  accountId: { anchor: "the profile button's text (hashed, never kept)", fallback: "\"unknown\" (queues are then shared by all profiles of the page, never lost)" },
+  composerAttachments: { anchor: "attachment test ids inside the composer form", fallback: "none: an unseen attachment is only a missed warning" },
+  userTurnCount: { anchor: "the user author role / user bubble marker", fallback: "none needed" },
+  userMessage: { anchor: "the user author role / user bubble marker", fallback: "none needed" },
+  turnId: { anchor: "the turn key attribute", fallback: "the turn test id, then its index" },
+  turnRoot: { anchor: "the conversation find-target marker", fallback: "the first turn's parent" },
+  composer: { anchor: "the composer input's form", fallback: "the input itself" },
+  pageElement: { anchor: "the active-page marker", fallback: "the whole document" },
+  pageConversationId: { anchor: "the composer wrapper's conversation stamp", fallback: "null (the URL alone decides)" },
+  sidebarLinks: { anchor: "links to /c/<id> inside a navigation landmark", fallback: "the link itself hosts the marker when no title element is found" },
+  conversationId: { anchor: "the URL path", fallback: "\"new\"" },
+  scroller: { anchor: "the nearest scrollable, overflowing ancestor of the turns (behaviour)", fallback: "the scroll-root markers, then the document's scrolling element" },
+  column: { anchor: "the smallest ancestor holding the scroller, composer and header (structure by containment)", fallback: "the widest composer ancestor narrower than the window on a new chat, else <body>" },
+  columns: { anchor: "the column, the composer's absolutely positioned ancestor and the header (computed style)", fallback: "the column alone" },
+  nativeSummary: { anchor: "section titles (Outputs / Sources) in a visible right-side region", fallback: "ChatGPT's summary-panel markers; null when neither is there" },
+  headerActions: { anchor: "buttons and links in the page header landmark, the right-most one", fallback: "null (the buttons then float top-right)" },
+  summaryOpen: { anchor: "the summary toggle's pressed state", fallback: "a summary-panel marker with a box" },
+  summaryCard: { anchor: "the summary-panel markers", fallback: "null" },
+  sidePane: { anchor: "what is painted at the right edge (elementFromPoint)", fallback: "null" },
+  thinkingToggles: { anchor: "expandable (aria-expanded) buttons inside a turn titled like a thinking trace", fallback: "none: the trace stays collapsed" },
+  headerBottom: { anchor: "the page header landmark", fallback: "0" },
+  reply: { anchor: "the assistant author / conversation role inside the turn", fallback: "the next message element" },
+  layout: { anchor: "the other hooks", fallback: "the other hooks" },
+  loadError: { anchor: "ChatGPT's fixed load-failure text and a Try again control", fallback: "null" },
+  selfCheck: { anchor: "the composer hook", fallback: "safe mode (the script stands down)" },
+};
+
 export const chatgptAdapter = {
-  turns: (root) => [...scope(root).querySelectorAll(TURN)],
+  turns: (root) => [...turnEls(scope(root))],
   role: (turn) => nonEmptyRole(turn, ROLE, "data-message-author-role") ?? (turn.querySelector("[data-user-message-bubble]") ? "user" : nonEmptyRole(turn, REPLY, "data-conversation-role")),
   blocks: (turnEls) => turnEls.flatMap((el) => [...el.querySelectorAll(BLOCKS)]),
   // Queue transport (live dispatcher): the editable composer input and its Send/Stop buttons.
-  composerInput: (doc) => scope(doc).querySelector(COMPOSER),
-  sendButton: (doc) => scope(doc).querySelector(SEND) ?? scope(doc).querySelector(COMPOSER)?.closest("form")?.querySelector(SEND_FALLBACK) ?? null,
+  composerInput: (doc) => findComposer(scope(doc)),
+  sendButton: (doc) => findComposer(scope(doc))?.closest("form")?.querySelector(SEND_LABEL) ?? scope(doc).querySelector(SEND) ?? null,
   // Inside the composer form only: the queue card has its own Steer button, which must never be mistaken for it.
-  steerButton: (doc) => scope(doc).querySelector(COMPOSER)?.closest("form")?.querySelector(STEER) ?? null,
+  steerButton: (doc) => findComposer(scope(doc))?.closest("form")?.querySelector(STEER) ?? null,
   stopButton(doc) {
     const page = scope(doc);
-    return page.querySelector(STOP) ?? page.querySelector(COMPOSER)?.closest("form")?.querySelector(STOP_FALLBACK) ?? null;
+    return findComposer(page)?.closest("form")?.querySelector(STOP_LABEL) ?? page.querySelector(STOP) ?? null;
   },
   /**
    * A response is being produced: a Stop control is shown, the reply is still streaming, or the composer offers to steer it
@@ -133,7 +194,7 @@ export const chatgptAdapter = {
   },
   /** Files on the message being composed; the queue cannot restore them, so it flags them. */
   composerAttachments(doc) {
-    const form = scope(doc).querySelector(COMPOSER)?.closest("form");
+    const form = findComposer(scope(doc))?.closest("form");
     return [...(form?.querySelectorAll(ATTACHMENT) ?? [])].map((node) => ({
       name: node.getAttribute("aria-label")?.slice(0, 80) || "attachment",
       size: 0,
@@ -145,9 +206,9 @@ export const chatgptAdapter = {
   userMessage: (turn) => turn.querySelector(USER),
   turnId: (turn, index) => turn.getAttribute("data-turn-key") ?? turn.getAttribute("data-testid") ?? `turn-${index}`,
   /** The stable element whose subtree contains every turn; observed for new turns. */
-  turnRoot: (doc) => scope(doc).querySelector(TURN_ROOT) ?? scope(doc).querySelector(TURN)?.parentElement ?? null,
+  turnRoot: (doc) => scope(doc).querySelector(TURN_ROOT) ?? firstTurn(scope(doc))?.parentElement ?? null,
   /** The element the queue panel is inserted directly before: the composer form, else the input itself. */
-  composer: (doc) => scope(doc).querySelector(COMPOSER)?.closest("form") ?? scope(doc).querySelector(COMPOSER),
+  composer: (doc) => findComposer(scope(doc))?.closest("form") ?? findComposer(scope(doc)),
   /** The active page element itself; it changes when ChatGPT switches to another mounted conversation page. */
   pageElement: (doc) => scope(doc),
   /**
@@ -164,7 +225,7 @@ export const chatgptAdapter = {
     const out = [];
     for (const link of doc.querySelectorAll('a[href*="/c/"]')) {
       const id = link.getAttribute("href")?.match(/^(?:\/g\/[^/]+)?\/c\/([\w-]+)/)?.[1];
-      if (!id || link.closest(OWN_UI) || link.closest(TURN) || !link.closest("nav")) continue;
+      if (!id || link.closest(OWN_UI) || link.closest(TURN) || !link.closest("nav, [role='navigation']")) continue;
       const title = link.querySelector("[data-thread-title]");
       out.push({ id, link, host: title?.parentElement ?? link });
     }
@@ -179,7 +240,7 @@ export const chatgptAdapter = {
     const page = scope(doc);
     const known = page.querySelector(SCROLLER);
     const win = doc.defaultView;
-    for (let el = page.querySelector(TURN)?.parentElement; el && el !== doc.body && el !== doc.documentElement; el = el.parentElement) {
+    for (let el = firstTurn(page)?.parentElement; el && el !== doc.body && el !== doc.documentElement; el = el.parentElement) {
       if (el === known) break;
       if (SCROLLABLE.has(win.getComputedStyle(el).overflowY) && el.scrollHeight > el.clientHeight && (!known || known.contains(el))) return el;
     }
@@ -193,7 +254,7 @@ export const chatgptAdapter = {
     const composer = this.composer(doc);
     const scroller = this.scroller(doc);
     if (!composer || !scroller) return null;
-    if (!scope(doc).querySelector(TURN)) {
+    if (!firstTurn(scope(doc))) {
       // A new chat has no scroller: the column is the widest ancestor of the composer that is not the whole window
       // (it holds the composer and the greeting, and leaves the sidebar out).
       const win = doc.defaultView;
@@ -348,9 +409,7 @@ export const chatgptAdapter = {
    */
   thinkingToggles(doc) {
     const out = [];
-    scope(doc)
-      .querySelectorAll(TURN)
-      .forEach((turn, turnIndex) => {
+    turnEls(scope(doc)).forEach((turn, turnIndex) => {
         let nth = 0;
         for (const button of turn.querySelectorAll("button[aria-expanded]")) {
           if (button.closest(OWN_UI) || !THINKING_TITLE.test((button.textContent ?? "").trim())) continue;
@@ -372,10 +431,10 @@ export const chatgptAdapter = {
   },
   /** Identity of the pieces the script attaches to; a change means the page re-rendered or navigated. */
   layout(doc, win) {
-    const first = scope(doc).querySelector(TURN);
+    const first = firstTurn(scope(doc));
     return {
       route: this.conversationId(win),
-      composer: scope(doc).querySelector(COMPOSER),
+      composer: findComposer(scope(doc)),
       container: first ? this.turnRoot(doc) : null,
       scroller: first ? this.scroller(doc) : null,
     };
@@ -387,7 +446,7 @@ export const chatgptAdapter = {
    */
   loadError(doc) {
     const page = scope(doc);
-    if (page.querySelector(TURN)) return null;
+    if (firstTurn(page)) return null;
     for (const control of page.querySelectorAll('button, a, [role="button"]')) {
       if (!RETRY_LABEL.test((control.textContent ?? "").trim())) continue;
       let card = control;
@@ -402,9 +461,9 @@ export const chatgptAdapter = {
   /** `ok` means the composer is there (a new chat has no turns); `hasTurns` selects the full feature set. */
   selfCheck(doc) {
     const page = scope(doc);
-    const hasTurns = !!page.querySelector(TURN);
+    const hasTurns = !!firstTurn(page);
     const missing = [];
-    if (!page.querySelector(COMPOSER)) missing.push("composer");
+    if (!findComposer(page)) missing.push("composer");
     if (!hasTurns) missing.push("turns");
     return { ok: !missing.includes("composer"), hasTurns, missing };
   },
