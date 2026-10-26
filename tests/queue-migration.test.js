@@ -120,3 +120,82 @@ test("a fresh install has nothing to migrate", async () => {
   assert.deepEqual(await store.legacyItems(), []);
   assert.equal((await read(store, "a:b")).pending, undefined);
 });
+
+/** A version 2 database exactly as the previous release left it (the engine then still had a Pause control). */
+async function v2Database(records) {
+  const factory = new IDBFactory();
+  const open = factory.open("ghostship-chatgpt-queue", 2);
+  open.onupgradeneeded = () => {
+    const db = open.result;
+    db.createObjectStore("pending", { keyPath: "key" }).createIndex("conversationId", "conversationId");
+    db.createObjectStore("inflight", { keyPath: "key" }).createIndex("conversationId", "conversationId");
+    db.createObjectStore("state", { keyPath: "key" });
+    db.createObjectStore("locks", { keyPath: "key" });
+  };
+  const db = await new Promise((resolve, reject) => ((open.onsuccess = () => resolve(open.result)), (open.onerror = () => reject(open.error))));
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction(["pending", "state"], "readwrite");
+    for (const { pending, state } of records) {
+      tx.objectStore("pending").put(pending);
+      tx.objectStore("state").put(state);
+    }
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+  db.close();
+  return factory;
+}
+const v2Pending = (conversationId, text = "held text") => ({
+  key: `acct:${conversationId}`, id: `id-${conversationId}`, accountId: "acct", conversationId, text, attachments: [], status: "pending",
+  version: 3, createdAt: 1, updatedAt: 1, lastError: null, ops: [],
+});
+const v2State = (conversationId, paused) => ({ key: `acct:${conversationId}`, paused, editBy: null, editUntil: 0 });
+
+test("upgrade 2 -> 3: a prompt whose queue was paused is blocked until Retry, and nothing sends without it", async () => {
+  // Defect: the engine no longer reads `state.paused`, so a version 2 paused queue sent on its own once its conversation was idle.
+  const factory = await v2Database([
+    { pending: v2Pending("paused"), state: v2State("paused", true) },
+    { pending: v2Pending("running"), state: v2State("running", false) },
+  ]);
+  const store = await QueueStore.open(factory);
+  const held = await read(store, "acct:paused");
+  assert.equal(held.pending.status, "blocked");
+  assert.equal(held.pending.lastError.code, "legacy-paused");
+  assert.equal(held.pending.text, "held text", "the text is kept");
+  assert.equal(held.pending.version, 4);
+  assert.equal(held.state.paused, false, "the stale flag is cleared");
+  assert.equal((await read(store, "acct:running")).pending.status, "pending", "an unpaused queue is untouched");
+
+  const clock = new ManualClock();
+  const sent = [];
+  const dispatcher = new DryRunDispatcher();
+  const send = dispatcher.send?.bind(dispatcher);
+  dispatcher.send = async (...args) => (sent.push(args), send ? send(...args) : { kind: "sent" });
+  const engine = new QueueEngine({ store, dispatch: new DispatchBoundary(dispatcher), clock, tabId: "tab" });
+  const A = { accountId: "acct", conversationId: "paused" };
+  for (let i = 0; i < 3; i++) {
+    clock.advance(10_000);
+    const outcome = await engine.step(A);
+    assert.notEqual(outcome.kind, "sent", "an idle conversation does not send a held prompt");
+  }
+  assert.equal(sent.length, 0, "nothing reached the dispatcher");
+  assert.equal((await engine.view(A)).pending.status, "blocked");
+
+  // Retry lifts the hold; only then can the prompt go.
+  assert.equal((await engine.unblock(A)).kind, "unblocked");
+  assert.equal((await engine.view(A)).pending.status, "pending");
+  store.close();
+  const again = await QueueStore.open(factory);
+  assert.equal((await read(again, "acct:paused")).pending.status, "pending", "opening again does not re-hold a retried prompt");
+});
+
+test("upgrade 2 -> 3: a paused flag with no prompt, or a prompt already waiting on a decision, changes nothing else", async () => {
+  const blocked = { ...v2Pending("b"), status: "blocked", lastError: { code: "attachments-not-restorable" } };
+  const factory = await v2Database([
+    { pending: v2Pending("empty-state"), state: v2State("other", true) },
+    { pending: blocked, state: v2State("b", true) },
+  ]);
+  const store = await QueueStore.open(factory);
+  assert.equal((await read(store, "acct:empty-state")).pending.status, "pending");
+  assert.equal((await read(store, "acct:b")).pending.lastError.code, "attachments-not-restorable", "its own reason is kept");
+});

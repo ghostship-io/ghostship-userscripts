@@ -12,6 +12,7 @@ Agents add entries under Unreleased and never touch version fields. After a merg
 - ChatGPT's collapsed thinking traces open by themselves when they scroll into view, once each (one you close stays closed); turn off with `{"expandThinking":false}`.
 - Anything running now sends your message to the queue, not only a running response: once the response has ended but the queued prompt has not gone out yet, a message you type still joins it (one queue item per conversation) instead of being sent ahead of it.
 - The page hooks survive routine site changes: the composer, Send, Stop and the turns are found by role, accessible name and semantic structure first (an editable textbox, a "Send"/"Stop" button in the composer form, an `<article>` holding a message), with test ids and data attributes as fallbacks, and none of them depends on class names, ids, wrapper divs, extra buttons or sibling order.
+- A queue that was paused in an earlier release stays held after this upgrade: its prompt is blocked until you press Retry (the stored queue database moves to version 3 and converts every paused queue), instead of sending on its own once its conversation is idle.
 
 ## [0.7.6] - 2026-10-26
 
