@@ -4,6 +4,8 @@ Agents add entries under Unreleased and never touch version fields. After a merg
 
 ## Unreleased
 
+- The conversation view (minimap) always shows the whole current turn: the frame is one fixed sheet, a short turn sits on it between grayed bezels and a long one is squashed to the sheet (denser, still the full width) instead of sliding under the frame as you scroll; the box marks how much of the turn is on screen and where. Click or drag anywhere to jump there.
+
 ## [0.7.7] - 2026-10-26
 
 - Fix queued prompts never being sent on ChatGPT's current composer: its Send button has no test id any more (a submit button labelled "Send"), so the queue held every prompt as "Send button did not become available". The Send control is now also found by that label, it must have stayed enabled for 0.45 s before it is clicked (ChatGPT ignores a click that comes the instant its button appears), and the queue's own Send click is no longer swallowed by the queue's own form-submit interception, which had left every queued prompt unsent on the live page. (#23)

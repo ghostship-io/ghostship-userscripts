@@ -3685,9 +3685,9 @@ onmessage = (e) => {
 .gs-chevron{flex:0 0 auto;transition:transform .15s}
 [data-gs-outputs][data-gs-collapsed="true"] .gs-chevron{transform:rotate(-90deg)}
 .gs-minimap{position:relative;display:flex;justify-content:center;align-items:flex-start;flex:0 0 auto;min-height:56px;padding:8px;border:1px solid ${LINE};border-radius:12px;background:${PAGE};cursor:pointer;touch-action:none;overflow:hidden}
-.gs-frame{position:relative;flex:0 0 auto;width:72%;height:120px;overflow:hidden;border:1px solid ${INK};border-radius:4px;background:${PAGE}}
+.gs-frame{position:relative;flex:0 0 auto;width:72%;height:120px;overflow:hidden;border:1px solid ${INK};border-radius:4px;background:${SELECTED}}
 .gs-minimap:focus-visible,.gs-search input:focus-visible,.gs-prompt:focus-visible,.gs-hbtn:focus-visible,.gs-outputs-toggle:focus-visible{${FOCUS}}
-.gs-scene{position:absolute;top:0;left:0;right:0;height:100%}
+.gs-scene{position:absolute;top:0;left:0;right:0;height:100%;background:${PAGE}}
 .gs-bars{position:absolute;inset:0;--gs-lh:4px}
 .gs-bar{position:absolute;min-height:2px;border-radius:2px;pointer-events:none}
 .gs-bar[data-kind="text"]{background-image:linear-gradient(${INK_FAINT} 0 50%,transparent 50%);background-size:100% var(--gs-lh)}
@@ -3696,7 +3696,7 @@ onmessage = (e) => {
 .gs-bar[data-kind="table"]{border:1px solid ${INK};background-image:linear-gradient(${INK_FAINT} 0 1px,transparent 1px);background-size:100% calc(var(--gs-lh) * 2)}
 .gs-bar[data-kind="image"]{border:1px solid ${INK};background-color:${INK_FAINT}}
 .gs-bar[data-kind="prompt"]{border-radius:6px;background-color:${BUBBLE}}
-.gs-view{position:absolute;left:0;right:0;border:1px solid ${ACCENT};border-radius:4px;background:color-mix(in srgb,${ACCENT} 16%,transparent);pointer-events:none}
+.gs-view{position:absolute;left:0;right:0;min-height:3px;border:1px solid ${ACCENT};border-radius:4px;background:color-mix(in srgb,${ACCENT} 16%,transparent);pointer-events:none}
 .gs-caption{margin-top:8px;font-size:12px;line-height:16px;color:${MUTED}}
 .gs-search{display:flex;flex:0 0 auto;gap:6px;align-items:center;margin-bottom:8px}
 .gs-search-field{position:relative;flex:1 1 auto;min-width:0}
@@ -3769,8 +3769,6 @@ ${LAYOUT_CSS}`;
     let restore = store.get(convId);
     let didRestore = false;
     let viewBox = "";
-    let geom = { sceneH: 1, frameH: 1 };
-    let mapOffset = 0;
     let bookmarkToRestore = null;
     let listTopToRestore = null;
     let outputsCollapsed = false;
@@ -4193,7 +4191,7 @@ ${LAYOUT_CSS}`;
       if (!a || !z) return null;
       return { i, a, z };
     }
-    function silhouetteItems(ext, slice, top, height) {
+    function silhouetteItems(ext, slice, top, height, maxItems) {
       if (slice.every((e) => runtime.isTurnActive(e))) {
         const users = slice.map((t) => adapter.userMessage(t)).filter(Boolean);
         const boxes = [];
@@ -4206,10 +4204,10 @@ ${LAYOUT_CSS}`;
           const kind = !users.some((u) => u.contains(el2)) && blockKind(el2);
           if (kind) add(kind, el2);
         }
-        const items = silhouette(boxes, { top, bottom: top + height });
+        const items = silhouette(boxes, { top, bottom: top + height }, maxItems);
         if (items.length) return items;
       }
-      return layoutBars(buildTurnModel(adapter.blocks(slice)));
+      return layoutBars(buildTurnModel(adapter.blocks(slice)), maxItems);
     }
     function renderMinimap(m) {
       const ext = turnExtent();
@@ -4233,17 +4231,18 @@ ${LAYOUT_CSS}`;
         modelKey = key;
         modelBuiltAt = now;
         bars.textContent = "";
-        const items = silhouetteItems(ext, slice, turnBox.top, turnPx);
         const box = minimap.getBoundingClientRect();
         const room = (column.getBoundingClientRect().height || win.innerHeight - 76) * 0.55 - MAP_CHROME;
         const maxH = clamp2(Math.min(win.innerHeight * 0.45, room), 48, 360);
         const frameW = Math.round((box.width ? box.width - MAP_PAD : MAP_W) * FRAME_SHARE);
-        const scale = frameW / contentWidth;
-        geom = { sceneH: Math.max(8, Math.round(turnPx * scale)), frameH: 0 };
-        geom.frameH = Math.min(geom.sceneH, Math.round(frameW * PAPER), Math.round(maxH));
-        if (frame.style.height !== `${geom.frameH}px`) frame.style.height = `${geom.frameH}px`;
-        scene.style.height = `${geom.sceneH}px`;
-        bars.style.setProperty("--gs-lh", `${Math.max(3, Math.min(8, 24 * scale)).toFixed(1)}px`);
+        const natural = Math.max(8, Math.round(turnPx * (frameW / contentWidth)));
+        const frameH = Math.min(Math.round(frameW * PAPER), Math.round(maxH));
+        const sceneH = Math.min(natural, frameH);
+        if (frame.style.height !== `${frameH}px`) frame.style.height = `${frameH}px`;
+        scene.style.height = `${sceneH}px`;
+        scene.style.top = `${Math.round((frameH - sceneH) / 2)}px`;
+        bars.style.setProperty("--gs-lh", `${clamp2(24 * sceneH / Math.max(1, turnPx), 2, 8).toFixed(1)}px`);
+        const items = silhouetteItems(ext, slice, turnBox.top, turnPx, clamp2(Math.round(sceneH / 2), 24, 120));
         for (const b of items) {
           const d = doc.createElement("div");
           d.className = "gs-bar";
@@ -4259,14 +4258,6 @@ ${LAYOUT_CSS}`;
         viewBottom: m.viewBottom
       });
       if (view.hidden !== !ind) view.hidden = !ind;
-      if (ind) {
-        const center = (ind.top + ind.height / 2) * geom.sceneH;
-        const next = Math.round(clamp2(center - geom.frameH / 2, 0, Math.max(0, geom.sceneH - geom.frameH)));
-        if (next !== mapOffset) {
-          mapOffset = next;
-          scene.style.transform = `translateY(${-next}px)`;
-        }
-      }
       const text = `Drag to navigate \u2022 ${ind ? Math.round(ind.visible * 100) : 0}% visible`;
       if (caption.textContent !== text) caption.textContent = text;
       if (ind) {

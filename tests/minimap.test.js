@@ -123,7 +123,8 @@ test("minimap styling: no category colors, native tokens only, viewport box in t
   rail.dispose();
 });
 
-test("the minimap frame is always as wide as its track: the turn is drawn at one fixed scale and slides under the frame", async () => {
+test("the minimap frame is one sheet of paper whatever the turn: a short turn sits on it between grayed bezels, a tall one fills it", async () => {
+  const heights = [];
   for (const [turn, label, tall] of [[3, "a tall turn", true], [1, "a short turn", false]]) {
     const fx = createFixture({ turns: 20, width: 1600, markup: "real" });
     const { rail } = mount(fx);
@@ -135,36 +136,38 @@ test("the minimap frame is always as wide as its track: the turn is drawn at one
     const frame = fx.doc.querySelector(".gs-frame");
     const scene = fx.doc.querySelector(".gs-scene");
     assert.ok(scene.contains(fx.doc.querySelector(".gs-bars")) && scene.contains(fx.doc.querySelector(".gs-view")), "bars and the viewport box are in the scene");
-    assert.ok(frame.contains(scene), "the scene slides inside the frame");
+    assert.ok(frame.contains(scene));
     assert.equal(frame.style.width, "", `${label}: the frame is not sized to the turn; it fills the track`);
     const el = chatgptAdapter.turns(fx.doc)[turn].getBoundingClientRect();
     const sceneH = parseFloat(scene.style.height);
     const frameH = parseFloat(frame.style.height);
+    const sceneTop = parseFloat(scene.style.top);
     const frameW = Math.round((288 - 18) * 0.72);
-    const scale = frameW / Math.min(el.width, 768);
-    assert.ok(Math.abs(sceneH - el.height * scale) <= 2, `${label}: scene ${sceneH}px is the turn's ${el.height}px at one scale (${scale.toFixed(3)})`);
-    assert.ok(frameH <= 360 && frameH <= sceneH, `${label}: the panel grows with the turn up to its cap`);
-    // A tall turn is drawn on a sheet of paper: US Letter, portrait, with a bezel at its sides.
-    if (tall) assert.ok(Math.abs(frameH - Math.min(sceneH, frameW * (11 / 8.5))) <= 2 || frameH === 360, `${label}: frame ${frameH}px high on a ${frameW}px wide sheet`);
-    if (!tall) assert.equal(frameH, sceneH, "a short turn shows whole");
-    if (tall) assert.ok(sceneH >= frameH, "a long turn is taller than the frame");
-    // The viewport box stays inside the frame as the conversation scrolls: the scene slides, the box does not leave.
-    const inside = () => {
-      const off = -parseFloat((scene.style.transform.match(/translateY\((-?[\d.]+)px\)/) ?? [0, 0])[1]);
-      const top = (parseFloat(fx.doc.querySelector(".gs-view").style.top) / 100) * sceneH - off;
-      const height = (parseFloat(fx.doc.querySelector(".gs-view").style.height) / 100) * sceneH;
-      return { off, top, bottom: top + height };
-    };
-    const a = inside();
-    assert.ok(a.off >= 0 && a.off <= Math.max(0, sceneH - frameH) + 1, `${label}: offset ${a.off} within the scene`);
-    assert.ok(a.bottom > 0 && a.top < frameH, `${label}: the viewport box is in the frame (${a.top}..${a.bottom} of ${frameH})`);
+    const natural = el.height * (frameW / Math.min(el.width, 768));
+    heights.push(frameH);
+    // The frame is a US Letter sheet (portrait) however long the turn is, capped by the panel's room.
+    assert.ok(Math.abs(frameH - Math.min(frameW * (11 / 8.5), 360)) <= 2 || frameH <= 360, `${label}: frame ${frameH}px high on a ${frameW}px wide sheet`);
+    assert.ok(!scene.style.transform, `${label}: nothing slides`);
+    if (tall) {
+      assert.ok(natural > frameH, "the turn is taller than the sheet at the full-width scale");
+      assert.ok(Math.abs(sceneH - frameH) <= 1 && sceneTop === 0, `${label}: the whole turn is squashed onto the sheet (scene ${sceneH}px of ${frameH}px)`);
+    } else {
+      assert.ok(natural < frameH, "the turn is shorter than the sheet");
+      assert.ok(Math.abs(sceneH - natural) <= 2, `${label}: drawn at the full-width scale (${sceneH}px vs ${natural.toFixed(1)}px)`);
+      assert.ok(sceneTop > 0 && Math.abs(sceneTop - (frameH - sceneH - sceneTop)) <= 1, `${label}: centered with equal bezels above and below (${sceneTop}px)`);
+    }
+    // The viewport box is inside the scene, as fractions of the whole turn.
+    const view = fx.doc.querySelector(".gs-view");
+    assert.ok(parseFloat(view.style.top) >= 0 && parseFloat(view.style.top) + parseFloat(view.style.height) <= 100.5, `${label}: the viewport box is within the turn`);
     rail.dispose();
   }
+  assert.equal(heights[0], heights[1], "a short and a tall turn have the same frame height");
   // Styling: the frame is bordered and sits on a recessed track, so it reads as a page in a view.
   const fx = createFixture({ turns: 3, width: 1600, markup: "real" });
   const { rail } = mount(fx);
   const css = fx.doc.getElementById("gs-pane-style").textContent;
-  assert.match(css, /\.gs-frame\{[^}]*width:72%[^}]*overflow:hidden[^}]*border:1px solid[^}]*background:var\(--color-surface/);
+  assert.match(css, /\.gs-frame\{[^}]*width:72%[^}]*overflow:hidden[^}]*border:1px solid[^}]*background:var\(--color-token-interactive-bg-secondary-selected/, "the bezels are grayed");
+  assert.match(css, /\.gs-scene\{[^}]*background:var\(--color-surface/, "the turn's page is lighter than the bezels");
   assert.match(css, /\.gs-minimap\{[^}]*padding:8px[^}]*background:var\(--color-surface/);
   assert.doesNotMatch(css, /\.gs-minimap\{(?:[^}]*;)?height:/, "the track grows with the conversation view instead of a fixed height");
   assert.equal(fx.doc.querySelector('[data-gs-panel="minimap"] .gs-panel-title').textContent, "Conversation view");
@@ -200,35 +203,49 @@ test("a window resize that only changes the height refits the frame, and a drawe
   m.rail.dispose();
 });
 
-test("a very long turn: the frame keeps its width and height, the scene slides with the viewport and a click maps through the slide", async () => {
+const scrollerH = (fx) => fx.scroller.clientHeight;
+
+test("a very long turn is squashed onto the same sheet at the full width, denser than a short one; the viewport box moves in it and a click maps to the turn", async () => {
   const fx = createFixture({ turns: 40, width: 1600, markup: "real" });
   const { runtime, rail } = mount(fx);
   await fx.settle();
   const minimap = fx.doc.querySelector(".gs-minimap");
   minimap.getBoundingClientRect = () => ({ top: 0, bottom: 240, height: 240, left: 0, right: 288, width: 288, x: 0, y: 0 });
-  chatgptAdapter.turns(fx.doc)[3].__h = 6000;
-  fx.doc.querySelectorAll(".gs-prompt")[3].click();
+  const shortTurn = fx.doc.querySelectorAll(".gs-prompt")[1];
+  shortTurn.click();
   await fx.settle();
   const frame = fx.doc.querySelector(".gs-frame");
   const scene = fx.doc.querySelector(".gs-scene");
-  const offset = () => -parseFloat((scene.style.transform.match(/translateY\((-?[\d.]+)px\)/) ?? [0, 0])[1]);
+  const bars = fx.doc.querySelector(".gs-bars");
+  const view = fx.doc.querySelector(".gs-view");
+  const shortLh = parseFloat(bars.style.getPropertyValue("--gs-lh"));
   const frameH = parseFloat(frame.style.height);
+  chatgptAdapter.turns(fx.doc)[3].__h = 6000;
+  fx.doc.querySelectorAll(".gs-prompt")[3].click();
+  await fx.settle();
+  assert.equal(parseFloat(frame.style.height), frameH, "the same sheet");
   const sceneH = parseFloat(scene.style.height);
-  assert.ok(sceneH > 2 * frameH, `the turn is far taller than the frame (${sceneH} vs ${frameH})`);
+  assert.ok(Math.abs(sceneH - frameH) <= 1 && parseFloat(scene.style.top) === 0, `the whole 6000px turn fits the sheet (${sceneH} of ${frameH})`);
   assert.equal(frame.style.width, "", "same fixed width as any other turn");
-  const first = offset();
+  assert.ok(parseFloat(bars.style.getPropertyValue("--gs-lh")) < shortLh, "text lines are finer than on a short turn: the long turn is denser");
+  assert.ok(!scene.style.transform, "the scene never slides");
+  // The viewport box is the share of the turn on screen, at the share of the way through it.
+  const share = (v) => ({ top: parseFloat(v.style.top), height: parseFloat(v.style.height) });
+  const first = share(view);
+  assert.ok(first.height > 0 && first.height < 100 * (scrollerH(fx) / 6000) * 2, `the box is the visible share (${first.height}%)`);
   fx.wheel(3000);
   await fx.settle();
-  assert.ok(offset() > first, `the scene slid up as the conversation scrolled (${first} -> ${offset()})`);
-  assert.ok(offset() <= sceneH - frameH + 1, "never past the end of the turn");
-  // A click at a point of the scene scrolls to that point of the turn, wherever the scene has slid to.
-  const sc = scene.getBoundingClientRect;
-  scene.getBoundingClientRect = () => ({ top: -offset(), bottom: sceneH - offset(), height: sceneH, left: 0, right: 270, width: 270 });
+  const later = share(view);
+  assert.ok(later.top > first.top, `the box moved down the turn as the conversation scrolled (${first.top}% -> ${later.top}%)`);
+  assert.ok(Math.abs(later.height - first.height) < 1, "its size stays the visible share");
+  assert.ok(!scene.style.transform);
+  // A click at a point of the scene scrolls to that point of the turn.
+  scene.getBoundingClientRect = () => ({ top: 10, bottom: 10 + sceneH, height: sceneH, left: 0, right: 270, width: 270 });
   const before = fx.rawTop();
-  fx.doc.querySelector(".gs-minimap").dispatchEvent(Object.assign(new fx.win.Event("pointerdown", { bubbles: true }), { clientY: -offset() + sceneH * 0.9, pointerId: 1 }));
+  fx.doc.querySelector(".gs-minimap").dispatchEvent(Object.assign(new fx.win.Event("pointerdown", { bubbles: true }), { clientY: 10 + sceneH * 0.9, pointerId: 1 }));
   await fx.settle();
   assert.ok(fx.rawTop() > before, "a click near the end of the turn scrolls toward the end");
-  scene.getBoundingClientRect = sc;
   assert.equal(runtime.scroll.stats.unexpected, 0);
   rail.dispose();
 });
+
