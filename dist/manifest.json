@@ -3,9 +3,9 @@
   "scripts": [
     {
       "id": "ghostship-chatgpt",
-      "version": "0.7.6",
+      "version": "0.7.7",
       "file": "ghostship-chatgpt.user.js",
-      "sha256": "3f8bca6e014e5a0ee5a6d57f059ceefadf21a726355b1ef92d348c87936c0df9"
+      "sha256": "963daa0eca9cc97666a8f6e577808f551f3e192acf46732a6cd679359a85c6a0"
     }
   ]
 }
