@@ -1,0 +1,1 @@
+Validation screenshots for ghostship-io/ghostship-agent#969. Evidence only; not part of any release. Evidence images re-sanitized: solid-fill redactions, verified against `manifest.json` by `scripts/check-evidence.mjs`.

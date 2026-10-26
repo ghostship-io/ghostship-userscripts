@@ -1,0 +1,257 @@
+{
+  "version": 1,
+  "images": {
+    "969/s2/final/v2-native-pane-open.png": {
+      "sha256": "09a0c7962a038664c3bb2c920ad61279ab251352f1b2c7dc8fa8ad7b8b744e4a",
+      "avatar": {
+        "x": 8,
+        "y": 764,
+        "w": 40,
+        "h": 36,
+        "why": "account avatar"
+      },
+      "labels": [
+        {
+          "x": 980,
+          "y": 98,
+          "w": 282,
+          "h": 32,
+          "why": "scheduled task title and time"
+        },
+        {
+          "x": 100,
+          "y": 0,
+          "w": 820,
+          "h": 732,
+          "why": "conversation text"
+        },
+        {
+          "x": 1298,
+          "y": 634,
+          "w": 284,
+          "h": 140,
+          "why": "prompt list rows"
+        }
+      ],
+      "fill": "5a5a5a"
+    },
+    "969/s2/final/v2-sidebar-toggled.png": {
+      "sha256": "d84c5d686fab0bc3341798b9fb616116f483e2258eda3000a3f95dcda812bf81",
+      "avatar": {
+        "x": 8,
+        "y": 764,
+        "w": 40,
+        "h": 36,
+        "why": "account avatar"
+      },
+      "labels": [
+        {
+          "x": 56,
+          "y": 52,
+          "w": 284,
+          "h": 728,
+          "why": "sidebar conversation titles"
+        },
+        {
+          "x": 345,
+          "y": 0,
+          "w": 930,
+          "h": 732,
+          "why": "conversation text"
+        },
+        {
+          "x": 1298,
+          "y": 634,
+          "w": 284,
+          "h": 140,
+          "why": "prompt list rows"
+        }
+      ],
+      "fill": "5a5a5a"
+    },
+    "969/s2/final/v2-switch-1-open.png": {
+      "sha256": "4ec14940a2217d1ca4ca9f40dc2f550b4329a5ec9f35716f04fdd35c7ee7d408",
+      "avatar": {
+        "x": 8,
+        "y": 764,
+        "w": 40,
+        "h": 36,
+        "why": "account avatar"
+      },
+      "labels": [
+        {
+          "x": 56,
+          "y": 52,
+          "w": 284,
+          "h": 728,
+          "why": "sidebar conversation titles"
+        },
+        {
+          "x": 345,
+          "y": 0,
+          "w": 930,
+          "h": 732,
+          "why": "conversation text"
+        },
+        {
+          "x": 1298,
+          "y": 538,
+          "w": 284,
+          "h": 234,
+          "why": "prompt list rows"
+        }
+      ],
+      "fill": "5a5a5a"
+    },
+    "969/s2/final/v2-switch-2-after-switch.png": {
+      "sha256": "f13f769dd2a27550cb925e5c77e103024708f8939c32ffc926915a9ea12f51f3",
+      "avatar": {
+        "x": 8,
+        "y": 764,
+        "w": 40,
+        "h": 36,
+        "why": "account avatar"
+      },
+      "labels": [
+        {
+          "x": 56,
+          "y": 52,
+          "w": 284,
+          "h": 728,
+          "why": "sidebar conversation titles"
+        },
+        {
+          "x": 345,
+          "y": 0,
+          "w": 930,
+          "h": 732,
+          "why": "conversation text"
+        },
+        {
+          "x": 1296,
+          "y": 640,
+          "w": 284,
+          "h": 144,
+          "why": "prompt list rows"
+        }
+      ],
+      "fill": "5a5a5a"
+    },
+    "969/s2/final/q1-card-one-bubble.png": {
+      "sha256": "00605d7dae5784dcb5a6670d84a06be0c3b53d95f42cc77c804f0d847017b430",
+      "avatar": "absent",
+      "labels": [],
+      "fill": "5a5a5a"
+    },
+    "969/s2/final/q2-resume-sent-after-returning.png": {
+      "sha256": "82cc269c7fc539e3993dd2d6994f0a3a758bac7043d34b03bda08d4571cb1831",
+      "avatar": "absent",
+      "labels": [],
+      "fill": "5a5a5a"
+    },
+    "969/s2/final/q4-tab-hidden-strip.png": {
+      "sha256": "6cdcbb8ec8b4c68222d3b651cdc160bbd767398597f13d7409cf2f173adab02b",
+      "avatar": "absent",
+      "labels": [
+        {
+          "x": 70,
+          "y": 9,
+          "w": 168,
+          "h": 24,
+          "why": "browser tab title"
+        }
+      ],
+      "fill": "5a5a5a"
+    },
+    "969/s2/final/q5-sidebar-pencil.png": {
+      "sha256": "b8990c5b3f35b6d4b0a520816955181a546ddba3665cefd66ca78ac154784853",
+      "avatar": "absent",
+      "labels": [
+        {
+          "x": 14,
+          "y": 40,
+          "w": 170,
+          "h": 22,
+          "why": "sidebar conversation title"
+        }
+      ],
+      "fill": "5a5a5a"
+    },
+    "969/s2/v1-right-column-long-turn.png": {
+      "sha256": "97ce84eaa47178a4005c117db03cff4d7beedc1c49dd6912ff9afd94de58485d",
+      "avatar": "absent",
+      "labels": [
+        {
+          "x": 44,
+          "y": 494,
+          "w": 268,
+          "h": 290,
+          "why": "prompt list rows"
+        }
+      ],
+      "fill": "5a5a5a"
+    },
+    "969/s2/v1-right-column-short-turn.png": {
+      "sha256": "d9d08474905ac651c28f085509b55812f2327e9d03ba67a76341a814d2d43694",
+      "avatar": "absent",
+      "labels": [],
+      "fill": "5a5a5a"
+    },
+    "969/s2/v2-native-pane-closed-ours-back.png": {
+      "sha256": "f959848afde11a507e2454962c0f62740b08178ef8a2f16c61b67d041ffed1ad",
+      "avatar": "absent",
+      "labels": [],
+      "fill": "5a5a5a"
+    },
+    "969/s2/v2-native-pane-open-ours-steps-aside.png": {
+      "sha256": "b7c2f6375c22ae27002bb565f0550ffe1fb10b25865e253650b2d94ecc4ce9b7",
+      "avatar": "absent",
+      "labels": [],
+      "fill": "5a5a5a"
+    },
+    "969/s2/v2-new-chat-no-panels.png": {
+      "sha256": "051dfb07dcd0c74cde85ffdd7423d5118d60e552466f1ec84dd058c061bcd1b3",
+      "avatar": "absent",
+      "labels": [],
+      "fill": "5a5a5a"
+    },
+    "969/s2/v2-self-healed.png": {
+      "sha256": "71fb4a7885c6f32be8c3b61ad1c5a545a85776582ea694e28a33d778cf6c28b5",
+      "avatar": "absent",
+      "labels": [],
+      "fill": "5a5a5a"
+    },
+    "969/s2/v4-button-closed.png": {
+      "sha256": "9efdaaf265cbd7da2a9c1ce6fb4bc19a9f7e7a7da0cd7ae5cf5e19c12fd86b3d",
+      "avatar": "absent",
+      "labels": [
+        {
+          "x": 34,
+          "y": 0,
+          "w": 64,
+          "h": 50,
+          "why": "message bubble"
+        }
+      ],
+      "fill": "5a5a5a"
+    },
+    "969/s2/v4-button-open.png": {
+      "sha256": "062f8b46b0a757c56581297fbdddc1e9e3a6be82250c56bcaca99801a9465b69",
+      "avatar": "absent",
+      "labels": [],
+      "fill": "5a5a5a"
+    },
+    "969/s2/v6-thinking-18s-expanded.png": {
+      "sha256": "3cafa045622c532801061c2fc17d9031b0456ecca70967ca762b40e654e9a7f2",
+      "avatar": "absent",
+      "labels": [],
+      "fill": "5a5a5a"
+    },
+    "969/s2/v6-thinking-1m5s-expanded.png": {
+      "sha256": "dd56e89a04a0f583ca5972b1bf8490a5e8578bc3999c00f271aceb97f8b6ff3d",
+      "avatar": "absent",
+      "labels": [],
+      "fill": "5a5a5a"
+    }
+  }
+}
