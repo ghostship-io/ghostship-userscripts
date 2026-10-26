@@ -1,22 +1,19 @@
-// The one owner of the pinned panels' room in the page layout. The page column (conversation, header,
-// composer and queue panel together) gets left and right padding, so the centered conversation and the
-// composer shift to the middle of the space the panels leave: the prompts panel is pinned bottom-left and
-// needs `left` px beside the column's left edge, the minimap panel is pinned top-right and needs `right`
-// px beside its right edge. Nothing is written when the natural side gutters already fit them, or when a
-// panel is hidden. The column's edges already exclude ChatGPT's own side panes and sidebar when they take
-// their width out of the page; a pane that floats over the right edge is passed as `paneLeft`, its
-// measured left edge, and only the overlap is cleared. When the shifted conversation would become too
-// narrow (or the window is below the dock threshold) nothing is reserved and the panels become drawers
-// opened on request, so they never cover native UI on their own.
-export const PANEL_WIDTH = 280;
+// The one owner of the pinned panels' room in the page layout. The panels sit together in a right-hand column
+// (the conversation view on top, the prompt list below it) and need `right` px beside the page column's right
+// edge. The page column (conversation, header, composer and queue panel together) gets right padding, so the
+// centered conversation and the composer shift to the middle of the space the panels leave, at their own width.
+// Nothing is written when the natural right gutter already fits them, or when the panels are hidden. When the
+// shifted conversation would become too narrow (or the window is below the dock threshold) nothing is reserved
+// and the panels become a drawer opened on request, so they never cover native UI on their own. A native pane
+// that is open takes the room instead: the caller asks for no room at all and ChatGPT lays itself out.
+export const PANEL_WIDTH = 300; // the width of ChatGPT's own summary card
 export const PANEL_GAP = 12; // between a panel and the column edge, and between a panel and the conversation
 export const DOCK_MIN_VIEWPORT = 1024;
 export const MIN_CONTENT = 560;
 
 export const LAYOUT_CSS = `
-[data-gs-column][data-gs-left]{box-sizing:border-box;padding-left:var(--gs-reserve-left,0px)}
 [data-gs-column][data-gs-right]{box-sizing:border-box;padding-right:var(--gs-reserve,0px)}
-[data-gs-header]{margin-left:calc(-1 * var(--gs-reserve-left,0px));margin-right:calc(-1 * var(--gs-reserve,0px))}
+[data-gs-header]{margin-right:calc(-1 * var(--gs-reserve,0px))}
 `;
 
 /**
@@ -25,14 +22,15 @@ export const LAYOUT_CSS = `
  * @param {object} o.adapter columns(doc), composer(doc)
  * @param {() => Element|undefined} o.target the conversation element (a turn); the composer when absent
  *
- * `evaluate({ left, right, paneLeft })` / `signature(paneLeft)`: `left` and `right` are the widths of the
- * panels to dock (0 when hidden); `paneLeft` is the left edge of a native pane floating over the right edge.
+ * `evaluate({ right, force })`: `right` is the width of the panel column to dock (0 when hidden); `force` pads that width even when the
+ * natural gutter would fit it, which an inline native pane needs to end up beside the column rather than under it.
  */
 export function createRailLayout({ win, adapter, target }) {
   const doc = win.document;
   let written = []; // the elements we have written to
   let known = null; // { frame, pads } once found: the panels are rebuilt whenever the page layout is
-  let applied = { left: 0, right: 0 };
+  let applied = 0;
+  let anchor = win.innerWidth; // the right edge the panels sit against, from the last evaluation
   let epoch = 0; // counts how often the page's elements were looked up again
 
   /** `{ frame, pads }`: the page column that is measured, and the elements that get the padding; null when not found. */
@@ -45,42 +43,30 @@ export function createRailLayout({ win, adapter, target }) {
   };
 
   function release(el) {
-    for (const a of ["data-gs-column", "data-gs-left", "data-gs-right"]) el.removeAttribute(a);
+    for (const a of ["data-gs-column", "data-gs-right"]) el.removeAttribute(a);
     el.style.removeProperty("--gs-reserve");
-    el.style.removeProperty("--gs-reserve-left");
     if (!el.getAttribute("style")) el.removeAttribute("style");
   }
 
-  function setReserve(cols, left, right) {
+  function setReserve(cols, right) {
     if (written.some((el) => !cols.includes(el))) clear();
     written = cols;
     const header = findColumns()?.header;
     if (header) {
       // The header sits inside the padded column but spans the window: it cancels the padding.
-      if (left > 0 || right > 0) {
+      if (right > 0) {
         if (header.getAttribute("data-gs-header") === null) header.setAttribute("data-gs-header", "");
       } else if (header.hasAttribute("data-gs-header")) header.removeAttribute("data-gs-header");
     }
-    const l = Math.max(0, Math.round(left));
     const r = Math.max(0, Math.round(right));
     for (const col of cols) {
-      if (l > 0 || r > 0) {
+      if (r > 0) {
         if (col.getAttribute("data-gs-column") === null) col.setAttribute("data-gs-column", "");
-      } else if (col.hasAttribute("data-gs-column") || col.hasAttribute("data-gs-left") || col.hasAttribute("data-gs-right")) {
-        release(col);
-        continue;
-      }
-      for (const [attr, prop, v] of [["data-gs-left", "--gs-reserve-left", l], ["data-gs-right", "--gs-reserve", r]]) {
-        if (v > 0) {
-          if (col.getAttribute(attr) === null) col.setAttribute(attr, "");
-          if (col.style.getPropertyValue(prop) !== `${v}px`) col.style.setProperty(prop, `${v}px`);
-        } else if (col.hasAttribute(attr)) {
-          col.removeAttribute(attr);
-          col.style.removeProperty(prop);
-        }
-      }
+        if (col.getAttribute("data-gs-right") === null) col.setAttribute("data-gs-right", "");
+        if (col.style.getPropertyValue("--gs-reserve") !== `${r}px`) col.style.setProperty("--gs-reserve", `${r}px`);
+      } else if (col.hasAttribute("data-gs-column") || col.hasAttribute("data-gs-right")) release(col);
     }
-    applied = { left: l, right: r };
+    applied = r;
   }
 
   function clear() {
@@ -88,15 +74,15 @@ export function createRailLayout({ win, adapter, target }) {
     if (header?.hasAttribute("data-gs-header")) header.removeAttribute("data-gs-header");
     for (const el of written) release(el);
     written = [];
-    applied = { left: 0, right: 0 };
+    applied = 0;
   }
 
   /** What decides the layout independent of what we applied; a change means re-evaluate. */
-  function signature(paneLeft) {
+  function signature() {
     const cols = findColumns();
     if (!cols) return "none";
     const r = cols.frame.getBoundingClientRect();
-    return `${win.innerWidth}|${Math.round(r.left)}|${Math.round(r.right)}|${cols.pads.length}|${paneLeft == null ? "-" : Math.round(paneLeft)}|${epoch}`;
+    return `${win.innerWidth}|${Math.round(r.left)}|${Math.round(r.right)}|${cols.pads.length}|${epoch}`;
   }
 
   /** The column's box: our padding changes what is inside it, never its own edges. */
@@ -106,55 +92,62 @@ export function createRailLayout({ win, adapter, target }) {
   };
 
   /**
-   * Measure the natural layout, then reserve what the docked panels still need on each side. Returns
-   * `{ docked, left, right }`; `docked` is false when there is no room and the panels must be drawers.
+   * Measure the natural layout, then reserve what the docked panels still need. Returns `{ docked, right }`;
+   * `docked` is false when there is no room and the panels must be a drawer.
+   *
+   * The page column is padded first on its own. The composer's overlay (absolutely positioned inside the column on
+   * chatgpt.com) usually follows the column and must not be padded again; when it does not (the composer would sit
+   * off the conversation's center), it is padded too.
    */
-  function evaluate({ left = 0, right = 0, paneLeft = null } = {}) {
+  function evaluate({ right = 0, force = false } = {}) {
     const cols = findColumns();
     const el = target() ?? adapter.composer(doc);
     if (!cols || !el || win.innerWidth < DOCK_MIN_VIEWPORT) {
-      if (cols) setReserve(cols.pads, 0, 0);
+      if (cols) setReserve(cols.pads, 0);
       else clear();
-      return { docked: false, left: 0, right: 0 };
+      anchor = win.innerWidth;
+      return { docked: false, right: 0 };
     }
-    setReserve(cols.pads, 0, 0);
+    setReserve(cols.pads, 0);
     const col = natural(cols.frame);
-    const edge = paneLeft == null ? col.right : Math.min(col.right, paneLeft);
-    const needL = left > 0 ? left + 2 * PANEL_GAP : 0; // gap to the column edge and to the conversation
-    const needR = right > 0 ? right + 2 * PANEL_GAP : 0;
+    anchor = col.right;
+    const need = right > 0 ? right + 2 * PANEL_GAP : 0; // gap to the column edge and to the conversation
     // Both the conversation and the composer must clear the panels; they can sit in different boxes.
     const span = () => {
       const c = adapter.composer(doc)?.getBoundingClientRect();
       const t = el.getBoundingClientRect();
       return { left: c ? Math.min(t.left, c.left) : t.left, right: c ? Math.max(t.right, c.right) : t.right };
     };
-    const over = () => {
-      const s = span();
-      return { l: Math.max(0, col.left + needL - s.left), r: Math.max(0, s.right - (edge - needR)) };
-    };
-    let o = over();
-    if (o.l > 0.5 || o.r > 0.5) {
-      // The conversation is centered in the page column, so padding each side by exactly what its panel takes (plus
-      // what a floating native pane covers) re-centers it in the space the panels leave, whatever the page's own margins.
-      setReserve(cols.pads, needL, needR + Math.max(0, col.right - edge));
-      o = over();
+    const over = Math.max(0, span().right - (col.right - need));
+    if (over > 0.5 || (force && need > 0)) {
+      // The conversation is centered in the page column, so padding the right by exactly what the panels take
+      // re-centers it in the space they leave, whatever the page's own margins.
+      setReserve(cols.pads.slice(0, 1), need);
+      const centered = () => {
+        const c = adapter.composer(doc)?.getBoundingClientRect();
+        const t = target()?.getBoundingClientRect();
+        return c && t ? Math.abs((c.left + c.right) / 2 - (t.left + t.right) / 2) : 0;
+      };
+      if (cols.pads.length > 1 && centered() > 2) {
+        const first = centered();
+        setReserve(cols.pads, need);
+        if (centered() > first) setReserve(cols.pads.slice(0, 1), need); // it followed the column after all: padded twice
+      }
     }
     const s = span();
-    const fits = o.l <= 0.5 && o.r <= 0.5 && s.right - s.left >= MIN_CONTENT;
+    const fits = Math.max(0, s.right - (col.right - need)) <= 0.5 && s.right - s.left >= MIN_CONTENT;
     if (!fits) {
-      setReserve(cols.pads, 0, 0);
-      return { docked: false, left: 0, right: 0 };
+      setReserve(cols.pads, 0);
+      anchor = win.innerWidth;
+      return { docked: false, right: 0 };
     }
-    return { docked: true, left: applied.left, right: applied.right };
+    return { docked: true, right: applied };
   }
 
-  /** Where the panels anchor: the column's edges without our padding, the right one stopping at a floating native pane. */
-  function edges(paneLeft) {
-    const cols = findColumns();
-    if (!cols) return { left: 0, right: win.innerWidth };
-    const col = natural(cols.frame);
-    return { left: col.left, right: paneLeft == null ? col.right : Math.min(col.right, paneLeft) };
+  /** Where the panels anchor: the right edge of the page column. */
+  function edge() {
+    return anchor;
   }
 
-  return { evaluate, signature, edges, reserve: () => ({ ...applied }), dispose: clear };
+  return { evaluate, signature, edge, reserve: () => applied, dispose: clear };
 }

@@ -81,16 +81,15 @@ export function createPanePrefs(storage, { max = 50, key = "gs.pane.prefs" } = {
   };
 }
 
-/** Which panels the user wants docked (conversation view top-right, prompts bottom-left): one choice per browser, both on by default. */
+/** Whether the user wants the panels shown: one choice per browser, shown by default. */
 export function createPanelPrefs(storage, { key = "gs.pane.layout" } = {}) {
   const json = jsonStore(storage, key);
   return {
     get() {
-      const p = json.read();
-      return { minimap: p.minimap !== false, prompts: p.prompts !== false };
+      return json.read().shown !== false;
     },
     set(shown) {
-      json.write({ minimap: !!shown.minimap, prompts: !!shown.prompts });
+      json.write({ shown: !!shown });
     },
   };
 }

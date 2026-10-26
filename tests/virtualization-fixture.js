@@ -104,9 +104,10 @@ export function createFixture({ turns = 40, viewport = 800, markup = "chatgpt", 
   const baseRect = function () {
     if (inPane(this) && !this.closest("[data-gs-ui]")) {
       if (!paneState.shown) return { top: 0, bottom: 0, height: 0, left: 0, right: 0, width: 0, x: 0, y: 0 };
-      const left = win.innerWidth - paneState.opts.width;
+      const shift = paneState.opts.follows ? reservedOf(doc.body) : 0; // an inline pane moves with the padding of the column it sits in
+      const left = win.innerWidth - paneState.opts.width - shift;
       const rect = this === paneState.el
-        ? { top: 0, bottom: viewport, height: viewport, left, right: win.innerWidth, width: paneState.opts.width }
+        ? { top: 0, bottom: viewport, height: viewport, left, right: left + paneState.opts.width, width: paneState.opts.width }
         : { top: 40, bottom: 64, height: 24, left: left + 16, right: left + 216, width: 200 };
       return { ...rect, x: rect.left, y: rect.top };
     }
@@ -160,6 +161,7 @@ export function createFixture({ turns = 40, viewport = 800, markup = "chatgpt", 
     const { outputs, sources } = paneState.opts;
     const el = doc.createElement(paneState.opts.tag ?? "aside");
     el.id = "native-pane";
+    el.style.position = "fixed"; // the real pane is an overlay: it stays where it is whatever pads the page column
     if (!paneState.opts.tag) el.setAttribute("aria-label", "Summary");
     for (const [name, value] of Object.entries(paneState.opts.attrs ?? {})) el.setAttribute(name, value);
     if (paneState.opts.html) {

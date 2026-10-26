@@ -7,6 +7,7 @@ import { selectDispatcher } from "./queue/select.js";
 import { createQueueUi } from "./queue/controller.js";
 import { persistentQueueUi } from "./queue/persistent.js";
 import { createRecovery } from "./recovery.js";
+import { createThinkingExpander } from "./thinking.js";
 import { createRail } from "./rail/rail.js";
 import { createRailStateStore } from "./rail/rail-state.js";
 import { createTurnBackend } from "./virtualization/backend.js";
@@ -44,9 +45,12 @@ const boot = createBoot({
     const runtime = createRuntime({ win: window, adapter: chatgptAdapter, backend: createTurnBackend(), queueUi });
     const rail = runtime.mode === "active" || runtime.mode === "composer-only" ? createRail({ win: window, adapter: chatgptAdapter, runtime, store: railState }) : null;
     pane = rail;
+    const thinking = config.expandThinking && runtime.mode === "active" ? createThinkingExpander({ win: window, adapter: chatgptAdapter, runtime, diagnostics: runtime.diagnostics }) : null;
     return {
       runtime,
+      heal: () => rail?.heal(),
       dispose() {
+        thinking?.dispose();
         rail?.dispose();
         if (pane === rail) pane = null;
         runtime.dispose();

@@ -142,6 +142,25 @@ test("a form submit or native Send/steer click while generating appends too, and
   assert.equal(t.queued(), "via submit\n\nvia steer button\n\nonce");
 });
 
+test("whenever ChatGPT offers to steer, Send goes to the queue by default, even where it shows no Stop control", async () => {
+  // Defect: a page whose running response shows only a Steer control (no Stop, no streaming marker) steered natively.
+  const t = await mount({ page: await fakePage({ steer: true }) });
+  t.page.startStreaming();
+  t.page.type("first");
+  t.page.stop.remove(); // only the steer control marks the running response
+  t.doc.querySelectorAll(".result-streaming, [data-is-streaming='true']").forEach((e) => e.remove());
+  assert.ok(t.page.steerButton, "the native steer control is on offer");
+  const enter = await t.press({ key: "Enter" });
+  assert.equal(enter.defaultPrevented, true, "Enter is not left to ChatGPT");
+  await t.ui.settled();
+  assert.equal(t.queued(), "first");
+  t.page.type("second");
+  t.page.steerButton.click();
+  await t.ui.settled();
+  assert.equal(t.queued(), "first\n\nsecond", "the native Steer button queues too");
+  assert.deepEqual(t.page.log, [], "nothing was steered natively");
+});
+
 test("the Queue button appends the composer text while generating, without Enter", async () => {
   // Defect: no visible way to queue other than the keyboard.
   const t = await mount();

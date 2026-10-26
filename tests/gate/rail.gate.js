@@ -6,8 +6,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createFixture, installPageGuards, runBundle } from "./harness.js";
 
-const NEED = 280 + 2 * 12; // a docked panel's width plus its gaps (rail-layout.js)
-const panel = (fx, name) => fx.doc.querySelector(`.gs-panel[data-gs-panel="${name}"]`);
+const NEED = 300 + 2 * 12; // a docked panel's width plus its gaps (rail-layout.js)
+const rail = (fx) => fx.doc.querySelector(".gs-rail");
 const boot = async (options = {}) => {
   const fx = createFixture({ turns: 40, markup: "real", ...options });
   const guards = installPageGuards(fx);
@@ -19,11 +19,12 @@ const q = (fx, sel) => fx.doc.querySelector(sel);
 const rows = (fx) => [...fx.doc.querySelectorAll(".gs-prompt")];
 const dispatch = (fx, el, type, extra = {}) => el.dispatchEvent(Object.assign(new fx.win.Event(type, { bubbles: true }), extra));
 
-test("layout: minimap panel top-right, prompt panel bottom-left, oldest first and newest last, no first/last buttons", async () => {
+test("layout: one right-hand column, conversation view on top, prompts at the bottom, oldest first and newest last, no first/last buttons", async () => {
   const { fx, guards } = await boot({ width: 1600 });
   assert.deepEqual([...fx.doc.querySelectorAll(".gs-panel")].map((p) => p.dataset.gsPanel), ["minimap", "prompts"]);
-  assert.match(fx.doc.getElementById("gs-pane-style").textContent, /\.gs-panel-map\{top:[^}]*right:/);
-  assert.match(fx.doc.getElementById("gs-pane-style").textContent, /\.gs-panel-prompts\{left:[^}]*bottom:/);
+  assert.match(fx.doc.getElementById("gs-pane-style").textContent, /\.gs-rail\{position:fixed;[^}]*top:[^}]*right:[^}]*bottom:/);
+  assert.match(fx.doc.getElementById("gs-pane-style").textContent, /\.gs-panel-prompts\{margin-top:auto\}/);
+  assert.equal(fx.doc.querySelectorAll(".gs-hbtn").length, 1, "one button for both panels");
   const numbers = rows(fx).map((b) => +b.querySelector(".gs-n").textContent.slice(1));
   assert.deepEqual(numbers, Array.from({ length: 40 }, (_, i) => i + 1));
   assert.equal(rows(fx).at(-1).getAttribute("aria-current"), "true", "the newest prompt is active when viewing the latest");
@@ -32,22 +33,19 @@ test("layout: minimap panel top-right, prompt panel bottom-left, oldest first an
   assert.equal(guards.isClean(), true, JSON.stringify(guards.report()));
 });
 
-test("desktop, split and mobile widths: the reserved columns never intersect the conversation or composer; narrow ones are drawers", async () => {
-  for (const [width, nav, docked] of [[1920, 0, "both"], [1448, 52, "both"], [1280, 52, "both"], [1260, 52, "both"], [1100, 0, "prompts"], [1300, 260, "prompts"], [1023, 0, "none"], [768, 0, "none"], [390, 0, "none"]]) {
+test("desktop, split and mobile widths: the reserved column never intersects the conversation or composer; narrow ones are a drawer", async () => {
+  for (const [width, nav, docked] of [[1920, 0, true], [1448, 52, true], [1280, 52, true], [1260, 52, true], [1100, 0, true], [1024, 260, false], [1023, 0, false], [768, 0, false], [390, 0, false]]) {
     const { fx, guards } = await boot({ width, nav });
     const turn = fx.doc.querySelector("[data-turn-key]").getBoundingClientRect();
     const composer = fx.doc.getElementById("composer").getBoundingClientRect();
     const label = `${width}px, navigation ${nav}px`;
-    assert.deepEqual([!panel(fx, "minimap").hidden, !panel(fx, "prompts").hidden], docked === "both" ? [true, true] : docked === "prompts" ? [false, true] : [false, false], label);
-    if (docked === "both") {
-      assert.ok(turn.right <= width - NEED && composer.right <= width - NEED, `${label}: content ends at ${Math.max(turn.right, composer.right)}, the minimap starts at ${width - NEED}`);
-      assert.ok(turn.left >= nav + NEED && composer.left >= nav + NEED, `${label}: content starts at ${Math.min(turn.left, composer.left)}, the prompts end at ${nav + NEED}`);
+    assert.equal(!rail(fx).hidden, docked, label);
+    if (docked) {
+      assert.ok(turn.right <= width - NEED && composer.right <= width - NEED, `${label}: content ends at ${Math.max(turn.right, composer.right)}, the column starts at ${width - NEED}`);
+      assert.ok(turn.left >= nav && composer.left >= nav, `${label}: nothing moves under the sidebar`);
       assert.ok(turn.width >= 560, `${label}: conversation keeps ${turn.width}px`);
-    } else if (docked === "prompts") {
-      assert.ok(turn.left >= nav + NEED && composer.left >= nav + NEED && turn.width >= 560, `${label}: the prompts dock, the conversation keeps ${turn.width}px`);
-      assert.equal(fx.reserve(), 0, `${label}: nothing is reserved for the minimap drawer`);
     } else {
-      assert.equal(fx.reserve() + fx.reserveLeft(), 0, `${label}: drawers leave the page alone`);
+      assert.equal(fx.reserve(), 0, `${label}: a drawer leaves the page alone`);
     }
     assert.equal(fx.scrollEvents.length, 0, "starting the panels does not scroll");
     assert.equal(guards.isClean(), true, JSON.stringify(guards.report()));
@@ -93,7 +91,7 @@ test("A -> B -> A: each conversation restores its own search, panel state and sc
   const input = q(fx, ".gs-search input");
   input.value = "about";
   dispatch(fx, input, "input");
-  q(fx, ".gs-hbtn[data-gs-panel=\"minimap\"]").click(); // collapse the minimap: a per-browser choice
+  q(fx, ".gs-hbtn").click(); // hide both panels: a per-browser choice
   rows(fx)[12].click();
   await fx.settle();
   fx.wheel(250);
@@ -107,7 +105,7 @@ test("A -> B -> A: each conversation restores its own search, panel state and sc
   await fx.settle();
   assert.equal(rows(fx).length, 9, "B shows its own prompts");
   assert.equal(q(fx, ".gs-search input").value, "");
-  assert.equal(panel(fx, "minimap").hidden, true, "the collapsed minimap stays collapsed: it is the browser's choice, not a conversation's");
+  assert.equal(rail(fx).hidden, true, "the hidden panels stay hidden: it is the browser's choice, not a conversation's");
   assert.doesNotMatch(q(fx, ".gs-panel-prompts").textContent, /Prompt \d/, "nothing of A leaks into B");
 
   visit("/c/fixture");
@@ -116,7 +114,7 @@ test("A -> B -> A: each conversation restores its own search, panel state and sc
   fx.setTop(fx.maxTop());
   await fx.settle();
   assert.equal(q(fx, ".gs-search input").value, "about");
-  assert.equal(panel(fx, "minimap").hidden, true);
+  assert.equal(rail(fx).hidden, true);
   assert.equal(rows(fx).find((b) => b.getAttribute("aria-current") === "true").dataset.id, a.active);
   assert.equal(fx.rawTop(), a.top, "A is back at the exact scroll position");
   assert.equal(guards.isClean(), true, JSON.stringify(guards.report()));
@@ -139,16 +137,15 @@ test("streaming and idle: the rail adds no scroll movement and no layout writes"
   assert.equal(guards.isClean(), true, JSON.stringify(guards.report()));
 });
 
-test("native side pane: panels sit beside it, Outputs collapses, Sources stays, the width is reserved once", async () => {
+test("native side pane: our panels step aside for it, Outputs collapses, Sources stays, they return when it goes", async () => {
   for (const width of [1900, 1700]) {
     const { fx, guards, health } = await boot({ width, pane: {} });
     const label = `${width}px`;
     assert.equal(fx.doc.querySelectorAll(".gs-panel").length, 2, `${label}: two panels, no duplicate`);
     assert.equal(fx.pane.querySelector(".gs-panel"), null, `${label}: never inside ChatGPT's pane`);
-    assert.equal(JSON.stringify(health.pane.docked), JSON.stringify({ minimap: true, prompts: true }));
-    const edge = fx.win.innerWidth - fx.paneWidth();
-    const turn = fx.doc.querySelector("[data-turn-key]").getBoundingClientRect();
-    assert.ok(turn.right <= edge - NEED, `${label}: the conversation clears the minimap beside the native pane`);
+    assert.equal(rail(fx).hidden, true, `${label}: the pane has the room`);
+    assert.equal(fx.reserve(), 0, `${label}: the page is left to ChatGPT`);
+    assert.equal(health.pane.docked, false);
     const outputs = fx.doc.getElementById("native-outputs");
     const toggle = q(fx, ".gs-outputs-toggle");
     for (let i = 0; i < 3; i++) {
@@ -162,6 +159,7 @@ test("native side pane: panels sit beside it, Outputs collapses, Sources stays, 
     fx.win.dispatchEvent(new fx.win.Event("resize"));
     await fx.settle();
     assert.equal(fx.doc.querySelectorAll(".gs-panel").length, 2, `${label}: nothing doubles when the pane goes`);
+    assert.equal(rail(fx).hidden, false, `${label}: our panels are back`);
     assert.equal(guards.isClean(), true, JSON.stringify(guards.report()));
   }
 });

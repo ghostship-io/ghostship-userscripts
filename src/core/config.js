@@ -5,6 +5,7 @@ export const DEFAULTS = Object.freeze({
   enabled: true,
   dryRun: false, // opt-in for testing only: the queue then talks to a no-side-effect dispatcher
   recovery: true, // retry ChatGPT's own "Try again" when a conversation fails to load
+  expandThinking: true, // open ChatGPT's collapsed thinking traces as they scroll into view
   windowTurns: 10,
   prefetchTurns: 2,
   maxObservers: 4,

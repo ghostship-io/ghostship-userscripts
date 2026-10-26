@@ -132,6 +132,7 @@
         state.missing = check.missing;
         if (sameLayout(current.layout, layout)) {
           if (current.handle.runtime.mode === "safe") failedLayout = layout;
+          else current.handle.heal?.();
           return;
         }
         diagnostics.count("boot.restart");
@@ -213,6 +214,8 @@
     // opt-in for testing only: the queue then talks to a no-side-effect dispatcher
     recovery: true,
     // retry ChatGPT's own "Try again" when a conversation fails to load
+    expandThinking: true,
+    // open ChatGPT's collapsed thinking traces as they scroll into view
     windowTurns: 10,
     prefetchTurns: 2,
     maxObservers: 4,
@@ -553,14 +556,23 @@
 
   // src/core/prompt-index.js
   var PREVIEW_LENGTH = 120;
+  var clean = (el2) => (el2.textContent ?? "").replace(/\s+/g, " ").trim();
   function buildPromptIndex(root, adapter) {
     const prompts = [];
-    adapter.turns(root).forEach((turn, turnIndex) => {
+    const turns = adapter.turns(root);
+    turns.forEach((turn, turnIndex) => {
       const el2 = adapter.userMessage(turn);
       if (!el2) return;
-      const text = (el2.textContent ?? "").replace(/\s+/g, " ").trim();
+      const text = clean(el2);
       prompts.push({ id: adapter.turnId(turn, turnIndex), turnIndex, preview: text.slice(0, PREVIEW_LENGTH), text });
     });
+    if (!prompts.length) {
+      turns.forEach((turn, turnIndex) => {
+        const lead = (adapter.blocks?.([turn]) ?? []).slice(0, 6).map(clean).filter(Boolean).join(" ");
+        const text = (lead || clean(turn)).replace(/^ChatGPT said:\s*/i, "").slice(0, PREVIEW_LENGTH * 2);
+        if (text) prompts.push({ id: adapter.turnId(turn, turnIndex), turnIndex, preview: text.slice(0, PREVIEW_LENGTH), text, automated: true });
+      });
+    }
     return prompts;
   }
   function searchPrompts(index, query) {
@@ -757,12 +769,20 @@
   var PROFILE = '[data-testid="accounts-profile-button"], [data-testid="profile-button"]';
   var ATTACHMENT = '[data-testid*="attachment" i], [data-testid*="file-thumbnail" i]';
   var SCROLLER = "[data-scroll-root], [data-app-action-timeline-scroll]";
-  var HEADER = "#page-header";
+  var HEADER = "#page-header, header";
   var ASSISTANT = '[data-message-author-role="assistant"], [data-conversation-role="assistant"]';
   var SCROLLABLE = /* @__PURE__ */ new Set(["auto", "scroll", "overlay"]);
   var ABSOLUTE = /* @__PURE__ */ new Set(["absolute", "fixed"]);
   var ACTIVE_PAGE = '[data-app-shell-active-page="true"]';
   var scope = (root) => root.nodeType === 9 ? root.querySelector(ACTIVE_PAGE) ?? root : root;
+  var pageHeader = (doc) => {
+    for (const h of scope(doc).querySelectorAll(HEADER)) {
+      if (h.closest(OWN_UI) || h.closest(TURN)) continue;
+      const r = h.getBoundingClientRect();
+      if (r.width && r.height) return h;
+    }
+    return scope(doc).querySelector("#page-header");
+  };
   var SUMMARY_TITLE = /^(outputs?|sources?)$/i;
   var HEADINGS = 'h1,h2,h3,h4,h5,h6,[role="heading"]';
   var SUMMARY_HINT = "[data-summary-panel-variant],[data-summary-panel-density]";
@@ -770,6 +790,8 @@
   var BUTTONS = 'button,[role="button"]';
   var BUTTON_REGION = `aside,[role="complementary"],[role="region"],${SUMMARY_HINT}`;
   var OWN_UI = "[data-gs-ui]";
+  var SUMMARY_TOGGLE = 'button[data-thread-summary-panel-toggle="true"]';
+  var THINKING_TITLE = /^(thought|worked|thinking|stopped thinking|reasoned)\b/i;
   var commonAncestor = (a, b) => {
     for (let el2 = a; el2; el2 = el2.parentElement) if (el2.contains(b)) return el2;
     return null;
@@ -806,9 +828,12 @@
       const page = scope(doc);
       return page.querySelector(STOP) ?? page.querySelector(COMPOSER)?.closest("form")?.querySelector(STOP_FALLBACK) ?? null;
     },
-    /** A response is being produced: a Stop control is shown or the reply is still streaming. */
+    /**
+     * A response is being produced: a Stop control is shown, the reply is still streaming, or the composer offers to steer it
+     * (ChatGPT only offers Steer while a response runs, even where it hides Stop). A Send gesture then belongs to the queue.
+     */
     generating(doc) {
-      return this.stopButton(doc) !== null || scope(doc).querySelector(STREAMING) !== null;
+      return this.stopButton(doc) !== null || this.steerButton(doc) !== null || scope(doc).querySelector(STREAMING) !== null;
     },
     /** Opaque, stable per signed-in profile ("unknown" when the page does not say); no label is kept. */
     accountId(doc) {
@@ -865,7 +890,17 @@
       const composer = this.composer(doc);
       const scroller = this.scroller(doc);
       if (!composer || !scroller) return null;
-      const header = scope(doc).querySelector(HEADER);
+      if (!scope(doc).querySelector(TURN)) {
+        const win = doc.defaultView;
+        let node2 = composer;
+        for (let up = node2.parentElement; up && up !== doc.body && up !== doc.documentElement; up = up.parentElement) {
+          const width = up.getBoundingClientRect().width;
+          if (width >= win.innerWidth - 40) break;
+          if (width) node2 = up;
+        }
+        return node2;
+      }
+      const header = pageHeader(doc);
       let node = scroller;
       while (node && !(node.contains(composer) && (!header || node.contains(header)))) node = node.parentElement;
       return !node || node === doc.documentElement ? doc.body : node;
@@ -887,8 +922,9 @@
           break;
         }
       }
-      const header = scope(doc).querySelector(HEADER);
-      return { frame, pads, header: header && frame.contains(header) && header !== frame ? header : null };
+      const header = pageHeader(doc);
+      const flows = header && frame.contains(header) && header !== frame && win.getComputedStyle(header).position !== "fixed";
+      return { frame, pads, header: flows ? header : null };
     },
     /**
      * ChatGPT's mounted, visible summary pane, or null (the script then shows its one fallback pane).
@@ -936,7 +972,7 @@
      * `{ parent, before }`; null when there is no header or no button in it (the buttons then float top-right).
      */
     headerActions(doc) {
-      const header = scope(doc).querySelector(HEADER);
+      const header = pageHeader(doc);
       if (!header) return null;
       const win = doc.defaultView;
       let best = null;
@@ -945,11 +981,77 @@
         const r = b.getBoundingClientRect();
         if (r.width && r.right > win.innerWidth / 2 && (!best || r.right > best.right)) best = { el: b, right: r.right };
       }
-      return best ? { parent: best.el.parentElement, before: best.el } : null;
+      if (!best) return null;
+      let before = best.el;
+      while (before.parentElement && before.parentElement !== header && nativeChildren(before.parentElement) === 1) before = before.parentElement;
+      return { parent: before.parentElement, before, right: best.right };
+    },
+    /**
+     * Whether ChatGPT's own summary pane (Activity / Outputs / Sources) is open, wherever it renders: the header toggle says
+     * so, or a pane carrying its markup hint has a box (it is a popover outside the page when the page is narrow).
+     */
+    summaryOpen(doc) {
+      if (scope(doc).querySelector(SUMMARY_TOGGLE)?.getAttribute("aria-pressed") === "true") return true;
+      for (const el2 of doc.querySelectorAll(SUMMARY_HINT)) if (!el2.closest(OWN_UI) && !el2.closest(TURN) && el2.getBoundingClientRect().width) return true;
+      return false;
+    },
+    /**
+     * ChatGPT's own summary pane wherever it renders, with its box: `{ el, left, right, inPage }`, or null. In a wide page it
+     * is part of the page (`inPage`); in a narrow one ChatGPT shows it as a popover outside the page.
+     */
+    summaryCard(doc) {
+      const page = scope(doc);
+      for (const el2 of doc.querySelectorAll(SUMMARY_HINT)) {
+        if (el2.closest(OWN_UI) || el2.closest(TURN)) continue;
+        const r = el2.getBoundingClientRect();
+        if (r.width) return { el: el2, left: r.left, right: r.right, inPage: page.contains(el2) };
+      }
+      return null;
+    },
+    /**
+     * Any other pane docked or floating over the right edge of the page (a Subagents or canvas view, say), found by
+     * what is really painted there rather than by its title: the widest element on the right edge that is neither
+     * the conversation nor the composer nor ours. `{ pane, container, left, outputs: null }` like `nativeSummary`, or null.
+     */
+    sidePane(doc) {
+      const win = doc.defaultView;
+      const W = win.innerWidth;
+      const H = win.innerHeight;
+      if (!doc.elementFromPoint) return null;
+      const composer = this.composer(doc);
+      let best = null;
+      for (const y of [Math.max(24, this.headerBottom(doc) + 16), H * 0.3, H * 0.55, H * 0.8]) {
+        let hit = doc.elementFromPoint(W - 16, y);
+        if (!hit || hit.closest(OWN_UI)) continue;
+        for (let el2 = hit; el2 && el2 !== doc.body && el2 !== doc.documentElement; el2 = el2.parentElement) {
+          const r = el2.getBoundingClientRect();
+          if (r.width > W * 0.6) break;
+          if (r.right < W - 24) continue;
+          if (el2.matches(TURN) || el2.closest(TURN) || composer && el2.contains(composer) || el2.querySelector(TURN) || el2.querySelector(OWN_UI)) break;
+          if (r.width >= 200 && r.height >= H * 0.25 && (!best || r.left < best.left)) best = { pane: el2, left: r.left };
+        }
+      }
+      return best && { pane: best.pane, container: best.pane, left: best.left, outputs: null };
+    },
+    /**
+     * ChatGPT's collapsed thinking traces in the active page: the disclosure buttons of assistant turns ("Thought for 12s",
+     * "Worked for 1m 5s", "Stopped thinking"), as `{ button, turn, key }` where `key` names the trace within its turn.
+     * Buttons outside a turn (the model picker's "Thinking effort", say) never count.
+     */
+    thinkingToggles(doc) {
+      const out = [];
+      scope(doc).querySelectorAll(TURN).forEach((turn, turnIndex) => {
+        let nth = 0;
+        for (const button2 of turn.querySelectorAll("button[aria-expanded]")) {
+          if (button2.closest(OWN_UI) || !THINKING_TITLE.test((button2.textContent ?? "").trim())) continue;
+          out.push({ button: button2, turn, key: `${this.turnId(turn, turnIndex)}#${nth++}` });
+        }
+      });
+      return out;
     },
     /** Bottom edge of the page header (0 without one): the fallback pane docks below it. */
     headerBottom(doc) {
-      return scope(doc).querySelector(HEADER)?.getBoundingClientRect().bottom ?? 0;
+      return pageHeader(doc)?.getBoundingClientRect().bottom ?? 0;
     },
     /** The assistant reply of turn `index` of `turns`: inside the turn element, else the next message element. */
     reply(turns, index) {
@@ -2905,6 +3007,56 @@
     };
   }
 
+  // src/chatgpt/thinking.js
+  var THINKING_DEFAULTS = Object.freeze({
+    debounceMs: 120,
+    // after the last scroll or page change
+    maxPerPass: 8
+  });
+  function createThinkingExpander({ win, adapter, runtime, diagnostics, options = {} }) {
+    const doc = win.document;
+    const opts = { ...THINKING_DEFAULTS, ...options };
+    const done = /* @__PURE__ */ new Set();
+    let timer = null;
+    let disposed = false;
+    function viewport() {
+      const r = adapter.scroller(doc).getBoundingClientRect();
+      return { top: Math.max(r.top, 0), bottom: Math.min(r.bottom, win.innerHeight || Infinity) };
+    }
+    function pass() {
+      timer = null;
+      if (disposed) return;
+      const view = viewport();
+      const due = [];
+      for (const { button: button2, turn, key } of adapter.thinkingToggles(doc)) {
+        if (done.has(key) || button2.getAttribute("aria-expanded") !== "false" || !runtime.isTurnActive(turn)) continue;
+        const r = button2.getBoundingClientRect();
+        if (!r.height || r.bottom <= view.top || r.top >= view.bottom) continue;
+        due.push({ button: button2, key, top: r.top });
+      }
+      due.sort((a, b) => b.top - a.top);
+      for (const { button: button2, key } of due.slice(0, opts.maxPerPass)) {
+        done.add(key);
+        button2.click();
+        diagnostics?.count("thinking.expanded");
+      }
+      if (due.length > opts.maxPerPass) schedule();
+    }
+    function schedule() {
+      if (timer !== null || disposed) return;
+      timer = win.setTimeout(pass, opts.debounceMs);
+    }
+    const stops = [runtime.onIndexChange?.(schedule), runtime.scroll?.onScroll?.(schedule)].filter((fn) => typeof fn === "function");
+    schedule();
+    return {
+      dispose() {
+        disposed = true;
+        if (timer !== null) win.clearTimeout(timer);
+        for (const stop of stops) stop();
+      }
+    };
+  }
+
   // src/chatgpt/rail/minimap-model.js
   var HEADING = /^H[1-6]$/;
   var PRIORITY = ["code", "table", "image", "heading", "text"];
@@ -3017,20 +3169,20 @@
   }
 
   // src/chatgpt/rail/rail-layout.js
-  var PANEL_WIDTH = 280;
+  var PANEL_WIDTH = 300;
   var PANEL_GAP = 12;
   var DOCK_MIN_VIEWPORT = 1024;
   var MIN_CONTENT = 560;
   var LAYOUT_CSS = `
-[data-gs-column][data-gs-left]{box-sizing:border-box;padding-left:var(--gs-reserve-left,0px)}
 [data-gs-column][data-gs-right]{box-sizing:border-box;padding-right:var(--gs-reserve,0px)}
-[data-gs-header]{margin-left:calc(-1 * var(--gs-reserve-left,0px));margin-right:calc(-1 * var(--gs-reserve,0px))}
+[data-gs-header]{margin-right:calc(-1 * var(--gs-reserve,0px))}
 `;
   function createRailLayout({ win, adapter, target }) {
     const doc = win.document;
     let written = [];
     let known = null;
-    let applied = { left: 0, right: 0 };
+    let applied = 0;
+    let anchor = win.innerWidth;
     let epoch = 0;
     const findColumns = () => {
       if (!known || !known.frame.isConnected || known.pads.some((el2) => !el2.isConnected) || known.header && !known.header.isConnected) {
@@ -3040,100 +3192,91 @@
       return known;
     };
     function release(el2) {
-      for (const a of ["data-gs-column", "data-gs-left", "data-gs-right"]) el2.removeAttribute(a);
+      for (const a of ["data-gs-column", "data-gs-right"]) el2.removeAttribute(a);
       el2.style.removeProperty("--gs-reserve");
-      el2.style.removeProperty("--gs-reserve-left");
       if (!el2.getAttribute("style")) el2.removeAttribute("style");
     }
-    function setReserve(cols, left, right) {
+    function setReserve(cols, right) {
       if (written.some((el2) => !cols.includes(el2))) clear();
       written = cols;
       const header = findColumns()?.header;
       if (header) {
-        if (left > 0 || right > 0) {
+        if (right > 0) {
           if (header.getAttribute("data-gs-header") === null) header.setAttribute("data-gs-header", "");
         } else if (header.hasAttribute("data-gs-header")) header.removeAttribute("data-gs-header");
       }
-      const l = Math.max(0, Math.round(left));
       const r = Math.max(0, Math.round(right));
       for (const col of cols) {
-        if (l > 0 || r > 0) {
+        if (r > 0) {
           if (col.getAttribute("data-gs-column") === null) col.setAttribute("data-gs-column", "");
-        } else if (col.hasAttribute("data-gs-column") || col.hasAttribute("data-gs-left") || col.hasAttribute("data-gs-right")) {
-          release(col);
-          continue;
-        }
-        for (const [attr, prop, v] of [["data-gs-left", "--gs-reserve-left", l], ["data-gs-right", "--gs-reserve", r]]) {
-          if (v > 0) {
-            if (col.getAttribute(attr) === null) col.setAttribute(attr, "");
-            if (col.style.getPropertyValue(prop) !== `${v}px`) col.style.setProperty(prop, `${v}px`);
-          } else if (col.hasAttribute(attr)) {
-            col.removeAttribute(attr);
-            col.style.removeProperty(prop);
-          }
-        }
+          if (col.getAttribute("data-gs-right") === null) col.setAttribute("data-gs-right", "");
+          if (col.style.getPropertyValue("--gs-reserve") !== `${r}px`) col.style.setProperty("--gs-reserve", `${r}px`);
+        } else if (col.hasAttribute("data-gs-column") || col.hasAttribute("data-gs-right")) release(col);
       }
-      applied = { left: l, right: r };
+      applied = r;
     }
     function clear() {
       const header = known?.header;
       if (header?.hasAttribute("data-gs-header")) header.removeAttribute("data-gs-header");
       for (const el2 of written) release(el2);
       written = [];
-      applied = { left: 0, right: 0 };
+      applied = 0;
     }
-    function signature(paneLeft) {
+    function signature() {
       const cols = findColumns();
       if (!cols) return "none";
       const r = cols.frame.getBoundingClientRect();
-      return `${win.innerWidth}|${Math.round(r.left)}|${Math.round(r.right)}|${cols.pads.length}|${paneLeft == null ? "-" : Math.round(paneLeft)}|${epoch}`;
+      return `${win.innerWidth}|${Math.round(r.left)}|${Math.round(r.right)}|${cols.pads.length}|${epoch}`;
     }
     const natural = (col) => {
       const r = col.getBoundingClientRect();
       return { left: r.left, right: r.right };
     };
-    function evaluate({ left = 0, right = 0, paneLeft = null } = {}) {
+    function evaluate({ right = 0, force = false } = {}) {
       const cols = findColumns();
       const el2 = target() ?? adapter.composer(doc);
       if (!cols || !el2 || win.innerWidth < DOCK_MIN_VIEWPORT) {
-        if (cols) setReserve(cols.pads, 0, 0);
+        if (cols) setReserve(cols.pads, 0);
         else clear();
-        return { docked: false, left: 0, right: 0 };
+        anchor = win.innerWidth;
+        return { docked: false, right: 0 };
       }
-      setReserve(cols.pads, 0, 0);
+      setReserve(cols.pads, 0);
       const col = natural(cols.frame);
-      const edge = paneLeft == null ? col.right : Math.min(col.right, paneLeft);
-      const needL = left > 0 ? left + 2 * PANEL_GAP : 0;
-      const needR = right > 0 ? right + 2 * PANEL_GAP : 0;
+      anchor = col.right;
+      const need = right > 0 ? right + 2 * PANEL_GAP : 0;
       const span = () => {
         const c = adapter.composer(doc)?.getBoundingClientRect();
         const t = el2.getBoundingClientRect();
         return { left: c ? Math.min(t.left, c.left) : t.left, right: c ? Math.max(t.right, c.right) : t.right };
       };
-      const over = () => {
-        const s2 = span();
-        return { l: Math.max(0, col.left + needL - s2.left), r: Math.max(0, s2.right - (edge - needR)) };
-      };
-      let o = over();
-      if (o.l > 0.5 || o.r > 0.5) {
-        setReserve(cols.pads, needL, needR + Math.max(0, col.right - edge));
-        o = over();
+      const over = Math.max(0, span().right - (col.right - need));
+      if (over > 0.5 || force && need > 0) {
+        setReserve(cols.pads.slice(0, 1), need);
+        const centered = () => {
+          const c = adapter.composer(doc)?.getBoundingClientRect();
+          const t = target()?.getBoundingClientRect();
+          return c && t ? Math.abs((c.left + c.right) / 2 - (t.left + t.right) / 2) : 0;
+        };
+        if (cols.pads.length > 1 && centered() > 2) {
+          const first = centered();
+          setReserve(cols.pads, need);
+          if (centered() > first) setReserve(cols.pads.slice(0, 1), need);
+        }
       }
       const s = span();
-      const fits = o.l <= 0.5 && o.r <= 0.5 && s.right - s.left >= MIN_CONTENT;
+      const fits = Math.max(0, s.right - (col.right - need)) <= 0.5 && s.right - s.left >= MIN_CONTENT;
       if (!fits) {
-        setReserve(cols.pads, 0, 0);
-        return { docked: false, left: 0, right: 0 };
+        setReserve(cols.pads, 0);
+        anchor = win.innerWidth;
+        return { docked: false, right: 0 };
       }
-      return { docked: true, left: applied.left, right: applied.right };
+      return { docked: true, right: applied };
     }
-    function edges(paneLeft) {
-      const cols = findColumns();
-      if (!cols) return { left: 0, right: win.innerWidth };
-      const col = natural(cols.frame);
-      return { left: col.left, right: paneLeft == null ? col.right : Math.min(col.right, paneLeft) };
+    function edge() {
+      return anchor;
     }
-    return { evaluate, signature, edges, reserve: () => ({ ...applied }), dispose: clear };
+    return { evaluate, signature, edge, reserve: () => applied, dispose: clear };
   }
 
   // src/chatgpt/rail/rail-state.js
@@ -3213,54 +3356,54 @@
     const json = jsonStore(storage, key);
     return {
       get() {
-        const p = json.read();
-        return { minimap: p.minimap !== false, prompts: p.prompts !== false };
+        return json.read().shown !== false;
       },
       set(shown) {
-        json.write({ minimap: !!shown.minimap, prompts: !!shown.prompts });
+        json.write({ shown: !!shown });
       }
     };
   }
 
   // src/chatgpt/rail/rail.js
   var STYLE_ID2 = "gs-pane-style";
-  var LINE = "var(--border-light,color-mix(in srgb,currentColor 14%,transparent))";
-  var HOVER = "var(--surface-hover,color-mix(in srgb,currentColor 7%,transparent))";
-  var SELECTED = "var(--interactive-bg-secondary-selected,color-mix(in srgb,currentColor 12%,transparent))";
-  var FIELD = "var(--bg-elevated-secondary,color-mix(in srgb,currentColor 6%,transparent))";
-  var CODE = "var(--bg-elevated-secondary,color-mix(in srgb,currentColor 12%,transparent))";
-  var BUBBLE = "var(--message-surface,color-mix(in srgb,currentColor 10%,transparent))";
+  var SURFACE = "var(--color-surface-elevated-secondary,Canvas)";
+  var PAGE = "var(--color-surface,Canvas)";
+  var TEXT = "var(--color-text,CanvasText)";
+  var LINE = "var(--color-border,color-mix(in srgb,currentColor 14%,transparent))";
+  var HOVER = "var(--color-token-interactive-bg-secondary-hover,color-mix(in srgb,currentColor 8%,transparent))";
+  var SELECTED = "var(--color-token-interactive-bg-secondary-selected,color-mix(in srgb,currentColor 12%,transparent))";
+  var CODE = "var(--color-token-text-code-block-background,color-mix(in srgb,currentColor 12%,transparent))";
+  var BUBBLE = "var(--color-token-interactive-bg-secondary-selected,color-mix(in srgb,currentColor 10%,transparent))";
   var INK = "color-mix(in srgb,currentColor 38%,transparent)";
   var INK_FAINT = "color-mix(in srgb,currentColor 22%,transparent)";
-  var ACCENT = "var(--interactive-bg-accent-default,AccentColor)";
-  var MUTED = "var(--text-secondary,color-mix(in srgb,currentColor 65%,transparent))";
-  var FOCUS = "outline:2px solid var(--border-heavy,currentColor);outline-offset:-2px";
+  var ACCENT = "var(--color-token-focus-border,AccentColor)";
+  var MUTED = "var(--color-text-secondary,color-mix(in srgb,currentColor 65%,transparent))";
+  var RING = "var(--elevation-prominent,0 0 0 .5px color-mix(in srgb,currentColor 20%,transparent))";
+  var FOCUS = "outline:2px solid var(--color-border-strong,currentColor);outline-offset:-2px";
   var CHEVRON = '<svg class="gs-chevron" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>';
-  var CLOSE = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>';
-  var MAP_ICON = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M8.5 8h7M8.5 11.5h7M8.5 15h4"/></svg>';
-  var LIST_ICON = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"/></svg>';
-  var MENU = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>';
+  var PANELS_ICON = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M8.5 8h7M8.5 11.5h7M8.5 15h4"/></svg>';
   var CSS2 = `
-.gs-panel{position:fixed;z-index:30;display:flex;flex-direction:column;width:min(${PANEL_WIDTH}px,calc(100vw - 16px));box-sizing:border-box;border:1px solid ${LINE};border-radius:16px;background:var(--main-surface-primary,Canvas);color:var(--text-primary,CanvasText);font:inherit;font-size:14px;line-height:20px;overflow:hidden}
+.gs-rail{position:fixed;z-index:30;top:var(--gs-top,60px);right:var(--gs-right,12px);bottom:var(--gs-bottom,16px);display:flex;flex-direction:column;gap:12px;width:min(${PANEL_WIDTH}px,calc(100vw - 16px));box-sizing:border-box;pointer-events:none}
+.gs-rail[hidden]{display:none}
+.gs-panel{display:flex;flex:0 1 auto;flex-direction:column;min-height:0;box-sizing:border-box;border-radius:var(--radius-2xl,16px);background:${SURFACE};box-shadow:${RING};color:${TEXT};font:inherit;font-size:14px;line-height:20px;overflow:hidden;pointer-events:auto}
 .gs-panel[hidden]{display:none}
 .gs-panel *,.gs-hbtns *{box-sizing:border-box}
-.gs-panel-map{top:var(--gs-top,8px);right:var(--gs-right,12px);max-height:calc(100vh - var(--gs-top,8px) - var(--gs-map-bottom,16px))}
-.gs-panel-prompts{left:var(--gs-left,12px);bottom:var(--gs-bottom,16px);max-height:calc(100vh - 96px - var(--gs-bottom,16px))}
-.gs-panel[data-gs-drawer="true"]{max-width:calc(100vw - 16px)}
-.gs-panel-head{display:flex;flex:0 0 auto;align-items:center;justify-content:space-between;min-height:44px;padding:8px 8px 8px 16px;font-weight:600}
+.gs-panel-map{max-height:55%}
+.gs-panel-prompts{margin-top:auto}
+.gs-panel-head{display:flex;flex:0 0 auto;align-items:center;min-height:44px;padding:8px 16px;color:${MUTED}}
 .gs-panel-body{display:flex;flex:1 1 auto;flex-direction:column;min-height:0;padding:0 16px 12px}
-.gs-collapse,.gs-hbtn{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;padding:0;border:0;background:transparent;color:inherit;cursor:pointer}
-.gs-collapse{width:28px;height:28px;border-radius:8px}
-.gs-hbtns{display:inline-flex;align-items:center;gap:2px;margin:0 4px}
-.gs-hbtns[data-gs-float]{position:fixed;top:8px;right:8px;z-index:31;margin:0}
-.gs-hbtn{width:36px;height:36px;border-radius:8px;color:var(--text-secondary,currentColor)}
-.gs-hbtn[aria-pressed="true"]{color:var(--text-primary,currentColor);background:${SELECTED}}
-.gs-collapse:hover,.gs-hbtn:hover,.gs-outputs-toggle:hover{background:${HOVER}}
+.gs-hbtns{display:inline-flex;align-items:center;margin:0 4px;pointer-events:auto}
+.gs-hbtns[hidden]{display:none}
+.gs-hbtns[data-gs-float]{position:fixed;top:8px;right:var(--gs-float-right,8px);z-index:41;margin:0}
+.gs-hbtn{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:36px;height:36px;padding:0;border:0;border-radius:8px;background:transparent;color:${MUTED};cursor:pointer;pointer-events:auto}
+.gs-hbtn[aria-pressed="true"]{color:${TEXT};background:${SELECTED}}
+.gs-hbtn:hover,.gs-outputs-toggle:hover{background:${HOVER}}
 .gs-chevron{flex:0 0 auto;transition:transform .15s}
 [data-gs-outputs][data-gs-collapsed="true"] .gs-chevron{transform:rotate(-90deg)}
-.gs-minimap{position:relative;display:flex;justify-content:center;align-items:flex-start;flex:0 0 auto;min-height:56px;padding:8px;border:1px solid ${LINE};border-radius:8px;background:${FIELD};cursor:pointer;touch-action:none;overflow:hidden}
-.gs-frame{position:relative;flex:0 0 auto;width:100%;height:120px;border:1px solid ${INK};border-radius:4px;background:var(--main-surface-primary,Canvas)}
-.gs-minimap:focus-visible,.gs-search input:focus-visible,.gs-prompt:focus-visible,.gs-hbtn:focus-visible,.gs-collapse:focus-visible,.gs-filter:focus-visible,.gs-outputs-toggle:focus-visible{${FOCUS}}
+.gs-minimap{position:relative;display:flex;justify-content:center;align-items:flex-start;flex:0 0 auto;min-height:56px;padding:8px;border:1px solid ${LINE};border-radius:12px;background:${PAGE};cursor:pointer;touch-action:none;overflow:hidden}
+.gs-frame{position:relative;flex:0 0 auto;width:72%;height:120px;overflow:hidden;border:1px solid ${INK};border-radius:4px;background:${PAGE}}
+.gs-minimap:focus-visible,.gs-search input:focus-visible,.gs-prompt:focus-visible,.gs-hbtn:focus-visible,.gs-outputs-toggle:focus-visible{${FOCUS}}
+.gs-scene{position:absolute;top:0;left:0;right:0;height:100%}
 .gs-bars{position:absolute;inset:0;--gs-lh:4px}
 .gs-bar{position:absolute;min-height:2px;border-radius:2px;pointer-events:none}
 .gs-bar[data-kind="text"]{background-image:linear-gradient(${INK_FAINT} 0 50%,transparent 50%);background-size:100% var(--gs-lh)}
@@ -3275,9 +3418,6 @@
 .gs-search-field{position:relative;flex:1 1 auto;min-width:0}
 .gs-search-field::before{content:"";position:absolute;left:10px;top:50%;width:9px;height:9px;margin-top:-6px;border:2px solid currentColor;border-radius:50%;opacity:.55;pointer-events:none}
 .gs-search input{width:100%;min-height:36px;padding:4px 8px 4px 30px;border:1px solid ${LINE};border-radius:10px;background:transparent;color:inherit;font:inherit}
-.gs-filter{flex:0 0 auto;display:flex;align-items:center;justify-content:center;width:36px;height:36px;border:1px solid ${LINE};border-radius:10px;background:transparent;color:${MUTED};cursor:pointer}
-.gs-filter:hover{background:${HOVER}}
-.gs-filter[aria-pressed="true"]{background:${SELECTED};color:inherit}
 .gs-prompts{flex:1 1 auto;min-height:60px;margin:0;padding:0;list-style:none;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
 .gs-prompt{position:relative;display:flex;gap:10px;width:100%;min-height:48px;padding:6px 24px 6px 10px;border:0;border-radius:8px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
 .gs-prompt:hover{background:${HOVER}}
@@ -3292,10 +3432,10 @@
 [data-gs-outputs][data-gs-collapsed="true"]>:not([data-gs-outputs-head]){display:none}
 ${LAYOUT_CSS}`;
   function describePrompt(text, reply = "") {
-    const clean = text.replace(/\s+/g, " ").trim();
-    const m = clean.match(/^(.{1,60}?)(?:[.?!:]\s+|$)/);
-    const title = (m ? m[1] : clean.slice(0, 60)).trim() || clean.slice(0, 60);
-    const rest = clean.slice(title.length).replace(/^[.?!:\s]+/, "");
+    const clean2 = text.replace(/\s+/g, " ").trim();
+    const m = clean2.match(/^(.{1,60}?)(?:[.?!:]\s+|$)/);
+    const title = (m ? m[1] : clean2.slice(0, 60)).trim() || clean2.slice(0, 60);
+    const rest = clean2.slice(title.length).replace(/^[.?!:\s]+/, "");
     const preview = (rest || reply.replace(/\s+/g, " ").trim()).slice(0, 100);
     return { title, preview };
   }
@@ -3306,10 +3446,14 @@ ${LAYOUT_CSS}`;
   var SCAN_MS = 400;
   var BLOCK_CAP = 800;
   var CONTENT_W = 768;
+  var FRAME_SHARE = 0.72;
+  var PAPER = 11 / 8.5;
   var MAP_PAD = 18;
   var MAP_CHROME = 120;
+  var PANE_SETTLE_MS = 450;
+  var FLOAT_BOTTOM = 44;
   var MAP_W = 244;
-  function createRail({ win, adapter, runtime, store = createRailStateStore(), prefs = createPanePrefs(win.localStorage), layoutPrefs = createPanelPrefs(win.localStorage) }) {
+  function createRail({ win, adapter, runtime, store = createRailStateStore(), prefs = createPanePrefs(win.localStorage), layoutPrefs = createPanelPrefs(win.localStorage), paneSettleMs = PANE_SETTLE_MS }) {
     const doc = win.document;
     const scroll = runtime.scroll;
     const scroller = scroll.element ?? adapter.scroller(doc);
@@ -3319,10 +3463,10 @@ ${LAYOUT_CSS}`;
     let signature = null;
     let query = "";
     let activeId = null;
-    let docked = { minimap: true, prompts: true };
-    let drawer = null;
-    const shown = layoutPrefs.get();
-    let inViewOnly = false;
+    let docked = true;
+    let drawer = false;
+    let shown = layoutPrefs.get();
+    let hasMap = false;
     let viewSet = /* @__PURE__ */ new Set();
     let listPinned = true;
     let listManual = false;
@@ -3341,6 +3485,8 @@ ${LAYOUT_CSS}`;
     let restore = store.get(convId);
     let didRestore = false;
     let viewBox = "";
+    let geom = { sceneH: 1, frameH: 1 };
+    let mapOffset = 0;
     let bookmarkToRestore = null;
     let listTopToRestore = null;
     let outputsCollapsed = false;
@@ -3350,6 +3496,9 @@ ${LAYOUT_CSS}`;
     let openGen = 0;
     let interacted = false;
     let lastHost = null;
+    let lastPaneOpen = false;
+    let paneYield = false;
+    let settleTimer = null;
     let scannedAt = -Infinity;
     let scanTimer = null;
     let outputsHost = null;
@@ -3359,44 +3508,43 @@ ${LAYOUT_CSS}`;
     style.textContent = CSS2;
     doc.head.appendChild(style);
     const panel = (name, label, inner) => {
-      const el2 = doc.createElement("aside");
+      const el2 = doc.createElement("section");
       el2.className = `gs-panel gs-panel-${name === "minimap" ? "map" : "prompts"}`;
       el2.dataset.gsUi = "";
       el2.dataset.gsPanel = name;
       el2.setAttribute("aria-label", label);
-      el2.innerHTML = `<div class="gs-panel-head"><span class="gs-panel-title">${label}</span><button type="button" class="gs-collapse" aria-label="Hide ${label.toLowerCase()}" title="Hide ${label.toLowerCase()}">${CLOSE}</button></div><div class="gs-panel-body">${inner}</div>`;
+      el2.innerHTML = `<div class="gs-panel-head"><span class="gs-panel-title">${label}</span></div><div class="gs-panel-body">${inner}</div>`;
       return el2;
     };
     const mapPanel = panel(
       "minimap",
       "Conversation view",
-      `<div class="gs-minimap" tabindex="0" role="slider" aria-orientation="vertical" aria-label="Current turn overview" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="gs-frame"><div class="gs-bars"></div><div class="gs-view" hidden></div></div></div><div class="gs-caption" aria-live="off">Drag to navigate \u2022 0% visible</div>`
+      `<div class="gs-minimap" tabindex="0" role="slider" aria-orientation="vertical" aria-label="Current turn overview" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="gs-frame"><div class="gs-scene"><div class="gs-bars"></div><div class="gs-view" hidden></div></div></div></div><div class="gs-caption" aria-live="off">Drag to navigate \u2022 0% visible</div>`
     );
     const promptsPanel = panel(
       "prompts",
       "Prompts",
-      `<div class="gs-search"><div class="gs-search-field"><input type="search" placeholder="Search prompts..." aria-label="Search prompts"></div><button type="button" class="gs-filter" aria-pressed="false" aria-label="Only prompts in view" title="Only prompts in view">${MENU}</button></div><ol class="gs-prompts" aria-label="Prompts, oldest first"></ol>`
+      `<div class="gs-search"><div class="gs-search-field"><input type="search" placeholder="Filter prompts..." aria-label="Filter prompts"></div></div><ol class="gs-prompts" aria-label="Prompts, oldest first"></ol>`
     );
-    const panels = { minimap: mapPanel, prompts: promptsPanel };
-    const root = { querySelector: (sel) => mapPanel.querySelector(sel) ?? promptsPanel.querySelector(sel), contains: (n) => mapPanel.contains(n) || promptsPanel.contains(n) };
+    mapPanel.hidden = true;
+    const column = doc.createElement("div");
+    column.className = "gs-rail";
+    column.dataset.gsUi = "";
+    column.append(mapPanel, promptsPanel);
+    const root = { querySelector: (sel) => mapPanel.querySelector(sel) ?? promptsPanel.querySelector(sel), contains: (n) => column.contains(n) };
     const actions = doc.createElement("span");
     actions.className = "gs-hbtns";
     actions.dataset.gsUi = "";
-    const buttons = {};
-    for (const [name, label, icon2] of [["minimap", "Conversation view", MAP_ICON], ["prompts", "Prompts", LIST_ICON]]) {
-      const b = doc.createElement("button");
-      b.type = "button";
-      b.className = "gs-hbtn";
-      b.dataset.gsPanel = name;
-      b.dataset.gsUi = "";
-      b.setAttribute("aria-label", label);
-      b.title = label;
-      b.setAttribute("aria-pressed", "false");
-      b.innerHTML = icon2;
-      actions.append(b);
-      buttons[name] = b;
-    }
-    doc.body.append(mapPanel, promptsPanel);
+    const button2 = doc.createElement("button");
+    button2.type = "button";
+    button2.className = "gs-hbtn";
+    button2.dataset.gsUi = "";
+    button2.setAttribute("aria-label", "Conversation view");
+    button2.title = "Show or hide the conversation view and prompts";
+    button2.setAttribute("aria-pressed", "false");
+    button2.innerHTML = PANELS_ICON;
+    actions.append(button2);
+    doc.body.append(column);
     const outputsBtn = doc.createElement("button");
     outputsBtn.type = "button";
     outputsBtn.className = "gs-outputs-toggle";
@@ -3406,10 +3554,10 @@ ${LAYOUT_CSS}`;
     const $ = (sel) => root.querySelector(sel);
     const minimap = $(".gs-minimap");
     const frame = $(".gs-frame");
+    const scene = $(".gs-scene");
     const bars = $(".gs-bars");
     const view = $(".gs-view");
     const caption = $(".gs-caption");
-    const filterBtn = $(".gs-filter");
     const input = $(".gs-search input");
     const list = $(".gs-prompts");
     const railLayout = createRailLayout({ win, adapter, target: () => els[0] });
@@ -3425,8 +3573,6 @@ ${LAYOUT_CSS}`;
       outputsCollapsed = restore.ui.outputsCollapsed ?? outputsCollapsed;
       query = restore.ui.query;
       input.value = query;
-      inViewOnly = restore.ui.inViewOnly;
-      filterBtn.setAttribute("aria-pressed", String(inViewOnly));
     }
     function persist(bookmark) {
       if (disposed || restore || convId === "new") return;
@@ -3440,7 +3586,7 @@ ${LAYOUT_CSS}`;
       const prev = store.get(convId);
       store.save(convId, {
         sig,
-        ui: { query, inViewOnly, outputsCollapsed },
+        ui: { query, outputsCollapsed },
         activeId,
         list: { top: list.scrollTop, pinned: listPinned },
         bookmark: bookmark ?? prev?.bookmark ?? null
@@ -3511,7 +3657,7 @@ ${LAYOUT_CSS}`;
       }, ms);
     }
     function setVar(name, value) {
-      for (const el2 of [mapPanel, promptsPanel]) if (el2.style.getPropertyValue(name) !== value) el2.style.setProperty(name, value);
+      if (column.style.getPropertyValue(name) !== value) column.style.setProperty(name, value);
     }
     function releaseOutputs() {
       if (outputsHost) {
@@ -3535,56 +3681,62 @@ ${LAYOUT_CSS}`;
       const expanded = String(!outputsCollapsed);
       if (outputsBtn.getAttribute("aria-expanded") !== expanded) outputsBtn.setAttribute("aria-expanded", expanded);
     }
-    const visible = (name) => docked[name] || drawer === name;
+    const open = () => els.length > 0 && (docked && shown || drawer);
     function applyVisibility() {
-      for (const name of ["minimap", "prompts"]) {
-        const on2 = visible(name);
-        if (panels[name].hidden === on2) panels[name].hidden = !on2;
-        const pressed = String(on2);
-        if (buttons[name].getAttribute("aria-pressed") !== pressed) buttons[name].setAttribute("aria-pressed", pressed);
-        const drawerMode = String(!docked[name]);
-        if (panels[name].dataset.gsDrawer !== drawerMode) panels[name].dataset.gsDrawer = drawerMode;
-      }
-      if (visible("minimap")) {
+      const on2 = open();
+      if (actions.hidden === els.length > 0) actions.hidden = els.length === 0;
+      if (column.hidden === on2) column.hidden = !on2;
+      const mapOn = on2 && hasMap;
+      if (mapPanel.hidden === mapOn) mapPanel.hidden = !mapOn;
+      const pressed = String(on2);
+      if (button2.getAttribute("aria-pressed") !== pressed) button2.setAttribute("aria-pressed", pressed);
+      const drawerMode = String(!docked);
+      if (column.dataset.gsDrawer !== drawerMode) column.dataset.gsDrawer = drawerMode;
+      if (mapOn) {
         modelKey = "";
         schedule();
       }
     }
-    function placeButtons() {
+    function placeButton(pane2) {
       const spot = adapter.headerActions(doc);
-      if (spot) {
+      const box = pane2?.isConnected ? pane2.getBoundingClientRect() : null;
+      const covered = !!spot && !!box?.width && spot.right > box.left + 1 && box.top < adapter.headerBottom(doc) - 1;
+      const floating = !spot || covered;
+      if (!floating) {
         if (actions.parentElement !== spot.parent || actions.nextElementSibling !== spot.before) spot.parent.insertBefore(actions, spot.before);
         if (actions.hasAttribute("data-gs-float")) actions.removeAttribute("data-gs-float");
       } else {
         if (actions.parentElement !== doc.body) doc.body.append(actions);
         if (!actions.hasAttribute("data-gs-float")) actions.setAttribute("data-gs-float", "");
       }
+      const right = `${box?.width && floating ? Math.max(8, Math.round(win.innerWidth - box.left) + 8) : 8}px`;
+      if (actions.style.getPropertyValue("--gs-float-right") !== right) actions.style.setProperty("--gs-float-right", right);
+      return floating;
     }
-    function toggle(name) {
-      if (docked[name]) {
-        shown[name] = false;
-        layoutPrefs.set(shown);
+    function remount() {
+      if (!style.isConnected) doc.head.appendChild(style);
+      if (!column.isConnected) {
+        doc.body.append(column);
         layoutSig = null;
-        layout(true);
-      } else if (drawer === name) {
-        drawer = null;
-      } else {
-        if (!shown[name]) {
-          shown[name] = true;
-          layoutPrefs.set(shown);
-          layoutSig = null;
-          layout(true);
-        }
-        if (!docked[name]) drawer = name;
       }
-      applyVisibility();
     }
-    function layout(rescan = false) {
+    function toggle() {
+      if (docked) {
+        shown = !shown;
+        layoutPrefs.set(shown);
+      } else {
+        drawer = !drawer;
+      }
+      layoutSig = null;
+      layout(true);
+    }
+    function layout(rescan = false, settled = false) {
+      remount();
       let host = lastHost;
       if (!host || !host.pane.isConnected || !host.container.isConnected || host.outputs && !(host.outputs.section.isConnected && host.outputs.head.isConnected) || !host.pane.getBoundingClientRect().width) {
         const t = win.performance.now();
         if (rescan || t - scannedAt >= SCAN_MS) {
-          host = adapter.nativeSummary(doc);
+          host = adapter.nativeSummary(doc) ?? adapter.sidePane(doc);
           scannedAt = t;
         } else {
           host = null;
@@ -3598,41 +3750,50 @@ ${LAYOUT_CSS}`;
       }
       lastHost = host;
       syncOutputs(host);
-      placeButtons();
-      const want = ["minimap", "prompts"].filter((n) => shown[n]);
-      const options = want.length === 2 ? [want, ["prompts"], ["minimap"], []] : [want, []];
-      const key = `${railLayout.signature(host?.left)}|${want.join()}`;
+      const floating = placeButton(host?.pane);
+      const top = Math.max(Math.round(adapter.headerBottom(doc)), floating ? FLOAT_BOTTOM : 0) + 8;
+      const card = adapter.summaryCard(doc);
+      const paneOpen = !!host || !!card || adapter.summaryOpen(doc);
+      if (!paneOpen) paneYield = false;
+      else if (card && !card.inPage && !host) paneYield = true;
+      const conversation = els.length > 0;
+      if (paneOpen !== lastPaneOpen) {
+        lastPaneOpen = paneOpen;
+        if (settleTimer) win.clearTimeout(settleTimer);
+        settleTimer = win.setTimeout(() => {
+          settleTimer = null;
+          layoutSig = null;
+          if (!disposed) layout(true, true);
+        }, paneSettleMs);
+      }
+      const key = `${railLayout.signature()}|${shown}|${top}|${paneOpen}|${paneYield}|${conversation}`;
       if (key !== layoutSig) {
-        let chosen = [];
-        for (const option of options) {
-          const r = railLayout.evaluate({ left: option.includes("prompts") ? PANEL_WIDTH : 0, right: option.includes("minimap") ? PANEL_WIDTH : 0, paneLeft: host?.left });
-          if (r.docked || !option.length) {
-            chosen = option;
-            break;
-          }
-        }
-        docked = { minimap: chosen.includes("minimap"), prompts: chosen.includes("prompts") };
-        if (docked.minimap && drawer === "minimap") drawer = null;
-        if (docked.prompts && drawer === "prompts") drawer = null;
-        layoutSig = `${railLayout.signature(host?.left)}|${want.join()}`;
-        const edge = railLayout.edges(host?.left);
-        setVar("--gs-top", `${Math.max(0, Math.round(adapter.headerBottom(doc))) + 8}px`);
-        applyVars(edge);
+        const room = shown && conversation && !paneYield;
+        const r = railLayout.evaluate({ right: room ? PANEL_WIDTH : 0, force: room && !!host });
+        docked = room ? r.docked : !(shown && conversation);
+        if (docked) drawer = false;
+        layoutSig = key;
+        setVar("--gs-top", `${top}px`);
+        setVar("--gs-right", `${docked ? Math.max(PANEL_GAP, Math.round(win.innerWidth - railLayout.edge()) + PANEL_GAP) : 8}px`);
         applyVisibility();
+      }
+      if (settled && paneOpen && docked && shown && conversation) {
+        const box = host ? host.pane.getBoundingClientRect() : card;
+        const paneLeft = box?.left;
+        const paneRight = box?.right ?? Infinity;
+        const columnLeft = railLayout.edge() - PANEL_GAP - PANEL_WIDTH;
+        const t = els[0]?.getBoundingClientRect();
+        const c = adapter.composer(doc)?.getBoundingClientRect();
+        const contentRight = Math.max(t?.right ?? 0, c?.right ?? 0);
+        if (paneLeft != null && (contentRight > paneLeft - 4 || paneRight > columnLeft)) {
+          paneYield = true;
+          layoutSig = null;
+          scheduleLayout(true);
+        }
       }
       const rect = adapter.composer(doc)?.getBoundingClientRect();
       const clear = rect?.height ? `${Math.max(16, Math.round(win.innerHeight - rect.top + 8))}px` : "96px";
-      if (!docked.prompts && promptsPanel.style.getPropertyValue("--gs-bottom") !== clear) promptsPanel.style.setProperty("--gs-bottom", clear);
-      const mapBottom = docked.minimap ? "16px" : clear;
-      if (mapPanel.style.getPropertyValue("--gs-map-bottom") !== mapBottom) mapPanel.style.setProperty("--gs-map-bottom", mapBottom);
-    }
-    function applyVars(edge) {
-      const set = (name, prop, value) => {
-        if (panels[name].style.getPropertyValue(prop) !== value) panels[name].style.setProperty(prop, value);
-      };
-      set("minimap", "--gs-right", `${docked.minimap ? Math.max(PANEL_GAP, Math.round(win.innerWidth - edge.right) + PANEL_GAP) : 8}px`);
-      set("prompts", "--gs-left", `${docked.prompts ? Math.round(edge.left) + PANEL_GAP : 8}px`);
-      set("prompts", "--gs-bottom", "16px");
+      setVar("--gs-bottom", docked ? "16px" : clear);
     }
     function promptEnd(i) {
       return (prompts[i + 1]?.turnIndex ?? els.length) - 1;
@@ -3659,8 +3820,7 @@ ${LAYOUT_CSS}`;
       if (pv && pv.textContent !== d.preview) pv.textContent = d.preview;
     }
     function renderList() {
-      let shown2 = searchPrompts(prompts, query);
-      if (inViewOnly) shown2 = shown2.filter((p) => viewSet.has(p.id));
+      const shown2 = searchPrompts(prompts, query);
       list.textContent = "";
       if (!shown2.length) {
         const li = doc.createElement("li");
@@ -3717,7 +3877,6 @@ ${LAYOUT_CSS}`;
       const changed = next.size !== viewSet.size || [...next].some((id) => !viewSet.has(id));
       viewSet = next;
       if (!changed) return;
-      if (inViewOnly) return renderList();
       for (const b of list.querySelectorAll(".gs-prompt")) b.dataset.inView = String(viewSet.has(b.dataset.id));
     }
     function firstElementBelow(y) {
@@ -3774,8 +3933,8 @@ ${LAYOUT_CSS}`;
       const slice = els.slice(prompts[ext.i].turnIndex, promptEnd(ext.i) + 1);
       const turnBox = ext.a.getBoundingClientRect();
       const turnPx = ext.z.getBoundingClientRect().bottom - turnBox.top;
-      const contentWidth = Math.min(turnBox.width || CONTENT_W, CONTENT_W);
-      const key = `${activeId}:${slice.map((e) => e.textContent.length).join(",")}:${slice.every((e) => runtime.isTurnActive(e))}:${Math.round(turnPx / 20)}:${Math.round(turnBox.width / 8)}:${Math.round(minimap.getBoundingClientRect().width / 8)}:${Math.round(win.innerHeight / 8)}:${mapPanel.style.getPropertyValue("--gs-map-bottom")}`;
+      const contentWidth = Math.min((turnBox.width || CONTENT_W) + railLayout.reserve(), CONTENT_W);
+      const key = `${activeId}:${slice.map((e) => e.textContent.length).join(",")}:${slice.every((e) => runtime.isTurnActive(e))}:${Math.round(turnPx / 20)}:${Math.round(turnBox.width / 8)}:${Math.round(minimap.getBoundingClientRect().width / 8)}:${Math.round(win.innerHeight / 8)}:${Math.round(column.getBoundingClientRect().height / 8)}`;
       const now = win.performance.now();
       const throttled = key !== modelKey && modelKey !== "" && modelKey.startsWith(`${activeId}:`) && now - modelBuiltAt < 500 && !forceModel;
       if (throttled && !trailing) {
@@ -3792,12 +3951,14 @@ ${LAYOUT_CSS}`;
         bars.textContent = "";
         const items = silhouetteItems(ext, slice, turnBox.top, turnPx);
         const box = minimap.getBoundingClientRect();
-        const room = win.innerHeight - parseFloat(mapPanel.style.getPropertyValue("--gs-map-bottom") || "16") - (adapter.headerBottom(doc) + 8) - MAP_CHROME;
+        const room = (column.getBoundingClientRect().height || win.innerHeight - 76) * 0.55 - MAP_CHROME;
         const maxH = clamp2(Math.min(win.innerHeight * 0.45, room), 48, 360);
-        const scale = Math.min((box.width ? box.width - MAP_PAD : MAP_W) / contentWidth, maxH / Math.max(turnPx, 1));
-        const size = { w: `${Math.max(24, Math.round(contentWidth * scale))}px`, h: `${Math.max(8, Math.round(turnPx * scale))}px` };
-        if (frame.style.width !== size.w) frame.style.width = size.w;
-        if (frame.style.height !== size.h) frame.style.height = size.h;
+        const frameW = Math.round((box.width ? box.width - MAP_PAD : MAP_W) * FRAME_SHARE);
+        const scale = frameW / contentWidth;
+        geom = { sceneH: Math.max(8, Math.round(turnPx * scale)), frameH: 0 };
+        geom.frameH = Math.min(geom.sceneH, Math.round(frameW * PAPER), Math.round(maxH));
+        if (frame.style.height !== `${geom.frameH}px`) frame.style.height = `${geom.frameH}px`;
+        scene.style.height = `${geom.sceneH}px`;
         bars.style.setProperty("--gs-lh", `${Math.max(3, Math.min(8, 24 * scale)).toFixed(1)}px`);
         for (const b of items) {
           const d = doc.createElement("div");
@@ -3814,6 +3975,14 @@ ${LAYOUT_CSS}`;
         viewBottom: m.viewBottom
       });
       if (view.hidden !== !ind) view.hidden = !ind;
+      if (ind) {
+        const center = (ind.top + ind.height / 2) * geom.sceneH;
+        const next = Math.round(clamp2(center - geom.frameH / 2, 0, Math.max(0, geom.sceneH - geom.frameH)));
+        if (next !== mapOffset) {
+          mapOffset = next;
+          scene.style.transform = `translateY(${-next}px)`;
+        }
+      }
       const text = `Drag to navigate \u2022 ${ind ? Math.round(ind.visible * 100) : 0}% visible`;
       if (caption.textContent !== text) caption.textContent = text;
       if (ind) {
@@ -3853,6 +4022,11 @@ ${LAYOUT_CSS}`;
         markActive();
       }
       updateInView(m);
+      const drawable = turnExtent() !== null;
+      if (drawable !== hasMap) {
+        hasMap = drawable;
+        applyVisibility();
+      }
       renderMinimap(m);
       refreshLastPreview();
       persist(els.length ? bookmarkOf(m) : null);
@@ -3914,8 +4088,8 @@ ${LAYOUT_CSS}`;
       const ext = turnExtent();
       if (!ext) return;
       ensureRendered(ext);
-      const f = frame.getBoundingClientRect();
-      const r = f.height ? f : minimap.getBoundingClientRect();
+      const sc = scene.getBoundingClientRect();
+      const r = sc.height ? sc : minimap.getBoundingClientRect();
       const fraction = clamp2(r.height ? (clientY - r.top) / r.height : 0, 0, 1);
       scroll.scrollTo("minimap", scrollTopForFraction({ fraction, ...turnGeometry(ext), viewHeight: scrollerHeight() }));
     }
@@ -3979,20 +4153,14 @@ ${LAYOUT_CSS}`;
         e.stopPropagation();
       }
     });
-    for (const name of ["minimap", "prompts"]) {
-      on(buttons[name], "click", () => toggle(name));
-      on(panels[name].querySelector(".gs-collapse"), "click", () => {
-        toggle(name);
-        buttons[name].focus?.();
-      });
-      on(panels[name], "keydown", (e) => {
-        if (e.key === "Escape" && !docked[name] && drawer === name && !(name === "prompts" && input.value)) {
-          drawer = null;
-          applyVisibility();
-          buttons[name].focus?.();
-        }
-      });
-    }
+    on(button2, "click", () => toggle());
+    on(column, "keydown", (e) => {
+      if (e.key === "Escape" && !docked && drawer && !input.value) {
+        drawer = false;
+        applyVisibility();
+        button2.focus?.();
+      }
+    });
     on(outputsBtn, "click", (e) => {
       e.stopPropagation();
       outputsCollapsed = !outputsCollapsed;
@@ -4000,13 +4168,8 @@ ${LAYOUT_CSS}`;
       persist();
       savePrefs();
     });
-    on(filterBtn, "click", () => {
-      inViewOnly = !inViewOnly;
-      filterBtn.setAttribute("aria-pressed", String(inViewOnly));
-      renderList();
-      persist();
-    });
     on(win, "resize", () => {
+      paneYield = false;
       scheduleLayout(true);
       schedule();
     });
@@ -4027,24 +4190,29 @@ ${LAYOUT_CSS}`;
     update();
     const api = {
       element: mapPanel,
-      state: () => ({ activeId, docked: { ...docked }, outputsCollapsed, listPinned, query, reserve: railLayout.reserve() }),
+      state: () => ({ activeId, docked, outputsCollapsed, listPinned, query, reserve: railLayout.reserve() }),
       /** Structure only, safe to expose: no ids, search text or prompts. */
-      shape: () => ({ docked: { ...docked }, minimap: visible("minimap"), prompts: visible("prompts"), drawer, outputsCollapsible: !!outputsHost, outputsCollapsed, reserve: railLayout.reserve() }),
+      shape: () => ({ docked, open: open(), minimap: open() && hasMap, prompts: open(), drawer, outputsCollapsible: !!outputsHost, outputsCollapsed, reserve: railLayout.reserve() }),
       select: (id) => {
         const p = prompts.find((x) => x.id === id);
         if (p) select(p);
         return !!p;
       },
       update,
+      /** Cheap check on every page mutation batch: put back whatever ChatGPT's re-render removed (the column, the button, the style). */
+      heal() {
+        if (disposed) return;
+        if (!column.isConnected || !style.isConnected || !actions.isConnected || !actions.parentElement?.isConnected) scheduleLayout(true);
+      },
       dispose() {
         disposed = true;
         if (trailing) win.clearTimeout(trailing);
         if (scanTimer) win.clearTimeout(scanTimer);
+        if (settleTimer) win.clearTimeout(settleTimer);
         cleanups.forEach((fn) => fn());
         railLayout.dispose();
         releaseOutputs();
-        mapPanel.remove();
-        promptsPanel.remove();
+        column.remove();
         actions.remove();
         style.remove();
       }
@@ -4314,9 +4482,12 @@ ${LAYOUT_CSS}`;
       const runtime = createRuntime({ win: window, adapter: chatgptAdapter, backend: createTurnBackend(), queueUi });
       const rail = runtime.mode === "active" || runtime.mode === "composer-only" ? createRail({ win: window, adapter: chatgptAdapter, runtime, store: railState }) : null;
       pane = rail;
+      const thinking = config.expandThinking && runtime.mode === "active" ? createThinkingExpander({ win: window, adapter: chatgptAdapter, runtime, diagnostics: runtime.diagnostics }) : null;
       return {
         runtime,
+        heal: () => rail?.heal(),
         dispose() {
+          thinking?.dispose();
           rail?.dispose();
           if (pane === rail) pane = null;
           runtime.dispose();
