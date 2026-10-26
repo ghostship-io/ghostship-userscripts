@@ -868,9 +868,12 @@
     turnRoot: (doc) => scope(doc).querySelector(TURN_ROOT) ?? scope(doc).querySelector(TURN)?.parentElement ?? null,
     /** The element the queue panel is inserted directly before: the composer form, else the input itself. */
     composer: (doc) => scope(doc).querySelector(COMPOSER)?.closest("form") ?? scope(doc).querySelector(COMPOSER),
+    /** The active page element itself; it changes when ChatGPT switches to another mounted conversation page. */
+    pageElement: (doc) => scope(doc),
     /**
      * The conversation the active page itself says it holds (ChatGPT stamps its composer wrapper with it), or null when it
-     * declares none. The URL changes before the page behind it does, so a send is verified against both.
+     * declares none; `local-...` for a conversation started in this page. The URL changes before the page behind it does,
+     * so a send is verified against both.
      */
     pageConversationId: (doc) => scope(doc).querySelector("[data-map-composer-conversation]")?.getAttribute("data-map-composer-conversation") || null,
     /**
@@ -1440,6 +1443,17 @@ onmessage = (e) => {
     return { read, write, hasText };
   }
 
+  // src/chatgpt/queue/own-click.js
+  var ownClick = { active: false };
+  function clickAsOwn(click) {
+    ownClick.active = true;
+    try {
+      click();
+    } finally {
+      ownClick.active = false;
+    }
+  }
+
   // src/chatgpt/queue/live-dispatcher.js
   var norm = (text) => text.replace(/\s+/g, " ").trim();
   function createLiveDispatcher({
@@ -1452,9 +1466,10 @@ onmessage = (e) => {
       return () => win.clearTimeout(handle);
     } },
     settleMs = 600,
+    controlSettleMs = 450,
     sendWaitMs = 8e3,
     placeWaitMs = 1500,
-    steerWaitMs = 1500,
+    steerWaitMs = 600,
     ackMs = 6e3,
     stopWaitMs = 5e3,
     composerLostMs = 15e3,
@@ -1481,7 +1496,7 @@ onmessage = (e) => {
     const onTarget = (target) => {
       if (adapter.conversationId(win) !== target.conversationId || adapter.accountId(doc) !== target.accountId) return false;
       const held = adapter.pageConversationId?.(doc);
-      return held === null || held === void 0 || held === target.conversationId;
+      return held === null || held === void 0 || held === target.conversationId || held.startsWith("local-");
     };
     let arrival = null;
     const loaded = (target) => {
@@ -1490,7 +1505,8 @@ onmessage = (e) => {
         arrival = null;
         return false;
       }
-      if (arrival?.key !== key) arrival = { key, since: now() };
+      const page = adapter.pageElement(doc);
+      if (arrival?.key !== key || arrival.page !== page) arrival = { key, page, since: now() };
       return now() - arrival.since >= arriveMs;
     };
     const enabled = (button2) => button2 && !button2.disabled && button2.getAttribute("aria-disabled") !== "true" ? button2 : null;
@@ -1553,11 +1569,18 @@ onmessage = (e) => {
         return { failed: { kind: "rejected", code: "composer-fill-failed", message: "The text did not appear in the composer after several tries; nothing was sent.", action: "Check the composer, then press Retry, Steer or Interrupt & Send Next." } };
       }
       placeFailures.delete(key);
+      let enabledSince = null;
       const button2 = await waitFor(() => {
         if (!onTarget(target)) return "left";
         if (!allowGenerating && generating()) return "busy";
-        return enabled(control());
-      }, ms);
+        const found = enabled(control());
+        if (!found) {
+          enabledSince = null;
+          return null;
+        }
+        enabledSince ??= Date.now();
+        return Date.now() - enabledSince >= controlSettleMs ? found : null;
+      }, ms + controlSettleMs);
       if (button2 === "left") {
         unstage(text);
         return { failed: { kind: "wait", reason: "other-conversation" } };
@@ -1577,7 +1600,7 @@ onmessage = (e) => {
         return { kind: "wait", reason: "other-conversation" };
       }
       clicked.add(itemId);
-      button2.click();
+      clickAsOwn(() => button2.click());
       const evidence = await waitFor(() => {
         const input = adapter.composerInput(doc);
         return adapter.userTurnCount(doc) > turnsBefore || !steering && generating() || input !== null && io.read(input) === "";
@@ -2856,6 +2879,7 @@ onmessage = (e) => {
       void submitComposer("enter");
     }
     function onSubmit(event) {
+      if (ownClick.active) return;
       const input = adapter.composerInput(doc);
       if (!input || !event.target?.contains?.(input) || !hijacking()) return;
       event.preventDefault();
@@ -2863,7 +2887,7 @@ onmessage = (e) => {
       void submitComposer("submit");
     }
     function onClick(event) {
-      if (dispatching || !hijacking()) return;
+      if (ownClick.active || dispatching || !hijacking()) return;
       const hit = event.target?.closest?.("button");
       const input = adapter.composerInput(doc);
       if (!hit || !input || !hit.closest("form")?.contains(input)) return;

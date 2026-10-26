@@ -148,9 +148,12 @@ export const chatgptAdapter = {
   turnRoot: (doc) => scope(doc).querySelector(TURN_ROOT) ?? scope(doc).querySelector(TURN)?.parentElement ?? null,
   /** The element the queue panel is inserted directly before: the composer form, else the input itself. */
   composer: (doc) => scope(doc).querySelector(COMPOSER)?.closest("form") ?? scope(doc).querySelector(COMPOSER),
+  /** The active page element itself; it changes when ChatGPT switches to another mounted conversation page. */
+  pageElement: (doc) => scope(doc),
   /**
    * The conversation the active page itself says it holds (ChatGPT stamps its composer wrapper with it), or null when it
-   * declares none. The URL changes before the page behind it does, so a send is verified against both.
+   * declares none; `local-...` for a conversation started in this page. The URL changes before the page behind it does,
+   * so a send is verified against both.
    */
   pageConversationId: (doc) => scope(doc).querySelector("[data-map-composer-conversation]")?.getAttribute("data-map-composer-conversation") || null,
   /**

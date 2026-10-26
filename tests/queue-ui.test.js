@@ -18,7 +18,7 @@ async function mount({ page, factory = new IDBFactory(), clock = new ManualClock
   const { window } = page;
   const t = { now: 1_000_000 };
   dispatcher ??= live
-    ? createLiveDispatcher({ win: window, adapter: chatgptAdapter, pollMs: 1, arriveMs: 0, settleMs: 0, placeWaitMs: 15, sendWaitMs: 40, steerWaitMs: 15, ackMs: 40, stopWaitMs: 40, now: () => t.now, ...liveOptions })
+    ? createLiveDispatcher({ win: window, adapter: chatgptAdapter, pollMs: 1, arriveMs: 0, controlSettleMs: 0, settleMs: 0, placeWaitMs: 15, sendWaitMs: 40, steerWaitMs: 15, ackMs: 40, stopWaitMs: 40, now: () => t.now, ...liveOptions })
     : new DryRunDispatcher();
   const ui = createQueueUi({ win: window, adapter: chatgptAdapter, dispatcher, indexedDB: factory, clock, tabId, pollMs: 0, ...uiOptions });
   await ui.ready;
@@ -479,6 +479,39 @@ test("the route changes before the page does: a page that still holds another co
   t.page.holds("fixture");
   for (let i = 0; i < 3; i++) await t.tick();
   assert.deepEqual(t.page.sends(), ["send:for A"]);
+});
+
+test("a conversation started in this page keeps ChatGPT's local key under its server URL: it is trusted once the page has stayed the same, a different server conversation never is", async () => {
+  // Defect (found live): the page stamp stays `local-...` after the URL becomes the server id, which held every send of a new chat for good.
+  const t = await mount({ live: true, liveOptions: { arriveMs: 1200 } });
+  t.page.holds("local-chatgpt:6ade941c");
+  t.page.startStreaming();
+  await t.enter("second");
+  t.page.finishStreaming();
+  for (let i = 0; i < 2; i++) await t.tick();
+  assert.deepEqual(t.page.sends(), [], "a fresh page is still being verified");
+  for (let i = 0; i < 3; i++) await t.tick();
+  assert.deepEqual(t.page.sends(), ["send:second"], "the same page for over a second: trusted");
+
+  const other = await mount({ live: true, liveOptions: { arriveMs: 0 } });
+  other.page.holds("a-different-server-conversation");
+  other.page.startStreaming();
+  await other.enter("never");
+  other.page.finishStreaming();
+  for (let i = 0; i < 5; i++) await other.tick();
+  assert.deepEqual(other.page.log, []);
+  assert.match(status(other), /open/);
+});
+
+test("the dispatcher's own Send click submits ChatGPT's form and is never swallowed by the queue's own submit interception", async () => {
+  // Defect (found live): the click was accepted by the button but the form submit was intercepted as if the owner pressed Send, so nothing was sent.
+  const t = await mount({ live: true, page: await fakePage({ sendViaSubmit: true }) });
+  t.page.startStreaming();
+  await t.enter("through the form");
+  t.page.finishStreaming();
+  for (let i = 0; i < 4; i++) await t.tick();
+  assert.deepEqual(t.page.sends(), ["send:through the form"]);
+  assert.equal(t.queued(), null);
 });
 
 test("Send found by its label: ChatGPT's composer has no test ids, only a submit button called Send", async () => {

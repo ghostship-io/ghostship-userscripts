@@ -6,6 +6,7 @@ import { createObserverHub } from "../../core/observers.js";
 import { createWorkerTimers } from "../../core/worker-timer.js";
 import { createComposerIO } from "./composer.js";
 import { DispatchBoundary } from "./dispatch.js";
+import { ownClick } from "./own-click.js";
 import { QueueEngine } from "./queue.js";
 import { QueueStore } from "./store.js";
 import { createQueueMarkers } from "./markers.js";
@@ -308,6 +309,7 @@ export function createQueueUi({
 
   // A form submit that did not come from our Enter handler (a native Send / steer button).
   function onSubmit(event) {
+    if (ownClick.active) return; // the dispatcher's own Send click: let ChatGPT take it
     const input = adapter.composerInput(doc);
     if (!input || !event.target?.contains?.(input) || !hijacking()) return;
     event.preventDefault();
@@ -316,7 +318,7 @@ export function createQueueUi({
   }
 
   function onClick(event) {
-    if (dispatching || !hijacking()) return;
+    if (ownClick.active || dispatching || !hijacking()) return;
     const hit = event.target?.closest?.("button");
     const input = adapter.composerInput(doc);
     if (!hit || !input || !hit.closest("form")?.contains(input)) return;

@@ -6,7 +6,7 @@ import { loadFixture } from "./helpers.js";
 
 export const TARGET = { accountId: "unknown", conversationId: "fixture" };
 
-export async function fakePage({ editable = "textarea", acknowledges = true, stopWorks = true, steer = false, sendOnlyWithText = false, sendMissing = false, profile = null, sendLabel = false } = {}) {
+export async function fakePage({ editable = "textarea", acknowledges = true, stopWorks = true, steer = false, sendOnlyWithText = false, sendMissing = false, profile = null, sendLabel = false, armMs = 0, sendViaSubmit = false } = {}) {
   const dom = await loadFixture();
   const { window } = dom;
   const doc = window.document;
@@ -132,14 +132,23 @@ export async function fakePage({ editable = "textarea", acknowledges = true, sto
     if (!sendOnlyWithText || text().trim() !== "") page.mountSend();
     addTurn("assistant", "reply");
   };
+  if (sendViaSubmit) form.addEventListener("submit", () => page.act?.());
   page.mountSend = () => {
-    page.send = button("send-button", () => {
+    const mountedAt = Date.now();
+    const act = () => {
       if (page.send.disabled) return;
+      if (Date.now() - mountedAt < armMs) return page.log.push("ignored-click"); // ChatGPT's handler is not wired to the new state yet
       page.log.push(`send:${text().trim()}`);
       if (!acknowledges) return;
       addTurn("user", text().trim());
       clear();
       page.startStreaming();
+    };
+    // `sendViaSubmit`: the click only submits the form and the page acts on the submit event, as ChatGPT's own handler does.
+    page.act = act;
+    page.send = button("send-button", () => {
+      if (!sendViaSubmit) return act();
+      form.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
     });
     page.send.disabled = text().trim() === "";
   };

@@ -4,6 +4,7 @@
 // Waiting (a response is running or settling, Send is not there yet) is a normal answer, not a failure:
 // `readiness` and a not-ready `submit` consume nothing and nothing is retried by the dispatcher.
 import { createComposerIO } from "./composer.js";
+import { clickAsOwn } from "./own-click.js";
 
 const norm = (text) => text.replace(/\s+/g, " ").trim();
 
@@ -15,6 +16,7 @@ const norm = (text) => text.replace(/\s+/g, " ").trim();
  * @param {{once(fn: () => void, ms: number): () => void}} [o.timers] timers for the waits below; hidden-tab safe ones in the page
  * @param {number} [o.arriveMs] how long a conversation must have shown its turns before anything is sent into it
  * @param {number} [o.settleMs] how long the response must have been over before a send is staged
+ * @param {number} [o.controlSettleMs] how long Send / Steer must have stayed enabled before it is clicked (ChatGPT ignores a click that comes the instant its button appears: its handler still holds the old state)
  * @param {number} [o.sendWaitMs] how long to wait for native Send to enable once the text is in the composer
  * @param {number} [o.placeWaitMs] how long the composer gets to show the staged text (its editor applies input asynchronously)
  * @param {number} [o.steerWaitMs] how long to wait for a native steer control to appear before falling back
@@ -30,9 +32,10 @@ export function createLiveDispatcher({
   arriveMs = 1200,
   timers = { once: (fn, ms) => { const handle = win.setTimeout(fn, ms); return () => win.clearTimeout(handle); } },
   settleMs = 600,
+  controlSettleMs = 450,
   sendWaitMs = 8000,
   placeWaitMs = 1500,
-  steerWaitMs = 1500,
+  steerWaitMs = 600,
   ackMs = 6000,
   stopWaitMs = 5000,
   composerLostMs = 15_000,
@@ -61,11 +64,13 @@ export function createLiveDispatcher({
     });
 
   const generating = () => adapter.generating(doc);
-  // The URL changes before the page behind it does: the page's own conversation stamp must agree too.
+  // The URL changes before the page behind it does: the page's own conversation stamp must agree too. A conversation
+  // started in this very page keeps ChatGPT's local key (`local-...`) under its server URL, so that stamp cannot be
+  // compared with the URL; such a page is trusted only once it has stayed the same page for `arriveMs` (see `loaded`).
   const onTarget = (target) => {
     if (adapter.conversationId(win) !== target.conversationId || adapter.accountId(doc) !== target.accountId) return false;
     const held = adapter.pageConversationId?.(doc);
-    return held === null || held === undefined || held === target.conversationId;
+    return held === null || held === undefined || held === target.conversationId || held.startsWith("local-");
   };
   // A conversation just opened shows its turns before its response state (Stop, Steer, streaming) is known.
   // It counts as loaded once its own turns have been on the page for `arriveMs`.
@@ -76,7 +81,8 @@ export function createLiveDispatcher({
       arrival = null;
       return false;
     }
-    if (arrival?.key !== key) arrival = { key, since: now() };
+    const page = adapter.pageElement(doc);
+    if (arrival?.key !== key || arrival.page !== page) arrival = { key, page, since: now() };
     return now() - arrival.since >= arriveMs;
   };
   const enabled = (button) => (button && !button.disabled && button.getAttribute("aria-disabled") !== "true" ? button : null);
@@ -151,11 +157,18 @@ export function createLiveDispatcher({
       return { failed: { kind: "rejected", code: "composer-fill-failed", message: "The text did not appear in the composer after several tries; nothing was sent.", action: "Check the composer, then press Retry, Steer or Interrupt & Send Next." } };
     }
     placeFailures.delete(key);
+    let enabledSince = null;
     const button = await waitFor(() => {
       if (!onTarget(target)) return "left";
       if (!allowGenerating && generating()) return "busy";
-      return enabled(control());
-    }, ms);
+      const found = enabled(control());
+      if (!found) {
+        enabledSince = null;
+        return null;
+      }
+      enabledSince ??= Date.now();
+      return Date.now() - enabledSince >= controlSettleMs ? found : null;
+    }, ms + controlSettleMs);
     if (button === "left") {
       unstage(text);
       return { failed: { kind: "wait", reason: "other-conversation" } };
@@ -178,7 +191,7 @@ export function createLiveDispatcher({
       return { kind: "wait", reason: "other-conversation" };
     }
     clicked.add(itemId);
-    button.click();
+    clickAsOwn(() => button.click());
     const evidence = await waitFor(() => {
       const input = adapter.composerInput(doc);
       return adapter.userTurnCount(doc) > turnsBefore || (!steering && generating()) || (input !== null && io.read(input) === "");

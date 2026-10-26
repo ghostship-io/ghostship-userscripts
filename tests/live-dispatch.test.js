@@ -18,6 +18,7 @@ function dispatcherFor(page, opts = {}) {
     adapter: chatgptAdapter,
     pollMs: 1,
     arriveMs: 0,
+    controlSettleMs: 0,
     settleMs: 500,
     sendWaitMs: 40,
     steerWaitMs: 15,
@@ -358,4 +359,25 @@ test("text that truly never appears is waited out twice, then held; the hold nev
   page.finishStreaming();
   dispatcher.clock.t += 5_000;
   assert.equal((await engine.step(TARGET)).kind, "sent", "Retry then sends, no reload");
+});
+
+test("a Send that ChatGPT ignores for a moment after it appears is not clicked until it has stayed enabled; clicking at once is unacknowledged", async () => {
+  // Defect (found live): the click came 10 ms after Send appeared, ChatGPT did not submit, and the prompt went to review.
+  const eager = await fakePage({ armMs: 300 });
+  eager.startStreaming();
+  const a = await engineOn(eager, { controlSettleMs: 0, sendWaitMs: 2000, ackMs: 60 });
+  await a.engine.append(TARGET, { text: "too soon" });
+  eager.finishStreaming();
+  a.dispatcher.clock.t += 5_000;
+  assert.equal((await a.engine.step(TARGET)).kind, "manual-review", "an immediate click is ignored by the page");
+  assert.deepEqual(eager.log, ["ignored-click"]);
+
+  const patient = await fakePage({ armMs: 300 });
+  patient.startStreaming();
+  const b = await engineOn(patient, { controlSettleMs: 350, sendWaitMs: 2000, ackMs: 200 });
+  await b.engine.append(TARGET, { text: "waits" });
+  patient.finishStreaming();
+  b.dispatcher.clock.t += 5_000;
+  assert.equal((await b.engine.step(TARGET)).kind, "sent");
+  assert.deepEqual(patient.sends(), ["send:waits"]);
 });
