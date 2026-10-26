@@ -54,9 +54,9 @@ const CSS = `
 .gs-chevron{flex:0 0 auto;transition:transform .15s}
 [data-gs-outputs][data-gs-collapsed="true"] .gs-chevron{transform:rotate(-90deg)}
 .gs-minimap{position:relative;display:flex;justify-content:center;align-items:flex-start;flex:0 0 auto;min-height:56px;padding:8px;border:1px solid ${LINE};border-radius:12px;background:${PAGE};cursor:pointer;touch-action:none;overflow:hidden}
-.gs-frame{position:relative;flex:0 0 auto;width:72%;height:120px;overflow:hidden;border:1px solid ${INK};border-radius:4px;background:${PAGE}}
+.gs-frame{position:relative;flex:0 0 auto;width:72%;height:120px;overflow:hidden;border:1px solid ${INK};border-radius:4px;background:${SELECTED}}
 .gs-minimap:focus-visible,.gs-search input:focus-visible,.gs-prompt:focus-visible,.gs-hbtn:focus-visible,.gs-outputs-toggle:focus-visible{${FOCUS}}
-.gs-scene{position:absolute;top:0;left:0;right:0;height:100%}
+.gs-scene{position:absolute;top:0;left:0;right:0;height:100%;background:${PAGE}}
 .gs-bars{position:absolute;inset:0;--gs-lh:4px}
 .gs-bar{position:absolute;min-height:2px;border-radius:2px;pointer-events:none}
 .gs-bar[data-kind="text"]{background-image:linear-gradient(${INK_FAINT} 0 50%,transparent 50%);background-size:100% var(--gs-lh)}
@@ -65,7 +65,7 @@ const CSS = `
 .gs-bar[data-kind="table"]{border:1px solid ${INK};background-image:linear-gradient(${INK_FAINT} 0 1px,transparent 1px);background-size:100% calc(var(--gs-lh) * 2)}
 .gs-bar[data-kind="image"]{border:1px solid ${INK};background-color:${INK_FAINT}}
 .gs-bar[data-kind="prompt"]{border-radius:6px;background-color:${BUBBLE}}
-.gs-view{position:absolute;left:0;right:0;border:1px solid ${ACCENT};border-radius:4px;background:color-mix(in srgb,${ACCENT} 16%,transparent);pointer-events:none}
+.gs-view{position:absolute;left:0;right:0;min-height:3px;border:1px solid ${ACCENT};border-radius:4px;background:color-mix(in srgb,${ACCENT} 16%,transparent);pointer-events:none}
 .gs-caption{margin-top:8px;font-size:12px;line-height:16px;color:${MUTED}}
 .gs-search{display:flex;flex:0 0 auto;gap:6px;align-items:center;margin-bottom:8px}
 .gs-search-field{position:relative;flex:1 1 auto;min-width:0}
@@ -155,8 +155,6 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
   let restore = store.get(convId);
   let didRestore = false;
   let viewBox = "";
-  let geom = { sceneH: 1, frameH: 1 }; // the minimap's scene (the whole turn at the minimap's scale) and the frame it slides in, px
-  let mapOffset = 0; // how far the scene is slid up under the frame, px
   let bookmarkToRestore = null;
   let listTopToRestore = null;
   let outputsCollapsed = false;
@@ -666,7 +664,7 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
    * The turn's silhouette from its real rendered boxes: the prompt bubble, then each block of the reply at its
    * measured position and size. A turn the virtualizer skipped has no boxes, so its content is estimated instead.
    */
-  function silhouetteItems(ext, slice, top, height) {
+  function silhouetteItems(ext, slice, top, height, maxItems) {
     if (slice.every((e) => runtime.isTurnActive(e))) {
       const users = slice.map((t) => adapter.userMessage(t)).filter(Boolean);
       const boxes = [];
@@ -679,10 +677,10 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
         const kind = !users.some((u) => u.contains(el)) && blockKind(el);
         if (kind) add(kind, el);
       }
-      const items = silhouette(boxes, { top, bottom: top + height });
+      const items = silhouette(boxes, { top, bottom: top + height }, maxItems);
       if (items.length) return items;
     }
-    return layoutBars(buildTurnModel(adapter.blocks(slice)));
+    return layoutBars(buildTurnModel(adapter.blocks(slice)), maxItems);
   }
 
   function renderMinimap(m) {
@@ -710,20 +708,24 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
       modelKey = key;
       modelBuiltAt = now;
       bars.textContent = "";
-      const items = silhouetteItems(ext, slice, turnBox.top, turnPx);
-      // The frame always fills the track, so it reads as the conversation column at one fixed scale; the scene inside
-      // it is the whole turn at that scale and slides under the frame as the conversation scrolls (a short turn fits).
+      // The frame is always the same sheet of paper and fills the track, so it reads as the conversation column at one
+      // horizontal scale. The scene inside it is the WHOLE turn: a turn that fits is drawn at that scale, centered on the
+      // sheet with grayed bezels above and below; a longer one is squashed (vertically only, still the full width) until it
+      // fills the sheet, so a very long turn is dense but always entirely in view and the viewport box marks where the
+      // reading window sits in it.
       const box = minimap.getBoundingClientRect();
       const room = (column.getBoundingClientRect().height || win.innerHeight - 76) * 0.55 - MAP_CHROME; // the panel takes at most 55% of the column
       const maxH = clamp(Math.min(win.innerHeight * 0.45, room), 48, 360); // the panel grows with the conversation, up to this
       const frameW = Math.round((box.width ? box.width - MAP_PAD : MAP_W) * FRAME_SHARE);
-      const scale = frameW / contentWidth;
-      geom = { sceneH: Math.max(8, Math.round(turnPx * scale)), frameH: 0 };
-      geom.frameH = Math.min(geom.sceneH, Math.round(frameW * PAPER), Math.round(maxH)); // a sheet of paper, or the whole turn when it is shorter
-      if (frame.style.height !== `${geom.frameH}px`) frame.style.height = `${geom.frameH}px`;
-      scene.style.height = `${geom.sceneH}px`;
-      // One text line of the real conversation (about 24px), at the same scale (never finer than 3px).
-      bars.style.setProperty("--gs-lh", `${Math.max(3, Math.min(8, 24 * scale)).toFixed(1)}px`);
+      const natural = Math.max(8, Math.round(turnPx * (frameW / contentWidth))); // the turn at the minimap's horizontal scale
+      const frameH = Math.min(Math.round(frameW * PAPER), Math.round(maxH)); // a sheet of paper, whatever the turn
+      const sceneH = Math.min(natural, frameH);
+      if (frame.style.height !== `${frameH}px`) frame.style.height = `${frameH}px`;
+      scene.style.height = `${sceneH}px`;
+      scene.style.top = `${Math.round((frameH - sceneH) / 2)}px`;
+      // One text line of the real conversation (about 24px) at the vertical scale: finer when the turn is squashed, never under 2px.
+      bars.style.setProperty("--gs-lh", `${clamp((24 * sceneH) / Math.max(1, turnPx), 2, 8).toFixed(1)}px`);
+      const items = silhouetteItems(ext, slice, turnBox.top, turnPx, clamp(Math.round(sceneH / 2), 24, 120));
       for (const b of items) {
         const d = doc.createElement("div");
         d.className = "gs-bar";
@@ -739,15 +741,6 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
       viewBottom: m.viewBottom,
     });
     if (view.hidden !== !ind) view.hidden = !ind;
-    // The scene slides so the viewport box stays inside the frame (centered where the turn is longer than the frame).
-    if (ind) {
-      const center = (ind.top + ind.height / 2) * geom.sceneH;
-      const next = Math.round(clamp(center - geom.frameH / 2, 0, Math.max(0, geom.sceneH - geom.frameH)));
-      if (next !== mapOffset) {
-        mapOffset = next;
-        scene.style.transform = `translateY(${-next}px)`;
-      }
-    }
     // Only write on change: any DOM write under body re-triggers the prompt-index observer.
     const text = `Drag to navigate • ${ind ? Math.round(ind.visible * 100) : 0}% visible`;
     if (caption.textContent !== text) caption.textContent = text;
@@ -870,7 +863,7 @@ export function createRail({ win, adapter, runtime, store = createRailStateStore
     const ext = turnExtent();
     if (!ext) return;
     ensureRendered(ext);
-    const sc = scene.getBoundingClientRect(); // the whole turn, slid under the frame: a point on it is a point in the turn
+    const sc = scene.getBoundingClientRect(); // the whole turn fits the frame: a point on it is the same share of the turn
     const r = sc.height ? sc : minimap.getBoundingClientRect(); // the track around it clamps
     const fraction = clamp(r.height ? (clientY - r.top) / r.height : 0, 0, 1);
     scroll.scrollTo("minimap", scrollTopForFraction({ fraction, ...turnGeometry(ext), viewHeight: scrollerHeight() }));
