@@ -3,6 +3,7 @@ import { loadConfig } from "../core/config.js";
 import { createDiagnostics } from "../core/diagnostics.js";
 import { createRuntime } from "../core/runtime.js";
 import { chatgptAdapter } from "./adapter.js";
+import { createWorkerTimers } from "../core/worker-timer.js";
 import { selectDispatcher } from "./queue/select.js";
 import { createQueueUi } from "./queue/controller.js";
 import { persistentQueueUi } from "./queue/persistent.js";
@@ -14,9 +15,10 @@ import { createTurnBackend } from "./virtualization/backend.js";
 
 // Live by default; `config.dryRun` is an opt-in for testing (panel then shows "Dry run").
 // Persistent: re-initializing the page features must not drop pending items or an in-flight send.
-const queueUi = persistentQueueUi(({ win, adapter, diagnostics, config }) =>
-  createQueueUi({ win, adapter, diagnostics, dispatcher: selectDispatcher({ config, win, adapter }) }),
-);
+const queueUi = persistentQueueUi(({ win, adapter, diagnostics, config }) => {
+  const timers = createWorkerTimers({ win }); // hidden-tab safe timers, shared by the queue pass and the dispatcher's waits
+  return createQueueUi({ win, adapter, diagnostics, timers, dispatcher: selectDispatcher({ config, win, adapter, timers }) });
+});
 
 // Per-conversation rail state outlives each mount, so A -> B -> A restores A.
 const railState = createRailStateStore();

@@ -42,9 +42,20 @@ export class QueueEngine {
     return this.#store.read(async (tx) => this.#viewOf(await tx.getPending(key), await tx.getInflight(key), await tx.getState(key)));
   }
 
+  /** Ids of this account's conversations that hold a queued or unresolved prompt, whatever page is on screen. */
+  queuedConversations(accountId) {
+    return this.#store.read(async (tx) => {
+      const ids = new Set();
+      for (const record of [...(await tx.allPending()), ...(await tx.allInflight())]) {
+        if ((record.accountId === accountId || record.accountId === LEGACY_ACCOUNT) && record.conversationId !== "new") ids.add(record.conversationId);
+      }
+      return ids;
+    });
+  }
+
   #viewOf(pending, inflight, state) {
     const editing = state.editBy !== null && state.editUntil > this.#clock.now();
-    return { pending: pending ?? null, inflight: inflight ?? null, paused: state.paused === true, editing, editBy: editing ? state.editBy : null };
+    return { pending: pending ?? null, inflight: inflight ?? null, editing, editBy: editing ? state.editBy : null };
   }
 
   // ---- user-facing editing (any tab, no lease needed) -----------------------
@@ -172,14 +183,6 @@ export class QueueEngine {
     });
   }
 
-  pause(target) {
-    return this.#setPaused(target, true);
-  }
-
-  resume(target) {
-    return this.#setPaused(target, false);
-  }
-
   /** Lifts a hold the user has looked at; `dropAttachments` is the explicit consent to send without unrestorable files. */
   unblock(target, { dropAttachments = false } = {}) {
     const key = keyOf(target);
@@ -238,10 +241,6 @@ export class QueueEngine {
       if (inflight) {
         await tx.deleteInflight(legacy);
         await tx.putInflight({ ...inflight, key, accountId: target.accountId });
-      }
-      if (state.paused) {
-        await tx.putState({ ...state, key });
-        await tx.putState({ ...state, paused: false, editBy: null, editUntil: 0 });
       }
       return 1;
     });
@@ -338,14 +337,7 @@ export class QueueEngine {
     return run;
   }
 
-  #setPaused(target, paused) {
-    const key = keyOf(target);
-    return this.#store.transact(async (tx) => {
-      await tx.putState({ ...(await tx.getState(key)), paused });
-    });
-  }
-
-  /** Why nothing may be sent now, or null. `explicit` is a user action: pause does not stop it. */
+  /** Why nothing may be sent now, or null. `explicit` is a user action (Steer): it lifts a transient hold. */
   #gate(view, explicit) {
     const { pending, inflight } = view;
     if (inflight?.status === "manual-review") return { kind: "halted", itemId: inflight.id, status: "manual-review" };
@@ -357,7 +349,6 @@ export class QueueEngine {
       return { kind: "halted", itemId: pending.id, status: pending.status };
     }
     if (view.editing) return explicit ? { kind: "editing" } : { kind: "waiting", reason: "editing" };
-    if (view.paused && !explicit) return { kind: "paused" };
     return null;
   }
 

@@ -754,27 +754,38 @@
   }
 
   // src/chatgpt/adapter.js
-  var TURN = '[data-turn-key], [data-testid^="conversation-turn-"]';
+  var TURN_PRIMARY = '[data-turn-key], [data-testid^="conversation-turn-"]';
+  var TURN_FALLBACK = "article:has([data-message-author-role])";
+  var TURN = `${TURN_PRIMARY}, ${TURN_FALLBACK}`;
+  var turnSelector = (page) => page.querySelector(TURN_PRIMARY) ? TURN_PRIMARY : TURN_FALLBACK;
+  var turnEls = (page) => page.querySelectorAll(turnSelector(page));
+  var firstTurn = (page) => page.querySelector(turnSelector(page));
   var TURN_ROOT = '[data-thread-find-target="conversation"]';
   var ROLE = "[data-message-author-role]";
   var BLOCKS = "h1,h2,h3,h4,h5,h6,p,li,pre,table,img,blockquote";
   var USER = '[data-message-author-role="user"], [data-user-message-bubble]';
   var REPLY = "[data-conversation-role]";
-  var COMPOSER = '#prompt-textarea, [data-chatgpt-composer] [contenteditable="true"], form [contenteditable="true"][role="textbox"]';
+  var COMPOSERS = ['[contenteditable="true"][role="textbox"]', "#prompt-textarea", '[data-chatgpt-composer] [contenteditable="true"]', 'form [contenteditable="true"]', "form textarea"];
   var SEND = 'button[data-testid="send-button"]';
+  var SEND_LABEL = 'button[type="submit"][aria-label^="Send" i]';
   var STOP = 'button[data-testid="stop-button"]';
-  var STOP_FALLBACK = 'button[aria-label^="Stop" i]';
+  var STOP_LABEL = 'button[aria-label^="Stop" i]';
   var STREAMING = ".result-streaming, [data-is-streaming='true']";
   var STEER = 'button[data-testid="steer-button"], button[aria-label^="Steer" i]';
   var PROFILE = '[data-testid="accounts-profile-button"], [data-testid="profile-button"]';
   var ATTACHMENT = '[data-testid*="attachment" i], [data-testid*="file-thumbnail" i]';
   var SCROLLER = "[data-scroll-root], [data-app-action-timeline-scroll]";
-  var HEADER = "#page-header, header";
+  var HEADER = "#page-header, header, [role='banner']";
   var ASSISTANT = '[data-message-author-role="assistant"], [data-conversation-role="assistant"]';
   var SCROLLABLE = /* @__PURE__ */ new Set(["auto", "scroll", "overlay"]);
   var ABSOLUTE = /* @__PURE__ */ new Set(["absolute", "fixed"]);
+  var OWN_UI = "[data-gs-ui]";
   var ACTIVE_PAGE = '[data-app-shell-active-page="true"]';
   var scope = (root) => root.nodeType === 9 ? root.querySelector(ACTIVE_PAGE) ?? root : root;
+  var findComposer = (page) => {
+    for (const sel of COMPOSERS) for (const el2 of page.querySelectorAll(sel)) if (!el2.closest(OWN_UI) && !el2.closest(TURN)) return el2;
+    return null;
+  };
   var pageHeader = (doc) => {
     for (const h of scope(doc).querySelectorAll(HEADER)) {
       if (h.closest(OWN_UI) || h.closest(TURN)) continue;
@@ -789,7 +800,6 @@
   var SUMMARY_REGION = `aside,[role="complementary"],[role="region"],[aria-label*="summary" i],[data-testid*="summary" i],${SUMMARY_HINT}`;
   var BUTTONS = 'button,[role="button"]';
   var BUTTON_REGION = `aside,[role="complementary"],[role="region"],${SUMMARY_HINT}`;
-  var OWN_UI = "[data-gs-ui]";
   var SUMMARY_TOGGLE = 'button[data-thread-summary-panel-toggle="true"]';
   var THINKING_TITLE = /^(thought|worked|thinking|stopped thinking|reasoned)\b/i;
   var commonAncestor = (a, b) => {
@@ -816,17 +826,17 @@
     return null;
   }
   var chatgptAdapter = {
-    turns: (root) => [...scope(root).querySelectorAll(TURN)],
+    turns: (root) => [...turnEls(scope(root))],
     role: (turn) => nonEmptyRole(turn, ROLE, "data-message-author-role") ?? (turn.querySelector("[data-user-message-bubble]") ? "user" : nonEmptyRole(turn, REPLY, "data-conversation-role")),
-    blocks: (turnEls) => turnEls.flatMap((el2) => [...el2.querySelectorAll(BLOCKS)]),
+    blocks: (turnEls2) => turnEls2.flatMap((el2) => [...el2.querySelectorAll(BLOCKS)]),
     // Queue transport (live dispatcher): the editable composer input and its Send/Stop buttons.
-    composerInput: (doc) => scope(doc).querySelector(COMPOSER),
-    sendButton: (doc) => scope(doc).querySelector(SEND),
+    composerInput: (doc) => findComposer(scope(doc)),
+    sendButton: (doc) => findComposer(scope(doc))?.closest("form")?.querySelector(SEND_LABEL) ?? scope(doc).querySelector(SEND) ?? null,
     // Inside the composer form only: the queue card has its own Steer button, which must never be mistaken for it.
-    steerButton: (doc) => scope(doc).querySelector(COMPOSER)?.closest("form")?.querySelector(STEER) ?? null,
+    steerButton: (doc) => findComposer(scope(doc))?.closest("form")?.querySelector(STEER) ?? null,
     stopButton(doc) {
       const page = scope(doc);
-      return page.querySelector(STOP) ?? page.querySelector(COMPOSER)?.closest("form")?.querySelector(STOP_FALLBACK) ?? null;
+      return findComposer(page)?.closest("form")?.querySelector(STOP_LABEL) ?? page.querySelector(STOP) ?? null;
     },
     /**
      * A response is being produced: a Stop control is shown, the reply is still streaming, or the composer offers to steer it
@@ -852,7 +862,7 @@
     },
     /** Files on the message being composed; the queue cannot restore them, so it flags them. */
     composerAttachments(doc) {
-      const form = scope(doc).querySelector(COMPOSER)?.closest("form");
+      const form = findComposer(scope(doc))?.closest("form");
       return [...form?.querySelectorAll(ATTACHMENT) ?? []].map((node) => ({
         name: node.getAttribute("aria-label")?.slice(0, 80) || "attachment",
         size: 0,
@@ -864,9 +874,31 @@
     userMessage: (turn) => turn.querySelector(USER),
     turnId: (turn, index) => turn.getAttribute("data-turn-key") ?? turn.getAttribute("data-testid") ?? `turn-${index}`,
     /** The stable element whose subtree contains every turn; observed for new turns. */
-    turnRoot: (doc) => scope(doc).querySelector(TURN_ROOT) ?? scope(doc).querySelector(TURN)?.parentElement ?? null,
+    turnRoot: (doc) => scope(doc).querySelector(TURN_ROOT) ?? firstTurn(scope(doc))?.parentElement ?? null,
     /** The element the queue panel is inserted directly before: the composer form, else the input itself. */
-    composer: (doc) => scope(doc).querySelector(COMPOSER)?.closest("form") ?? scope(doc).querySelector(COMPOSER),
+    composer: (doc) => findComposer(scope(doc))?.closest("form") ?? findComposer(scope(doc)),
+    /** The active page element itself; it changes when ChatGPT switches to another mounted conversation page. */
+    pageElement: (doc) => scope(doc),
+    /**
+     * The conversation the active page itself says it holds (ChatGPT stamps its composer wrapper with it), or null when it
+     * declares none; `local-...` for a conversation started in this page. The URL changes before the page behind it does,
+     * so a send is verified against both.
+     */
+    pageConversationId: (doc) => scope(doc).querySelector("[data-map-composer-conversation]")?.getAttribute("data-map-composer-conversation") || null,
+    /**
+     * The sidebar's conversation rows (the sidebar is outside the page element): `{ id, link, host }`, where `host` is the
+     * element holding the row's title, which is where a marker goes.
+     */
+    sidebarLinks(doc) {
+      const out = [];
+      for (const link of doc.querySelectorAll('a[href*="/c/"]')) {
+        const id = link.getAttribute("href")?.match(/^(?:\/g\/[^/]+)?\/c\/([\w-]+)/)?.[1];
+        if (!id || link.closest(OWN_UI) || link.closest(TURN) || !link.closest("nav, [role='navigation']")) continue;
+        const title = link.querySelector("[data-thread-title]");
+        out.push({ id, link, host: title?.parentElement ?? link });
+      }
+      return out;
+    },
     conversationId: (win) => win.location.pathname.match(/^(?:\/g\/[^/]+)?\/c\/([\w-]+)/)?.[1] ?? "new",
     /**
      * The element that actually scrolls the conversation. The known selector is trusted unless a nearer
@@ -876,7 +908,7 @@
       const page = scope(doc);
       const known = page.querySelector(SCROLLER);
       const win = doc.defaultView;
-      for (let el2 = page.querySelector(TURN)?.parentElement; el2 && el2 !== doc.body && el2 !== doc.documentElement; el2 = el2.parentElement) {
+      for (let el2 = firstTurn(page)?.parentElement; el2 && el2 !== doc.body && el2 !== doc.documentElement; el2 = el2.parentElement) {
         if (el2 === known) break;
         if (SCROLLABLE.has(win.getComputedStyle(el2).overflowY) && el2.scrollHeight > el2.clientHeight && (!known || known.contains(el2))) return el2;
       }
@@ -890,7 +922,7 @@
       const composer = this.composer(doc);
       const scroller = this.scroller(doc);
       if (!composer || !scroller) return null;
-      if (!scope(doc).querySelector(TURN)) {
+      if (!firstTurn(scope(doc))) {
         const win = doc.defaultView;
         let node2 = composer;
         for (let up = node2.parentElement; up && up !== doc.body && up !== doc.documentElement; up = up.parentElement) {
@@ -1040,7 +1072,7 @@
      */
     thinkingToggles(doc) {
       const out = [];
-      scope(doc).querySelectorAll(TURN).forEach((turn, turnIndex) => {
+      turnEls(scope(doc)).forEach((turn, turnIndex) => {
         let nth = 0;
         for (const button2 of turn.querySelectorAll("button[aria-expanded]")) {
           if (button2.closest(OWN_UI) || !THINKING_TITLE.test((button2.textContent ?? "").trim())) continue;
@@ -1062,10 +1094,10 @@
     },
     /** Identity of the pieces the script attaches to; a change means the page re-rendered or navigated. */
     layout(doc, win) {
-      const first = scope(doc).querySelector(TURN);
+      const first = firstTurn(scope(doc));
       return {
         route: this.conversationId(win),
-        composer: scope(doc).querySelector(COMPOSER),
+        composer: findComposer(scope(doc)),
         container: first ? this.turnRoot(doc) : null,
         scroller: first ? this.scroller(doc) : null
       };
@@ -1077,7 +1109,7 @@
      */
     loadError(doc) {
       const page = scope(doc);
-      if (page.querySelector(TURN)) return null;
+      if (firstTurn(page)) return null;
       for (const control of page.querySelectorAll('button, a, [role="button"]')) {
         if (!RETRY_LABEL.test((control.textContent ?? "").trim())) continue;
         let card = control;
@@ -1092,13 +1124,134 @@
     /** `ok` means the composer is there (a new chat has no turns); `hasTurns` selects the full feature set. */
     selfCheck(doc) {
       const page = scope(doc);
-      const hasTurns = !!page.querySelector(TURN);
+      const hasTurns = !!firstTurn(page);
       const missing = [];
-      if (!page.querySelector(COMPOSER)) missing.push("composer");
+      if (!findComposer(page)) missing.push("composer");
       if (!hasTurns) missing.push("turns");
       return { ok: !missing.includes("composer"), hasTurns, missing };
     }
   };
+
+  // src/core/worker-timer.js
+  var SOURCE = `
+const live = new Map();
+onmessage = (e) => {
+  const m = e.data;
+  if (m.op === "clear") {
+    clearTimeout(live.get(m.id));
+    live.delete(m.id);
+  } else if (m.op === "once") {
+    live.set(m.id, setTimeout(() => { live.delete(m.id); postMessage(m.id); }, m.ms));
+  } else if (m.op === "every") {
+    live.set(m.id, setInterval(() => postMessage(m.id), m.ms));
+  }
+};`;
+  var IDLE_RELEASE_MS = 2e3;
+  function createWorkerTimers({ win, createWorker = blobWorker(win) }) {
+    const doc = win.document;
+    const entries = /* @__PURE__ */ new Map();
+    let worker = null;
+    let broken = false;
+    let releaseTimer = null;
+    let nextId = 0;
+    const open = () => {
+      if (worker || broken || !doc.hidden) return worker;
+      try {
+        worker = createWorker(SOURCE);
+        if (!worker) throw new Error("no worker");
+        worker.onmessage = (event) => {
+          const entry = entries.get(event.data);
+          if (!entry) return;
+          if (!entry.repeat) entries.delete(event.data);
+          entry.fn();
+        };
+        worker.onerror = () => fail();
+      } catch {
+        broken = true;
+        close();
+      }
+      return worker;
+    };
+    const close = () => {
+      worker?.terminate?.();
+      worker = null;
+    };
+    function fail() {
+      broken = true;
+      close();
+      for (const [id, entry] of entries) if (entry.handle === null) arm(id, entry, false);
+    }
+    function arm(id, entry, allowWorker) {
+      const w = allowWorker ? open() : null;
+      if (w) {
+        entry.handle = null;
+        w.postMessage({ op: entry.repeat ? "every" : "once", id, ms: entry.ms });
+      } else if (entry.repeat) {
+        entry.handle = win.setInterval(entry.fn, entry.ms);
+      } else {
+        entry.handle = win.setTimeout(() => {
+          entries.delete(id);
+          entry.fn();
+        }, entry.ms);
+      }
+    }
+    function add(fn, ms, repeat) {
+      win.clearTimeout(releaseTimer);
+      releaseTimer = null;
+      const id = ++nextId;
+      const entry = { fn, ms, repeat, handle: null };
+      entries.set(id, entry);
+      arm(id, entry, true);
+      return () => {
+        if (!entries.delete(id)) return;
+        if (entry.handle !== null) (repeat ? win.clearInterval : win.clearTimeout).call(win, entry.handle);
+        else worker?.postMessage({ op: "clear", id });
+        if (!entries.size && worker && !releaseTimer) {
+          releaseTimer = win.setTimeout(() => {
+            releaseTimer = null;
+            if (!entries.size) close();
+          }, IDLE_RELEASE_MS);
+        }
+      };
+    }
+    return {
+      /** Runs `fn` once after `ms`; returns the cancel function. */
+      once: (fn, ms) => add(fn, ms, false),
+      /** Runs `fn` every `ms` until cancelled. */
+      every: (fn, ms) => add(fn, ms, true),
+      /** True while a worker is carrying timers. */
+      get working() {
+        return worker !== null;
+      },
+      dispose() {
+        for (const [, entry] of entries) {
+          if (entry.handle !== null) (entry.repeat ? win.clearInterval : win.clearTimeout).call(win, entry.handle);
+        }
+        entries.clear();
+        win.clearTimeout(releaseTimer);
+        close();
+      }
+    };
+  }
+  function blobWorker(win) {
+    return (source) => {
+      if (typeof win.Worker !== "function" || typeof win.Blob !== "function" || typeof win.URL?.createObjectURL !== "function") return null;
+      const url = win.URL.createObjectURL(new win.Blob([source], { type: "text/javascript" }));
+      let made;
+      try {
+        made = new win.Worker(url);
+      } catch (error) {
+        win.URL.revokeObjectURL(url);
+        throw error;
+      }
+      const terminate = made.terminate.bind(made);
+      made.terminate = () => {
+        terminate();
+        win.URL.revokeObjectURL(url);
+      };
+      return made;
+    };
+  }
 
   // src/chatgpt/queue/dispatch.js
   var TIMED_OUT = Symbol("timed-out");
@@ -1299,16 +1452,33 @@
     return { read, write, hasText };
   }
 
+  // src/chatgpt/queue/own-click.js
+  var ownClick = { active: false };
+  function clickAsOwn(click) {
+    ownClick.active = true;
+    try {
+      click();
+    } finally {
+      ownClick.active = false;
+    }
+  }
+
   // src/chatgpt/queue/live-dispatcher.js
   var norm = (text) => text.replace(/\s+/g, " ").trim();
   function createLiveDispatcher({
     win,
     adapter,
     pollMs = 50,
+    arriveMs = 1200,
+    timers = { once: (fn, ms) => {
+      const handle = win.setTimeout(fn, ms);
+      return () => win.clearTimeout(handle);
+    } },
     settleMs = 600,
+    controlSettleMs = 450,
     sendWaitMs = 8e3,
     placeWaitMs = 1500,
-    steerWaitMs = 1500,
+    steerWaitMs = 600,
     ackMs = 6e3,
     stopWaitMs = 5e3,
     composerLostMs = 15e3,
@@ -1327,15 +1497,33 @@
         const hit = probe();
         if (hit) return resolve(hit);
         if (Date.now() - started >= ms) return resolve(null);
-        win.setTimeout(poll, pollMs);
+        timers.once(poll, pollMs);
       };
       poll();
     });
     const generating = () => adapter.generating(doc);
-    const onTarget = (target) => adapter.conversationId(win) === target.conversationId && adapter.accountId(doc) === target.accountId;
+    const onTarget = (target) => {
+      if (adapter.conversationId(win) !== target.conversationId || adapter.accountId(doc) !== target.accountId) return false;
+      const held = adapter.pageConversationId?.(doc);
+      return held === null || held === void 0 || held === target.conversationId || held.startsWith("local-");
+    };
+    let arrival = null;
+    const loaded = (target) => {
+      const key = `${target.accountId}:${target.conversationId}`;
+      if (adapter.turns(doc).length === 0) {
+        arrival = null;
+        return false;
+      }
+      const page = adapter.pageElement(doc);
+      if (arrival?.key !== key || arrival.page !== page) arrival = { key, page, since: now() };
+      return now() - arrival.since >= arriveMs;
+    };
     const enabled = (button2) => button2 && !button2.disabled && button2.getAttribute("aria-disabled") !== "true" ? button2 : null;
     function notReady(target, { allowGenerating = false, text = null } = {}) {
-      if (!onTarget(target)) return { state: "waiting", reason: "other-conversation" };
+      if (!onTarget(target)) {
+        arrival = null;
+        return { state: "waiting", reason: "other-conversation" };
+      }
       const input = adapter.composerInput(doc);
       if (!input) {
         composerMissingSince ??= now();
@@ -1350,6 +1538,7 @@
         return { state: "waiting", reason: "composer-missing" };
       }
       composerMissingSince = null;
+      if (!loaded(target)) return { state: "waiting", reason: "loading" };
       if (!allowGenerating) {
         if (generating()) {
           lastBusy = now();
@@ -1389,11 +1578,18 @@
         return { failed: { kind: "rejected", code: "composer-fill-failed", message: "The text did not appear in the composer after several tries; nothing was sent.", action: "Check the composer, then press Retry, Steer or Interrupt & Send Next." } };
       }
       placeFailures.delete(key);
+      let enabledSince = null;
       const button2 = await waitFor(() => {
         if (!onTarget(target)) return "left";
         if (!allowGenerating && generating()) return "busy";
-        return enabled(control());
-      }, ms);
+        const found = enabled(control());
+        if (!found) {
+          enabledSince = null;
+          return null;
+        }
+        enabledSince ??= Date.now();
+        return Date.now() - enabledSince >= controlSettleMs ? found : null;
+      }, ms + controlSettleMs);
       if (button2 === "left") {
         unstage(text);
         return { failed: { kind: "wait", reason: "other-conversation" } };
@@ -1413,7 +1609,7 @@
         return { kind: "wait", reason: "other-conversation" };
       }
       clicked.add(itemId);
-      button2.click();
+      clickAsOwn(() => button2.click());
       const evidence = await waitFor(() => {
         const input = adapter.composerInput(doc);
         return adapter.userTurnCount(doc) > turnsBefore || !steering && generating() || input !== null && io.read(input) === "";
@@ -1475,8 +1671,8 @@
   }
 
   // src/chatgpt/queue/select.js
-  function selectDispatcher({ config: config2, win, adapter }) {
-    return config2.dryRun ? new DryRunDispatcher() : createLiveDispatcher({ win, adapter });
+  function selectDispatcher({ config: config2, win, adapter, timers }) {
+    return config2.dryRun ? new DryRunDispatcher() : createLiveDispatcher({ win, adapter, timers });
   }
 
   // src/chatgpt/queue/types.js
@@ -1498,7 +1694,7 @@
 
   // src/chatgpt/queue/store.js
   var DB_NAME = "ghostship-chatgpt-queue";
-  var DB_VERSION = 2;
+  var DB_VERSION = 3;
   var LEGACY_ACCOUNT = "unknown";
   var keyOf = (target) => `${target.accountId}:${target.conversationId}`;
   function request(req) {
@@ -1535,6 +1731,7 @@
         }
         merge.push(row);
       }
+      if (paused.get(conversationId) && merge.length) needsDecision ??= "legacy-paused";
       if (uncertain) {
         out.inflight.push({
           key,
@@ -1575,7 +1772,6 @@
           ops: []
         });
       }
-      if (paused.get(conversationId) && (merge.length || uncertain)) out.state.push({ key, paused: true, editBy: null, editUntil: 0 });
     }
     return out;
   }
@@ -1583,11 +1779,28 @@
     if (code === "attachments-not-restorable") {
       return { code, message: `Cannot restore ${lost.map((a) => a.name).join(", ")}.`, action: "Reattach the files, then retry.", at: now };
     }
+    if (code === "legacy-paused") {
+      return { code, message: "This queue was paused before the queue was upgraded, so it is held.", action: "Press Retry to let it send.", at: now };
+    }
     return {
       code,
       message: "Some of these messages needed a decision before the queue was upgraded (a failed, blocked or uncertain send).",
       action: "Read the combined text, edit it if needed, then press Retry.",
       at: now
+    };
+  }
+  var heldRecord = (record, now) => ({ ...record, status: "blocked", version: record.version + 1, updatedAt: now, lastError: legacyError("legacy-paused", [], now) });
+  function holdPausedQueues(tx, now) {
+    const states = tx.objectStore("state").getAll();
+    states.onsuccess = () => {
+      for (const state of states.result) {
+        if (state.paused !== true) continue;
+        tx.objectStore("state").put({ ...state, paused: false });
+        const pending = tx.objectStore("pending").get(state.key);
+        pending.onsuccess = () => {
+          if (pending.result && pending.result.status === "pending") tx.objectStore("pending").put(heldRecord(pending.result, now));
+        };
+      }
     };
   }
   var Tx = class {
@@ -1614,7 +1827,7 @@
       return request(this.#tx.objectStore("inflight").delete(key));
     }
     async getState(key) {
-      return await request(this.#tx.objectStore("state").get(key)) ?? { key, paused: false, editBy: null, editUntil: 0 };
+      return await request(this.#tx.objectStore("state").get(key)) ?? { key, editBy: null, editUntil: 0 };
     }
     putState(state) {
       return request(this.#tx.objectStore("state").put(state));
@@ -1627,6 +1840,12 @@
     }
     deleteLease(key) {
       return request(this.#tx.objectStore("locks").delete(key));
+    }
+    allPending() {
+      return request(this.#tx.objectStore("pending").getAll());
+    }
+    allInflight() {
+      return request(this.#tx.objectStore("inflight").getAll());
     }
     pendingOf(conversationId) {
       return request(this.#tx.objectStore("pending").index("conversationId").getAll(conversationId));
@@ -1645,6 +1864,10 @@
       open.onupgradeneeded = (event) => {
         const db2 = open.result;
         const tx = open.transaction;
+        if (event.oldVersion >= 2) {
+          holdPausedQueues(tx, now());
+          return;
+        }
         const pending = db2.createObjectStore("pending", { keyPath: "key" });
         pending.createIndex("conversationId", "conversationId");
         const inflight = db2.createObjectStore("inflight", { keyPath: "key" });
@@ -1658,7 +1881,7 @@
           const migrated = migrateLegacy(rows.result, queues.result, now());
           for (const record of migrated.pending) tx.objectStore("pending").put(record);
           for (const record of migrated.inflight) tx.objectStore("inflight").put(record);
-          for (const record of migrated.state) tx.objectStore("state").put(record);
+          for (const record of migrated.state) tx.objectStore("state").put({ ...record, paused: false });
           db2.deleteObjectStore("queues");
           db2.deleteObjectStore("leases");
         };
@@ -1764,9 +1987,19 @@
       const key = keyOf(target);
       return this.#store.read(async (tx) => this.#viewOf(await tx.getPending(key), await tx.getInflight(key), await tx.getState(key)));
     }
+    /** Ids of this account's conversations that hold a queued or unresolved prompt, whatever page is on screen. */
+    queuedConversations(accountId) {
+      return this.#store.read(async (tx) => {
+        const ids = /* @__PURE__ */ new Set();
+        for (const record of [...await tx.allPending(), ...await tx.allInflight()]) {
+          if ((record.accountId === accountId || record.accountId === LEGACY_ACCOUNT) && record.conversationId !== "new") ids.add(record.conversationId);
+        }
+        return ids;
+      });
+    }
     #viewOf(pending, inflight, state) {
       const editing = state.editBy !== null && state.editUntil > this.#clock.now();
-      return { pending: pending ?? null, inflight: inflight ?? null, paused: state.paused === true, editing, editBy: editing ? state.editBy : null };
+      return { pending: pending ?? null, inflight: inflight ?? null, editing, editBy: editing ? state.editBy : null };
     }
     // ---- user-facing editing (any tab, no lease needed) -----------------------
     /**
@@ -1883,12 +2116,6 @@
         return { kind: "removed", record: pending };
       });
     }
-    pause(target) {
-      return this.#setPaused(target, true);
-    }
-    resume(target) {
-      return this.#setPaused(target, false);
-    }
     /** Lifts a hold the user has looked at; `dropAttachments` is the explicit consent to send without unrestorable files. */
     unblock(target, { dropAttachments = false } = {}) {
       const key = keyOf(target);
@@ -1944,10 +2171,6 @@
         if (inflight) {
           await tx.deleteInflight(legacy);
           await tx.putInflight({ ...inflight, key, accountId: target.accountId });
-        }
-        if (state.paused) {
-          await tx.putState({ ...state, key });
-          await tx.putState({ ...state, paused: false, editBy: null, editUntil: 0 });
         }
         return 1;
       });
@@ -2031,13 +2254,7 @@
       );
       return run;
     }
-    #setPaused(target, paused) {
-      const key = keyOf(target);
-      return this.#store.transact(async (tx) => {
-        await tx.putState({ ...await tx.getState(key), paused });
-      });
-    }
-    /** Why nothing may be sent now, or null. `explicit` is a user action: pause does not stop it. */
+    /** Why nothing may be sent now, or null. `explicit` is a user action (Steer): it lifts a transient hold. */
     #gate(view, explicit) {
       const { pending, inflight } = view;
       if (inflight?.status === "manual-review") return { kind: "halted", itemId: inflight.id, status: "manual-review" };
@@ -2047,7 +2264,6 @@
         return { kind: "halted", itemId: pending.id, status: pending.status };
       }
       if (view.editing) return explicit ? { kind: "editing" } : { kind: "waiting", reason: "editing" };
-      if (view.paused && !explicit) return { kind: "paused" };
       return null;
     }
     /** The dispatcher found the page unusable for a reason only the user can fix: hold the prompt, once. */
@@ -2239,42 +2455,84 @@
     };
   }
 
+  // src/chatgpt/queue/markers.js
+  var MARK = "data-gs-queued";
+  var STYLE_ID = "gs-queued-style";
+  var CSS = `[${MARK}]{display:inline-flex;flex:none;align-items:center;margin-left:6px;opacity:.8}
+[${MARK}] svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}`;
+  var ICON = ["M4 20l4-1 11-11-3-3L5 16z", "M14 7l3 3"];
+  function createQueueMarkers({ doc, adapter }) {
+    const ns = "http://www.w3.org/2000/svg";
+    const build = () => {
+      const mark = doc.createElement("span");
+      mark.setAttribute(MARK, "");
+      mark.setAttribute("data-gs-ui", "");
+      mark.setAttribute("role", "img");
+      mark.setAttribute("aria-label", "A message is queued in this conversation");
+      mark.title = "A message is queued in this conversation";
+      const svg = doc.createElementNS(ns, "svg");
+      svg.setAttribute("viewBox", "0 0 24 24");
+      svg.setAttribute("aria-hidden", "true");
+      for (const d of ICON) {
+        const path = doc.createElementNS(ns, "path");
+        path.setAttribute("d", d);
+        svg.append(path);
+      }
+      mark.append(svg);
+      return mark;
+    };
+    return {
+      /** Puts a marker on each listed conversation's row and takes it off every other row. */
+      sync(queued) {
+        if (queued.size && !doc.getElementById(STYLE_ID)) {
+          const style = doc.createElement("style");
+          style.id = STYLE_ID;
+          style.textContent = CSS;
+          doc.head.append(style);
+        }
+        const wanted = /* @__PURE__ */ new Map();
+        for (const row of adapter.sidebarLinks(doc)) if (queued.has(row.id)) wanted.set(row.host, row);
+        for (const mark of doc.querySelectorAll(`[${MARK}]`)) {
+          if (!wanted.has(mark.parentElement)) mark.remove();
+        }
+        for (const [host] of wanted) if (!host.querySelector(`:scope > [${MARK}]`)) host.append(build());
+      },
+      dispose() {
+        for (const mark of doc.querySelectorAll(`[${MARK}]`)) mark.remove();
+        doc.getElementById(STYLE_ID)?.remove();
+      }
+    };
+  }
+
   // src/chatgpt/queue/view.js
-  var STYLE_ID = "gs-queue-style";
-  var CSS = `
-.gs-q{box-sizing:border-box;width:100%;max-width:100%;min-width:0;margin:0 0 8px;padding:6px 8px;border:1px solid rgba(127,127,127,.3);border-radius:16px;background:var(--main-surface-secondary,rgba(127,127,127,.1));color:inherit;font:inherit;font-size:14px;line-height:1.35}
+  var STYLE_ID2 = "gs-queue-style";
+  var CSS2 = `
+.gs-q{box-sizing:border-box;width:100%;max-width:100%;min-width:0;margin:0 0 8px;padding:10px 12px 6px;border-radius:var(--radius-2xl,16px);background:var(--color-surface-elevated-secondary,var(--main-surface-secondary,rgba(127,127,127,.1)));box-shadow:var(--elevation-prominent,0 0 0 1px rgba(127,127,127,.3));color:inherit;font:inherit;font-size:14px;line-height:1.4}
 .gs-q[hidden]{display:none}
 .gs-q *{box-sizing:border-box;min-width:0}
-.gs-q svg{width:1.1em;height:1.1em;flex:none;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
-.gs-q button{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:32px;padding:4px 10px;border:1px solid rgba(127,127,127,.45);border-radius:10px;background:transparent;color:inherit;font:inherit;cursor:pointer}
-.gs-q button:hover:not(:disabled){background:rgba(127,127,127,.15)}
-.gs-q button:disabled{opacity:.45;cursor:not-allowed}
-.gs-q button:focus-visible{outline:2px solid #2563eb;outline-offset:1px}
-.gs-q-head{display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px}
-.gs-q-title{font-weight:600}
-.gs-q-status{opacity:.75;font-size:12px}
-.gs-q-badge{padding:1px 8px;border:1px solid currentColor;border-radius:999px;font-size:12px;opacity:.8}
+.gs-q svg{width:14px;height:14px;flex:none;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.gs-q button{display:inline-flex;align-items:center;justify-content:center;gap:4px;padding:2px 8px;border:0;border-radius:8px;background:transparent;color:inherit;font:inherit;font-size:12px;cursor:pointer}
+.gs-q button:hover:not(:disabled){background:rgba(127,127,127,.18)}
+.gs-q button:disabled{opacity:.4;cursor:not-allowed}
+.gs-q button:focus-visible{outline:2px solid currentColor;outline-offset:1px}
+.gs-q .gs-q-icon{width:24px;height:24px;padding:0;border-radius:999px}
+.gs-q-text{max-height:9em;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere}
+.gs-q-foot{display:flex;align-items:center;gap:2px;margin-top:4px}
+.gs-q-status{opacity:.65;font-size:12px}
+.gs-q-badge{margin-left:6px;padding:0 6px;border:1px solid currentColor;border-radius:999px;font-size:11px;opacity:.7}
 .gs-q-spacer{flex:1 1 0}
-.gs-q-actions{display:flex;flex-wrap:wrap;gap:6px}
-.gs-q .gs-q-primary{border-color:currentColor;font-weight:600}
-.gs-q-note{margin:6px 0 0;padding:6px 8px;border-radius:8px;border:1px solid rgba(127,127,127,.4);overflow-wrap:anywhere}
+.gs-q-actions{display:flex;gap:2px}
+.gs-q-note{margin:0 0 6px;padding:4px 8px;border-radius:8px;border:1px solid rgba(127,127,127,.4);font-size:13px;overflow-wrap:anywhere}
 .gs-q-note[role="alert"]{border-color:#b91c1c;color:#b91c1c}
-.gs-q-text{margin:6px 0 0;padding:6px 8px;max-height:9em;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;border-top:1px solid rgba(127,127,127,.18)}
-.gs-q-inflight{margin:6px 0 0;display:flex;flex-wrap:wrap;gap:6px 8px;align-items:center}
-@media (max-width:560px){
-.gs-q-actions{flex:1 1 100%}
-.gs-q-actions button{flex:1 1 auto}
-.gs-q button{min-height:36px}
-}
+.gs-q-inflight{margin:6px 0 0;display:flex;flex-wrap:wrap;gap:4px 6px;align-items:center}
+.gs-q-inflight button{border:1px solid rgba(127,127,127,.45)}
 `;
   var ICONS = {
-    interrupt: ["M5 5l7 7-7 7", "M13 5l7 7-7 7"],
     steer: ["M5 12h14", "M13 6l6 6-6 6"],
-    pause: ["M9 5v14", "M15 5v14"],
-    play: ["M7 5l12 7-12 7z"],
     trash: ["M4 7h16", "M9 7V4h6v3", "M6 7l1 13h10l1-13"],
     pencil: ["M4 20l4-1 11-11-3-3L5 16z", "M14 7l3 3"],
-    queue: ["M12 5v14", "M5 12h14"]
+    check: ["M5 12l5 5 9-10"],
+    close: ["M6 6l12 12", "M18 6L6 18"]
   };
   function icon(doc, name) {
     const ns = "http://www.w3.org/2000/svg";
@@ -2309,19 +2567,19 @@
     "send-unavailable": "Waiting for Send",
     "composer-has-draft": "Waiting for the composer to be empty",
     "composer-missing": "Waiting for ChatGPT",
+    "other-conversation": "Waiting for the conversation to open",
+    loading: "Waiting for the conversation to load",
     "unknown-state": "Waiting for ChatGPT",
     "unresolved-conversation": "Open the conversation to send",
     editing: "Editing"
   };
   function statusOf(model) {
     if (model.edit) return "Editing";
-    if (model.busy === "interrupting") return "Stopping the response";
     if (model.busy === "steering") return "Steering";
     if (model.inflight?.status === "sending") return "Sending";
     if (model.inflight?.status === "manual-review") return "Needs review";
     if (!model.pending) return null;
     if (model.pending.status === "blocked") return "Blocked";
-    if (model.paused) return "Paused";
     if (model.editingElsewhere) return "Being edited in another tab";
     return WAITING[model.waiting] ?? "Queued";
   }
@@ -2333,65 +2591,47 @@
     if (model.pending.status !== "pending" && model.pending.lastError?.code === "attachments-not-restorable") return "Send without the files or delete the prompt first.";
     return null;
   }
+  var iconButton = (doc, key, name, onClick, label, { disabled, title } = {}) => button(doc, key, icon(doc, name), onClick, { label, disabled, className: "gs-q-icon", title: title ?? label });
   function renderPanel(doc, root, model, on) {
     const { pending, inflight } = model;
-    const canQueue = model.generating && !model.edit;
-    const visible = pending || inflight || model.error || model.note || model.edit || canQueue && model.composerHasText;
+    const visible = pending || inflight || model.error || model.note || model.edit;
     root.hidden = !visible;
     if (!visible) {
       root.replaceChildren();
       return;
     }
     const blocker = actionBlocker(model);
-    const status = statusOf(model);
     const children = [];
-    const actions = [];
-    if (canQueue) {
-      actions.push(
-        button(doc, "head:queue", [icon(doc, "queue"), "Queue"], () => on.queueDraft(), {
-          label: "Add the composer text to the queued prompt",
-          disabled: !model.composerHasText || model.busy
-        })
-      );
-    }
-    if (model.edit) {
-      actions.push(
-        button(doc, "head:save", "Save", () => on.saveEdit(), { className: "gs-q-primary", label: "Save the edited prompt" }),
-        button(doc, "head:cancel", "Cancel", () => on.cancelEdit(), { label: "Cancel the edit" }),
-        button(doc, "head:delete", [icon(doc, "trash"), "Delete"], () => on.remove(), { label: "Delete the queued prompt", disabled: model.busy })
-      );
-    } else if (pending) {
-      actions.push(
-        button(doc, "head:edit", [icon(doc, "pencil"), "Edit"], () => on.startEdit(), { label: "Edit the queued prompt", disabled: model.busy || model.editingElsewhere }),
-        button(doc, "head:delete", [icon(doc, "trash"), "Delete"], () => on.remove(), { label: "Delete the queued prompt", disabled: model.busy }),
-        button(doc, "head:steer", [icon(doc, "steer"), "Steer"], () => on.steer(), {
-          label: "Steer: send the queued prompt now",
-          disabled: blocker !== null,
-          title: blocker
-        }),
-        button(doc, "head:interrupt", [icon(doc, "interrupt"), "Interrupt & Send Next"], () => on.interrupt(), {
-          className: "gs-q-primary",
-          disabled: blocker !== null,
-          title: blocker
-        }),
-        button(doc, "head:pause", [icon(doc, model.paused ? "play" : "pause"), model.paused ? "Resume" : "Pause"], () => on.togglePause(), {
-          label: model.paused ? "Resume the queue" : "Pause the queue"
-        })
-      );
-    }
-    children.push(
-      el(doc, "div", { class: "gs-q-head" }, [
-        el(doc, "span", { class: "gs-q-title" }, `Queue (${pending ? 1 : 0})`),
-        el(doc, "span", { class: "gs-q-status", role: "status", "aria-live": "polite" }, status),
-        model.dryRun ? el(doc, "span", { class: "gs-q-badge", title: "Dry run: nothing is sent to ChatGPT" }, "Dry run") : null,
-        el(doc, "span", { class: "gs-q-spacer" }),
-        el(doc, "div", { class: "gs-q-actions", role: "group", "aria-label": "Queue actions" }, actions)
-      ])
-    );
     const message = model.error ?? pending?.lastError ?? inflight?.lastError ?? (model.note ? { message: model.note, action: "" } : null);
     if (message) {
       const alert = Boolean(model.error ?? pending?.lastError ?? inflight?.lastError);
       children.push(el(doc, "p", { class: "gs-q-note", role: alert ? "alert" : "status", "data-gs-note": message.code }, `${message.message ?? ""} ${message.action ?? ""}`.trim()));
+    }
+    if (pending) children.push(el(doc, "div", { class: "gs-q-text", "data-gs-key": "queued-text", "data-id": pending.id, "data-version": pending.version }, pending.text));
+    const actions = [];
+    if (model.edit) {
+      actions.push(
+        iconButton(doc, "head:save", "check", () => on.saveEdit(), "Save the edited prompt"),
+        iconButton(doc, "head:cancel", "close", () => on.cancelEdit(), "Cancel the edit"),
+        iconButton(doc, "head:delete", "trash", () => on.remove(), "Delete the queued prompt", { disabled: model.busy })
+      );
+    } else if (pending) {
+      actions.push(
+        iconButton(doc, "head:edit", "pencil", () => on.startEdit(), "Edit the queued prompt", { disabled: model.busy || model.editingElsewhere }),
+        iconButton(doc, "head:delete", "trash", () => on.remove(), "Delete the queued prompt", { disabled: model.busy }),
+        iconButton(doc, "head:steer", "steer", () => on.steer(), "Steer: send the queued prompt now", { disabled: blocker !== null, title: blocker ?? "Steer: send the queued prompt now" })
+      );
+    }
+    const status = statusOf(model);
+    if (pending || status) {
+      children.push(
+        el(doc, "div", { class: "gs-q-foot" }, [
+          el(doc, "span", { class: "gs-q-status", role: "status", "aria-live": "polite" }, status),
+          model.dryRun ? el(doc, "span", { class: "gs-q-badge", title: "Dry run: nothing is sent to ChatGPT" }, "Dry run") : null,
+          el(doc, "span", { class: "gs-q-spacer" }),
+          el(doc, "div", { class: "gs-q-actions", role: "group", "aria-label": "Queue actions" }, actions)
+        ])
+      );
     }
     if (inflight?.status === "manual-review") {
       children.push(
@@ -2401,16 +2641,13 @@
         ])
       );
     }
-    if (pending) {
-      if (pending.status === "blocked") {
-        const files = pending.lastError?.code === "attachments-not-restorable";
-        children.push(
-          el(doc, "div", { class: "gs-q-inflight" }, [
-            files ? button(doc, "head:drop-files", "Send without files", () => on.unblock(true), { label: "Drop the files that cannot be restored and queue the text" }) : button(doc, "head:retry", "Retry", () => on.unblock(false), { label: "Try sending the queued prompt again" })
-          ])
-        );
-      }
-      children.push(el(doc, "div", { class: "gs-q-text", "data-gs-key": "queued-text", "data-id": pending.id, "data-version": pending.version }, pending.text));
+    if (pending?.status === "blocked") {
+      const files = pending.lastError?.code === "attachments-not-restorable";
+      children.push(
+        el(doc, "div", { class: "gs-q-inflight" }, [
+          files ? button(doc, "head:drop-files", "Send without files", () => on.unblock(true), { label: "Drop the files that cannot be restored and queue the text" }) : button(doc, "head:retry", "Retry", () => on.unblock(false), { label: "Try sending the queued prompt again" })
+        ])
+      );
     }
     root.replaceChildren(...children);
   }
@@ -2432,6 +2669,8 @@
     clock = systemClock,
     tabId = globalThis.crypto.randomUUID(),
     pollMs = 1e3,
+    hiddenPollMs = pollMs,
+    timers = createWorkerTimers({ win }),
     engineOptions = {},
     BroadcastChannelCtor = win.BroadcastChannel ?? globalThis.BroadcastChannel
   }) {
@@ -2454,7 +2693,6 @@
     const model = {
       pending: null,
       inflight: null,
-      paused: false,
       editingElsewhere: false,
       edit: null,
       // {target, input, baseVersion, baseText, draft}
@@ -2462,8 +2700,6 @@
       waiting: null,
       error: null,
       note: null,
-      generating: false,
-      composerHasText: false,
       dryRun: dispatcher.dryRun === true
     };
     let engine = null;
@@ -2473,15 +2709,19 @@
     let dispatching = false;
     let submitting = false;
     let timer = null;
+    let hiddenTicker = null;
+    let queuedIds = /* @__PURE__ */ new Set();
+    let queuedStale = true;
+    let lastGenerating = false;
     let ticks = 0;
     let reloadSeq = 0;
     let opSeq = 0;
     let dispatchChain = Promise.resolve();
     let actionChain = Promise.resolve();
-    if (!doc.getElementById(STYLE_ID)) {
+    if (!doc.getElementById(STYLE_ID2)) {
       const style = doc.createElement("style");
-      style.id = STYLE_ID;
-      style.textContent = CSS;
+      style.id = STYLE_ID2;
+      style.textContent = CSS2;
       doc.head.append(style);
     }
     const root = doc.createElement("section");
@@ -2506,8 +2746,8 @@
     const dispatch = chained("dispatch");
     let painted = null;
     function render(focusKey) {
-      const { pending, inflight, paused, editingElsewhere, edit, busy, waiting, error, note, generating, composerHasText, dryRun } = model;
-      const signature = JSON.stringify({ pending, inflight, paused, editingElsewhere, editing: edit?.baseVersion ?? null, busy, waiting, error, note, generating, composerHasText, dryRun });
+      const { pending, inflight, editingElsewhere, edit, busy, waiting, error, note, dryRun } = model;
+      const signature = JSON.stringify({ pending, inflight, editingElsewhere, editing: edit?.baseVersion ?? null, busy, waiting, error, note, dryRun });
       if (signature === painted && !focusKey) return;
       painted = signature;
       const active = doc.activeElement;
@@ -2517,6 +2757,16 @@
       const wanted = root.querySelector(`[data-gs-key="${CSS_ESCAPE(key)}"]`);
       (wanted && !wanted.disabled ? wanted : root.querySelector("button:not(:disabled)"))?.focus({ preventScroll: true });
     }
+    const markers = createQueueMarkers({ doc, adapter });
+    async function refreshQueued() {
+      queuedStale = false;
+      try {
+        queuedIds = await engine.queuedConversations(target.accountId);
+      } catch {
+        queuedStale = true;
+      }
+    }
+    const paintMarkers = () => markers.sync(queuedIds);
     const notify = () => {
       try {
         channel?.postMessage({ from: tabId, key: `${target.accountId}:${target.conversationId}` });
@@ -2530,17 +2780,14 @@
       if (seq !== reloadSeq || asked !== target) return;
       model.pending = view.pending;
       model.inflight = view.inflight;
-      model.paused = view.paused;
       model.editingElsewhere = view.editing && view.editBy !== tabId;
       if (!view.pending) model.waiting = null;
       if (!view.pending && !view.inflight && !model.edit) model.error = null;
       if (model.edit && !view.pending) endEditLocally("gone");
+      await refreshQueued();
+      paintMarkers();
+      syncHidden();
       render();
-    }
-    function readDom() {
-      model.generating = adapter.generating(doc);
-      const input = adapter.composerInput(doc);
-      model.composerHasText = Boolean(input) && io.hasText(input);
     }
     function endEditLocally(why) {
       const edit = model.edit;
@@ -2643,7 +2890,7 @@
       const input = adapter.composerInput(doc);
       return input && event.target instanceof win.Node && (input === event.target || input.contains(event.target));
     };
-    const hijacking = () => dispatching || model.edit !== null || adapter.generating(doc) && target.conversationId !== "new";
+    const hijacking = () => dispatching || model.edit !== null || target.conversationId !== "new" && (adapter.generating(doc) || model.pending !== null || model.inflight !== null);
     function onKeydown(event) {
       if (!inComposer(event)) return;
       if (event.key === "Escape" && model.edit) {
@@ -2659,6 +2906,7 @@
       void submitComposer("enter");
     }
     function onSubmit(event) {
+      if (ownClick.active) return;
       const input = adapter.composerInput(doc);
       if (!input || !event.target?.contains?.(input) || !hijacking()) return;
       event.preventDefault();
@@ -2666,7 +2914,7 @@
       void submitComposer("submit");
     }
     function onClick(event) {
-      if (dispatching || !hijacking()) return;
+      if (ownClick.active || dispatching || !hijacking()) return;
       const hit = event.target?.closest?.("button");
       const input = adapter.composerInput(doc);
       if (!hit || !input || !hit.closest("form")?.contains(input)) return;
@@ -2675,17 +2923,9 @@
       event.stopImmediatePropagation();
       void submitComposer("button");
     }
-    function onInput(event) {
-      if (!inComposer(event)) return;
-      if (!model.generating && !model.composerHasText && !adapter.generating(doc)) return;
-      const had = model.composerHasText;
-      readDom();
-      if (had !== model.composerHasText) render();
-    }
     win.addEventListener("keydown", onKeydown, true);
     win.addEventListener("submit", onSubmit, true);
     win.addEventListener("click", onClick, true);
-    win.addEventListener("input", onInput, true);
     const outcomeNote = (outcome) => {
       if (outcome.kind === "interrupt-failed") return { message: outcome.error.message, action: outcome.error.action };
       if (outcome.kind === "rejected") return { message: outcome.error.message, action: outcome.error.action };
@@ -2701,7 +2941,7 @@
       model.busy = busy;
       model.error = null;
       model.note = null;
-      render(busy === "interrupting" ? "head:interrupt" : "head:steer");
+      render("head:steer");
       return dispatch(async () => {
         try {
           const outcome = await run(t);
@@ -2717,7 +2957,6 @@
       });
     };
     const handlers = {
-      queueDraft: () => submitComposer("button"),
       startEdit: () => act(startEdit),
       saveEdit: () => act(saveEdit),
       cancelEdit: () => act(cancelEdit),
@@ -2730,11 +2969,6 @@
           io.write(edit.input, edit.draft);
         }
         await engine.remove(t);
-        await reload();
-        notify();
-      }),
-      togglePause: () => act(async () => {
-        await (model.paused ? engine.resume(target) : engine.pause(target));
         await reload();
         notify();
       }),
@@ -2753,8 +2987,7 @@
         await reload();
         notify();
       }),
-      steer: explicit("steering", (t) => engine.steer(t, { native: true })),
-      interrupt: explicit("interrupting", (t) => engine.steer(t, { native: false }))
+      steer: explicit("steering", (t) => engine.steer(t, { native: true }))
     };
     async function followNavigation() {
       const now = targetNow();
@@ -2763,7 +2996,7 @@
       if (model.edit) endEditLocally("cancel");
       await engine.release(previous).catch(() => void 0);
       target = now;
-      Object.assign(model, { pending: null, inflight: null, paused: false, editingElsewhere: false, waiting: null, error: null, note: null });
+      Object.assign(model, { pending: null, inflight: null, editingElsewhere: false, waiting: null, error: null, note: null });
       await engine.adoptLegacy(now).catch(() => 0);
       ticks = RELOAD_EVERY;
       return true;
@@ -2772,7 +3005,7 @@
       return dispatch(async () => {
         if (!engine || model.busy) return;
         await followNavigation();
-        readDom();
+        paintMarkers();
         const home = adapter.composer(doc);
         if (home && (!root.isConnected || root.nextElementSibling !== home)) home.before(root);
         if (model.edit && !await engine.renewEdit(model.edit.target)) endEditLocally("gone");
@@ -2798,6 +3031,45 @@
         }
       });
     }
+    let waking = false;
+    let again = false;
+    function wake() {
+      if (disposed || !engine) return;
+      if (waking) {
+        again = true;
+        return;
+      }
+      waking = true;
+      void tick().finally(() => {
+        waking = false;
+        if (again) {
+          again = false;
+          wake();
+        }
+      });
+    }
+    const hub = createObserverHub({ max: 1, MutationObserverCtor: win.MutationObserver, schedule: (fn) => Promise.resolve().then(fn) });
+    let unobserve = null;
+    function syncHidden() {
+      const want = doc.hidden === true && Boolean(model.pending || model.inflight) && !disposed;
+      if (want && !hiddenTicker && hiddenPollMs > 0) hiddenTicker = timers.every(wake, hiddenPollMs);
+      else if (!want && hiddenTicker) hiddenTicker(), hiddenTicker = null;
+      if (want && !unobserve && doc.body) {
+        lastGenerating = adapter.generating(doc);
+        unobserve = hub.subscribe(doc.body, () => {
+          const now = adapter.generating(doc);
+          if (lastGenerating && !now) wake();
+          lastGenerating = now;
+        }, { childList: true, subtree: true, attributes: true, attributeFilter: ["class", "disabled", "data-is-streaming"] });
+      } else if (!want && unobserve) unobserve(), unobserve = null;
+    }
+    const onVisibility = () => {
+      syncHidden();
+      if (doc.hidden !== true) wake();
+    };
+    doc.addEventListener("visibilitychange", onVisibility);
+    win.addEventListener("focus", wake);
+    win.addEventListener("pageshow", wake);
     const ready = QueueStore.open(indexedDB, void 0, () => clock.now()).then(async (opened) => {
       if (disposed) return opened.close();
       store = opened;
@@ -2813,14 +3085,15 @@
         channel?.unref?.();
         if (channel) {
           channel.onmessage = (event) => {
-            if (event.data?.from !== tabId && event.data?.key === `${target.accountId}:${target.conversationId}`) void act(reload);
+            if (event.data?.from === tabId) return;
+            if (event.data?.key === `${target.accountId}:${target.conversationId}`) void act(reload);
+            else void act(async () => (await refreshQueued(), paintMarkers()));
           };
         }
       } catch {
         channel = null;
       }
       await engine.adoptLegacy(target).catch(() => 0);
-      readDom();
       await act(reload);
       if (pollMs > 0) timer = win.setInterval(tick, pollMs);
     });
@@ -2837,18 +3110,28 @@
       root,
       ready,
       tick,
+      /** Runs the background pass now (coalesced); called on route changes, focus and visibility changes. */
+      wake,
       /** Resolves when every queued UI action and dispatch pass has finished. */
       settled: () => Promise.all([actionChain, dispatchChain]).then(() => void 0),
       dispose() {
         disposed = true;
         if (timer) win.clearInterval(timer);
-        for (const [name, fn] of [["keydown", onKeydown], ["submit", onSubmit], ["click", onClick], ["input", onInput], ["pagehide", onPageHide]]) {
+        hiddenTicker?.();
+        unobserve?.();
+        hub.disposeAll();
+        doc.removeEventListener("visibilitychange", onVisibility);
+        win.removeEventListener("focus", wake);
+        win.removeEventListener("pageshow", wake);
+        markers.dispose();
+        timers.dispose();
+        for (const [name, fn] of [["keydown", onKeydown], ["submit", onSubmit], ["click", onClick], ["pagehide", onPageHide]]) {
           win.removeEventListener(name, fn, name === "pagehide" ? void 0 : true);
         }
         if (model.edit) endEditLocally("cancel");
         channel?.close();
         root.remove();
-        doc.getElementById(STYLE_ID)?.remove();
+        doc.getElementById(STYLE_ID2)?.remove();
         engine?.release(target).catch(() => void 0).finally(() => store?.close());
       }
     };
@@ -2860,6 +3143,7 @@
     let shared = null;
     const mount = (ctx) => {
       if (!shared?.mounted) shared = create(ctx);
+      else shared.wake?.();
       return { ...shared, dispose() {
       } };
     };
@@ -3365,7 +3649,7 @@
   }
 
   // src/chatgpt/rail/rail.js
-  var STYLE_ID2 = "gs-pane-style";
+  var STYLE_ID3 = "gs-pane-style";
   var SURFACE = "var(--color-surface-elevated-secondary,Canvas)";
   var PAGE = "var(--color-surface,Canvas)";
   var TEXT = "var(--color-text,CanvasText)";
@@ -3382,7 +3666,7 @@
   var FOCUS = "outline:2px solid var(--color-border-strong,currentColor);outline-offset:-2px";
   var CHEVRON = '<svg class="gs-chevron" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>';
   var PANELS_ICON = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M8.5 8h7M8.5 11.5h7M8.5 15h4"/></svg>';
-  var CSS2 = `
+  var CSS3 = `
 .gs-rail{position:fixed;z-index:30;top:var(--gs-top,60px);right:var(--gs-right,12px);bottom:var(--gs-bottom,16px);display:flex;flex-direction:column;gap:12px;width:min(${PANEL_WIDTH}px,calc(100vw - 16px));box-sizing:border-box;pointer-events:none}
 .gs-rail[hidden]{display:none}
 .gs-panel{display:flex;flex:0 1 auto;flex-direction:column;min-height:0;box-sizing:border-box;border-radius:var(--radius-2xl,16px);background:${SURFACE};box-shadow:${RING};color:${TEXT};font:inherit;font-size:14px;line-height:20px;overflow:hidden;pointer-events:auto}
@@ -3504,8 +3788,8 @@ ${LAYOUT_CSS}`;
     let outputsHost = null;
     const described = /* @__PURE__ */ new Map();
     const style = doc.createElement("style");
-    style.id = STYLE_ID2;
-    style.textContent = CSS2;
+    style.id = STYLE_ID3;
+    style.textContent = CSS3;
     doc.head.appendChild(style);
     const panel = (name, label, inner) => {
       const el2 = doc.createElement("section");
@@ -4223,8 +4507,8 @@ ${LAYOUT_CSS}`;
   // src/chatgpt/virtualization/backend.js
   var STATE = "data-gs-state";
   var HEIGHT_VAR = "--gs-h";
-  var STYLE_ID3 = "gs-virtualization-style";
-  var CSS3 = `
+  var STYLE_ID4 = "gs-virtualization-style";
+  var CSS4 = `
 [data-gs-scroller]{overflow-anchor:none}
 [${STATE}="inactive"]{content-visibility:hidden;contain-intrinsic-block-size:var(${HEIGHT_VAR})}
 `;
@@ -4290,8 +4574,8 @@ ${LAYOUT_CSS}`;
     const observed = /* @__PURE__ */ new Set();
     const stats = { syncs: 0, pinned: 0 };
     const style = doc.createElement("style");
-    style.id = STYLE_ID3;
-    style.textContent = CSS3;
+    style.id = STYLE_ID4;
+    style.textContent = CSS4;
     doc.head.appendChild(style);
     scroller.setAttribute("data-gs-scroller", "");
     const turnOf = /* @__PURE__ */ new Map();
@@ -4461,9 +4745,10 @@ ${LAYOUT_CSS}`;
   }
 
   // src/chatgpt/main.js
-  var queueUi = persistentQueueUi(
-    ({ win, adapter, diagnostics, config: config2 }) => createQueueUi({ win, adapter, diagnostics, dispatcher: selectDispatcher({ config: config2, win, adapter }) })
-  );
+  var queueUi = persistentQueueUi(({ win, adapter, diagnostics, config: config2 }) => {
+    const timers = createWorkerTimers({ win });
+    return createQueueUi({ win, adapter, diagnostics, timers, dispatcher: selectDispatcher({ config: config2, win, adapter, timers }) });
+  });
   var railState = createRailStateStore();
   var pane = null;
   var config = loadConfig(window.localStorage);

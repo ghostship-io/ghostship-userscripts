@@ -17,6 +17,8 @@ function dispatcherFor(page, opts = {}) {
     win: page.window,
     adapter: chatgptAdapter,
     pollMs: 1,
+    arriveMs: 0,
+    controlSettleMs: 0,
     settleMs: 500,
     sendWaitMs: 40,
     steerWaitMs: 15,
@@ -328,7 +330,7 @@ test("a different draft is still a draft: the composer holding other text is nev
 });
 
 test("text that truly never appears is waited out twice, then held; the hold never stops Steer, and Retry works without a reload", async () => {
-  // Defect: a Blocked prompt with Steer and Pause disabled that only a page reload could clear.
+  // Defect: a Blocked prompt with Steer disabled that only a page reload could clear.
   const page = await fakePage({ editable: "contenteditable", sendOnlyWithText: true });
   page.fill = "never";
   const { engine, dispatcher } = await engineOn(page, { placeWaitMs: 15 });
@@ -344,7 +346,6 @@ test("text that truly never appears is waited out twice, then held; the hold nev
   assert.deepEqual(page.log, []);
 
   page.fill = "now"; // the page recovers
-  await engine.pause(TARGET); // pausing a blocked prompt works
   const steered = await engine.steer(TARGET, { native: false });
   assert.equal(steered.kind, "sent", "an explicit Steer lifts the hold");
   assert.deepEqual(page.sends(), ["send:x"]);
@@ -355,8 +356,28 @@ test("text that truly never appears is waited out twice, then held; the hold nev
   assert.equal((await engine.view(TARGET)).pending.status, "blocked");
   page.fill = "now";
   await engine.unblock(TARGET);
-  await engine.resume(TARGET);
   page.finishStreaming();
   dispatcher.clock.t += 5_000;
   assert.equal((await engine.step(TARGET)).kind, "sent", "Retry then sends, no reload");
+});
+
+test("a Send that ChatGPT ignores for a moment after it appears is not clicked until it has stayed enabled; clicking at once is unacknowledged", async () => {
+  // Defect (found live): the click came 10 ms after Send appeared, ChatGPT did not submit, and the prompt went to review.
+  const eager = await fakePage({ armMs: 300 });
+  eager.startStreaming();
+  const a = await engineOn(eager, { controlSettleMs: 0, sendWaitMs: 2000, ackMs: 60 });
+  await a.engine.append(TARGET, { text: "too soon" });
+  eager.finishStreaming();
+  a.dispatcher.clock.t += 5_000;
+  assert.equal((await a.engine.step(TARGET)).kind, "manual-review", "an immediate click is ignored by the page");
+  assert.deepEqual(eager.log, ["ignored-click"]);
+
+  const patient = await fakePage({ armMs: 300 });
+  patient.startStreaming();
+  const b = await engineOn(patient, { controlSettleMs: 350, sendWaitMs: 2000, ackMs: 200 });
+  await b.engine.append(TARGET, { text: "waits" });
+  patient.finishStreaming();
+  b.dispatcher.clock.t += 5_000;
+  assert.equal((await b.engine.step(TARGET)).kind, "sent");
+  assert.deepEqual(patient.sends(), ["send:waits"]);
 });

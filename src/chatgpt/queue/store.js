@@ -1,5 +1,5 @@
 const DB_NAME = "ghostship-chatgpt-queue";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 /** Account the legacy (version 1) queues were stored without; the first account that opens the conversation claims them. */
 export const LEGACY_ACCOUNT = "unknown";
@@ -50,6 +50,8 @@ export function migrateLegacy(items, legacyQueues, now) {
       }
       merge.push(row);
     }
+    // Pausing is gone: a queue that was paused stays held (Retry lifts it) instead of sending on its own.
+    if (paused.get(conversationId) && merge.length) needsDecision ??= "legacy-paused";
     if (uncertain) {
       out.inflight.push({
         key,
@@ -90,7 +92,6 @@ export function migrateLegacy(items, legacyQueues, now) {
         ops: [],
       });
     }
-    if (paused.get(conversationId) && (merge.length || uncertain)) out.state.push({ key, paused: true, editBy: null, editUntil: 0 });
   }
   return out;
 }
@@ -99,11 +100,36 @@ function legacyError(code, lost, now) {
   if (code === "attachments-not-restorable") {
     return { code, message: `Cannot restore ${lost.map((a) => a.name).join(", ")}.`, action: "Reattach the files, then retry.", at: now };
   }
+  if (code === "legacy-paused") {
+    return { code, message: "This queue was paused before the queue was upgraded, so it is held.", action: "Press Retry to let it send.", at: now };
+  }
   return {
     code,
     message: "Some of these messages needed a decision before the queue was upgraded (a failed, blocked or uncertain send).",
     action: "Read the combined text, edit it if needed, then press Retry.",
     at: now,
+  };
+}
+
+/** The pending record `record`, blocked so that only an explicit Retry lets it send. */
+const heldRecord = (record, now) => ({ ...record, status: "blocked", version: record.version + 1, updatedAt: now, lastError: legacyError("legacy-paused", [], now) });
+
+/**
+ * Version 2 stored a per-conversation `paused` flag in `state` that the engine no longer reads, so a paused queue
+ * would send on its own once its conversation is idle. Inside the upgrade transaction every paused queue's pending
+ * prompt becomes a blocked one (Retry lifts it) and the flag is cleared.
+ */
+function holdPausedQueues(tx, now) {
+  const states = tx.objectStore("state").getAll();
+  states.onsuccess = () => {
+    for (const state of states.result) {
+      if (state.paused !== true) continue;
+      tx.objectStore("state").put({ ...state, paused: false });
+      const pending = tx.objectStore("pending").get(state.key);
+      pending.onsuccess = () => {
+        if (pending.result && pending.result.status === "pending") tx.objectStore("pending").put(heldRecord(pending.result, now));
+      };
+    }
   };
 }
 
@@ -133,7 +159,7 @@ export class Tx {
     return request(this.#tx.objectStore("inflight").delete(key));
   }
   async getState(key) {
-    return (await request(this.#tx.objectStore("state").get(key))) ?? { key, paused: false, editBy: null, editUntil: 0 };
+    return (await request(this.#tx.objectStore("state").get(key))) ?? { key, editBy: null, editUntil: 0 };
   }
   putState(state) {
     return request(this.#tx.objectStore("state").put(state));
@@ -146,6 +172,12 @@ export class Tx {
   }
   deleteLease(key) {
     return request(this.#tx.objectStore("locks").delete(key));
+  }
+  allPending() {
+    return request(this.#tx.objectStore("pending").getAll());
+  }
+  allInflight() {
+    return request(this.#tx.objectStore("inflight").getAll());
   }
   pendingOf(conversationId) {
     return request(this.#tx.objectStore("pending").index("conversationId").getAll(conversationId));
@@ -173,6 +205,11 @@ export class QueueStore {
     open.onupgradeneeded = (event) => {
       const db = open.result;
       const tx = open.transaction;
+      if (event.oldVersion >= 2) {
+        // Version 2 -> 3: pausing is gone, and a prompt whose queue was paused must stay held until Retry.
+        holdPausedQueues(tx, now());
+        return;
+      }
       const pending = db.createObjectStore("pending", { keyPath: "key" });
       pending.createIndex("conversationId", "conversationId");
       const inflight = db.createObjectStore("inflight", { keyPath: "key" });
@@ -180,14 +217,14 @@ export class QueueStore {
       db.createObjectStore("state", { keyPath: "key" });
       db.createObjectStore("locks", { keyPath: "key" });
       if (event.oldVersion < 1) return;
-      // Version 1 -> 2: fold the per-message rows into accumulators inside the upgrade transaction.
+      // Version 1 -> 3: fold the per-message rows into accumulators inside the upgrade transaction.
       const rows = tx.objectStore("items").getAll();
       const queues = tx.objectStore("queues").getAll();
       queues.onsuccess = () => {
         const migrated = migrateLegacy(rows.result, queues.result, now());
         for (const record of migrated.pending) tx.objectStore("pending").put(record);
         for (const record of migrated.inflight) tx.objectStore("inflight").put(record);
-        for (const record of migrated.state) tx.objectStore("state").put(record);
+        for (const record of migrated.state) tx.objectStore("state").put({ ...record, paused: false });
         db.deleteObjectStore("queues");
         db.deleteObjectStore("leases");
       };

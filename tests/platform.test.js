@@ -70,6 +70,19 @@ test("no unsanctioned traffic: only the live dispatcher, the load-error recovery
   assert.doesNotMatch(thinkingCode, /sendButton|stopButton|steerButton|composer/i);
 });
 
+test("background timing: a Worker exists only in core/worker-timer.js, as a Blob of a few timer lines with no network and no page data", () => {
+  const owner = path.join("src", "core", "worker-timer.js");
+  for (const file of walk(path.join(root, "src")).filter((f) => f.endsWith(".js"))) {
+    const rel = path.relative(root, file);
+    const text = readFileSync(file, "utf8").replace(/\/\/.*$/gm, "");
+    if (rel !== owner) assert.doesNotMatch(text, /\bnew\s+(win\.|window\.)?(Shared)?Worker\b|\bServiceWorker\b|importScripts/, `${rel} starts a worker`);
+  }
+  const code = readFileSync(path.join(root, owner), "utf8");
+  const source = code.match(/const SOURCE = `([\s\S]*?)`;/)?.[1] ?? "";
+  assert.ok(source.length > 0 && source.length < 600, "the worker body is a few lines");
+  assert.doesNotMatch(source, /\b(fetch|XMLHttpRequest|WebSocket|importScripts|self\.|document|location)\b/);
+});
+
 test("public repo hygiene: no emails, home paths or token-shaped strings in tracked files", () => {
   const files = execFileSync("git", ["ls-files", "-co", "--exclude-standard"], { cwd: root, encoding: "utf8" })
     .split("\n").filter((f) => f && f !== "package-lock.json" && f !== "tests/platform.test.js");

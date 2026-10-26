@@ -272,7 +272,7 @@ test("fail open at runtime when the markup stops matching, restoring everything"
   const v = mount(fx);
   await fx.settle();
   assert.equal(v.active, true);
-  fx.elements().forEach((e) => e.removeAttribute("data-testid"));
+  fx.doc.querySelectorAll("[data-testid],[data-message-author-role]").forEach((e) => { e.removeAttribute("data-testid"); e.removeAttribute("data-message-author-role"); }); // no turn marker and no message role: the markup really stops matching
   fx.thread.append(fx.doc.createElement("div"));
   await fx.settle();
   assert.equal(v.runtime.mode, "safe");

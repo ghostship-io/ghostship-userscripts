@@ -151,26 +151,17 @@ test("an abandoned edit session expires, so a closed tab cannot freeze the queue
   assert.equal((await engine.step(A)).kind, "sent");
 });
 
-test("Delete removes the whole prompt and nothing is sent; Pause holds automatic dispatch but not an explicit Steer", async () => {
-  // Defect: delete leaving text behind; pause ignored; pause also blocking the user's own Steer.
+test("Delete removes the whole prompt and nothing is sent", async () => {
+  // Defect: delete leaving text behind.
   const w = new World();
   const { engine } = await w.tab("t1");
   await engine.append(A, { text: "a" });
   await engine.append(A, { text: "b" });
-  await engine.pause(A);
-  assert.deepEqual(await engine.step(A), { kind: "paused" });
-  assert.equal(w.dispatcher.log.length, 0);
   assert.equal((await engine.remove(A)).kind, "removed");
   assert.equal(await pendingOf(engine, A), null);
   assert.equal((await engine.remove(A)).kind, "none");
-  await engine.resume(A);
   assert.equal((await engine.step(A)).kind, "idle");
   assert.equal(w.dispatcher.log.length, 0);
-
-  await engine.append(A, { text: "c" });
-  await engine.pause(A);
-  assert.equal((await engine.steer(A, { native: false })).kind, "sent", "an explicit action works while paused");
-  assert.equal(submits(w).length, 1);
 });
 
 test("passive completion sends the whole merged text once, only when native Send is available", async () => {
@@ -375,18 +366,16 @@ test("reload mid-send: the restarted tab quarantines the unreported send and res
   assert.equal(submits(w).length, 1);
 });
 
-test("each account + conversation has its own prompt, paused flag and edit session; a send carries its own destination", async () => {
+test("each account + conversation has its own prompt and edit session; a send carries its own destination", async () => {
   // Defect: A's text showing up in, or being sent to, B (or to the same conversation id of another account).
   const w = new World();
   const { engine } = await w.tab("t1");
   await engine.append(A, { text: "for A" });
   await engine.append(B, { text: "for B" });
   await engine.append(OTHER_ACCOUNT, { text: "for the other account" });
-  await engine.pause(B);
   await engine.beginEdit(OTHER_ACCOUNT);
   assert.equal(await textOf(engine, A), "for A");
   assert.equal(await textOf(engine, B), "for B");
-  assert.equal((await engine.step(B)).kind, "paused");
   assert.equal((await engine.step(OTHER_ACCOUNT)).kind, "waiting");
   assert.equal((await engine.step(A)).kind, "sent");
   assert.deepEqual(submits(w).map((e) => [e.request.accountId, e.request.conversationId, e.request.text]), [["acct-1", "conv-A", "for A"]]);
@@ -527,7 +516,7 @@ test("a legacy record from before accounts is taken over once by the first accou
   assert.equal(await engine.adoptLegacy(A), 0);
 });
 
-test("a prompt held for a transient reason can still be paused, steered and retried; only unrestorable files keep Steer refused", async () => {
+test("a prompt held for a transient reason can still be steered and retried; only unrestorable files keep Steer refused", async () => {
   // Defect: a Blocked prompt that nothing but a reload could clear.
   const w = new World();
   const { engine } = await w.tab("t1");
@@ -536,12 +525,32 @@ test("a prompt held for a transient reason can still be paused, steered and retr
   assert.equal((await engine.step(A)).kind, "rejected");
   assert.equal((await engine.view(A)).pending.status, "blocked");
   assert.equal((await engine.step(A)).kind, "halted", "automatic dispatch stays off");
-  await engine.pause(A);
-  await engine.resume(A);
   assert.equal((await engine.steer(A, { native: false })).kind, "sent", "an explicit Steer is the user's decision");
   assert.equal(submits(w).length, 2);
 
   await engine.append(A, { text: "files", attachments: [{ name: "f", size: 1, type: "", restorable: false }] });
   assert.equal((await engine.steer(A, { native: false })).kind, "halted");
   assert.equal(submits(w).length, 2);
+});
+
+test("queuedConversations lists this account's conversations with a prompt or an unresolved send, nothing of another account, nothing sent", async () => {
+  // Defect: a sidebar pencil on a conversation that holds nothing, or on another account's conversation.
+  const w = new World();
+  const { engine } = await w.tab("t1");
+  const theirs = { accountId: "acct-2", conversationId: "conv-X" };
+  assert.deepEqual([...(await engine.queuedConversations(A.accountId))], []);
+  await engine.append(A, { text: "a" });
+  await engine.append(B, { text: "b" });
+  await engine.append(theirs, { text: "x" });
+  assert.deepEqual([...(await engine.queuedConversations(A.accountId))].sort(), ["conv-A", "conv-B"]);
+  assert.deepEqual([...(await engine.queuedConversations("acct-2"))], ["conv-X"]);
+  await engine.remove(B);
+  assert.deepEqual([...(await engine.queuedConversations(A.accountId))], ["conv-A"]);
+  assert.equal((await engine.step(A)).kind, "sent");
+  w.dispatcher.state = "generating";
+  w.dispatcher.submitScript = [{ kind: "uncertain", code: "submit-unacknowledged", message: "x" }];
+  await engine.append(A, { text: "again" });
+  w.dispatcher.finishGeneration();
+  await engine.step(A);
+  assert.deepEqual([...(await engine.queuedConversations(A.accountId))], ["conv-A"], "an unresolved send still marks its conversation");
 });

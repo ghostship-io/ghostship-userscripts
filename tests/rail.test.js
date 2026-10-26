@@ -284,7 +284,7 @@ test("fail-open removes the rail; dispose leaves the DOM as it was", async () =>
   const fx2 = createFixture({ turns: 20, width: 1600 });
   mount(fx2);
   await fx2.settle();
-  fx2.elements().forEach((e) => e.removeAttribute("data-testid"));
+  fx2.doc.querySelectorAll("[data-testid],[data-message-author-role]").forEach((e) => { e.removeAttribute("data-testid"); e.removeAttribute("data-message-author-role"); }); // no turn marker and no message role: the markup really stops matching
   fx2.thread.append(fx2.doc.createElement("div"));
   await fx2.settle();
   assert.equal(fx2.doc.querySelector(".gs-panel"), null);

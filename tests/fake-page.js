@@ -6,7 +6,7 @@ import { loadFixture } from "./helpers.js";
 
 export const TARGET = { accountId: "unknown", conversationId: "fixture" };
 
-export async function fakePage({ editable = "textarea", acknowledges = true, stopWorks = true, steer = false, sendOnlyWithText = false, sendMissing = false, profile = null } = {}) {
+export async function fakePage({ editable = "textarea", acknowledges = true, stopWorks = true, steer = false, sendOnlyWithText = false, sendMissing = false, profile = null, sendLabel = false, armMs = 0, sendViaSubmit = false } = {}) {
   const dom = await loadFixture();
   const { window } = dom;
   const doc = window.document;
@@ -88,7 +88,9 @@ export async function fakePage({ editable = "textarea", acknowledges = true, sto
   const button = (testid, onClick) => {
     const b = doc.createElement("button");
     b.type = "button";
-    b.setAttribute("data-testid", testid);
+    // ChatGPT's current composer has no test ids: Send is the form's submit button labelled "Send".
+    if (sendLabel && testid === "send-button") (b.setAttribute("type", "submit"), b.setAttribute("aria-label", "Send"));
+    else b.setAttribute("data-testid", testid);
     b.addEventListener("click", onClick);
     form.append(b);
     return b;
@@ -130,20 +132,48 @@ export async function fakePage({ editable = "textarea", acknowledges = true, sto
     if (!sendOnlyWithText || text().trim() !== "") page.mountSend();
     addTurn("assistant", "reply");
   };
+  if (sendViaSubmit) form.addEventListener("submit", () => page.act?.());
   page.mountSend = () => {
-    page.send = button("send-button", () => {
+    const mountedAt = Date.now();
+    const act = () => {
       if (page.send.disabled) return;
+      if (Date.now() - mountedAt < armMs) return page.log.push("ignored-click"); // ChatGPT's handler is not wired to the new state yet
       page.log.push(`send:${text().trim()}`);
       if (!acknowledges) return;
       addTurn("user", text().trim());
       clear();
       page.startStreaming();
+    };
+    // `sendViaSubmit`: the click only submits the form and the page acts on the submit event, as ChatGPT's own handler does.
+    page.act = act;
+    page.send = button("send-button", () => {
+      if (!sendViaSubmit) return act();
+      form.dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
     });
     page.send.disabled = text().trim() === "";
   };
   if (sendMissing) page.mountSend = () => {}; // the page never shows a Send button
   input.addEventListener("input", sync);
   if (!sendOnlyWithText) page.mountSend();
+  // The conversation the active page says it holds (ChatGPT stamps its composer wrapper); null removes the stamp.
+  page.holds = (id) => {
+    form.parentElement.toggleAttribute("data-map-composer-conversation", id !== null);
+    if (id !== null) form.parentElement.setAttribute("data-map-composer-conversation", id);
+  };
+  // The sidebar: a nav of conversation rows (the link holds the title span), outside the page.
+  page.sidebar = (ids) => {
+    doc.querySelector("nav[data-fake-sidebar]")?.remove();
+    const nav = doc.createElement("nav");
+    nav.setAttribute("data-fake-sidebar", "");
+    for (const id of ids) {
+      const a = doc.createElement("a");
+      a.setAttribute("href", `/c/${id}`);
+      a.innerHTML = '<span data-thread-title="true">title</span>';
+      nav.append(a);
+    }
+    doc.body.prepend(nav);
+    return nav;
+  };
   page.sends = () => page.log.filter((e) => e.startsWith("send:"));
   page.io = createComposerIO(window);
   return page;

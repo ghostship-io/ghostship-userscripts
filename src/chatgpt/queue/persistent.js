@@ -9,6 +9,7 @@ export function persistentQueueUi(create) {
   let shared = null;
   const mount = (ctx) => {
     if (!shared?.mounted) shared = create(ctx);
+    else shared.wake?.(); // a route change or restart: the page behind the queue is new
     return { ...shared, dispose() {} };
   };
   mount.shutdown = () => {
